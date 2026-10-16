@@ -50,8 +50,8 @@ máx 2^31−1). Fatos descobertos no `dist/` do `rea-agents@6.5.0` — detalhes 
 ## 📐 P1 — Fase 1 (conteúdo da análise) — **em curso**
 
 Dividir por pergunta (o skill recomenda decompor em escopos independentes, com ledger de Evidence
-IDs). Cada item vira uma seção da spec técnica abstrata. **O binário está destravado** — só falta
-**P1.5** (ledger consolidado) para fechar a Fase 1.
+IDs). Cada item vira uma seção da spec técnica abstrata. **Fase 1 FECHADA** — P1.5 entregue; o
+próximo trabalho é a **Fase 2** (P2.1).
 
 - [x] **P1.1 — Estrutura de buffer** ✅ entregue: [`docs/analysis/buffer-structure.md`](analysis/buffer-structure.md).
       Achado: classe **`TextBuffer`** (facade, RTTI) delega a um objeto interno **anônimo** com
@@ -87,9 +87,12 @@ IDs). Cada item vira uma seção da spec técnica abstrata. **O binário está d
       **atlas `RGBA8` 1024/4096**; viewport = **data source + observers** com **`glScissor` por
       região danificada**; render na **main thread**. Ledger E1–E27. **Hipótese "Qt" refutada** e
       hipótese "Skia" **confirmada**.
-- [ ] **P1.5 — Ledger de evidências**: tabela `conclusão → Evidence ID → tipo → limites`
-      (consolidando os ledgers parciais já existentes em `docs/analysis/` — **todos** os docs da
-      Fase 1 têm ledger `E<n>`; **último item da Fase 1**; não depende de análise nova). ← **próximo**.
+- [x] **P1.5 — Ledger de evidências** ✅ entregue:
+      [`docs/analysis/evidence-index.md`](analysis/evidence-index.md). Achado: os 7 ledgers da Fase 1
+      somam **179 linhas** (sem lacuna de numeração), reunidas num único namespace
+      (`BUF-`/`CON-`/`PY-`/`HOST-`/`IPC-`/`REN-`/`PKG-`) com `conclusão → Evidence ID → tipo →
+      limites`; o índice registra **duplicatas/supersessões** (HOST-E20/E9 revisados; HOST-E21–E26 →
+      IPC-E1–E17/E22–E30) e **48 incógnitas** consolidadas. **Fase 1 fechada** → começa a **Fase 2**.
 - [x] **P1.6 — Modelo de empacotamento** ✅ entregue: [`docs/analysis/packaging.md`](analysis/packaging.md).
       Achado: namespace lógico **plano** — cada `<Nome>.sublime-package` é um **ZIP sem manifesto**
       exposto como `Packages/<Nome>/…`; a **extensão** define o papel; precedência **`User` >
@@ -100,7 +103,8 @@ IDs). Cada item vira uma seção da spec técnica abstrata. **O binário está d
 ## 📄 P2 — Fases 2 e 3 do projeto
 
 - [ ] **P2.1 — Fase 2:** escrever `docs/architecture/*.md` sintetizando os padrões (design patterns)
-      achados, **sem** copiar código do binário (princípio clean-room).
+      achados, **sem** copiar código do binário (princípio clean-room). ← **próximo** (insumo:
+      [`evidence-index.md`](analysis/evidence-index.md), 179 evidências + 48 incógnitas).
 - [ ] **P2.2 — Fase 3:** scaffold `src/` Electron + TypeScript:
       - [ ] `PieceTable`/`Rope` em TS (zero-copy/minimal-copy)
       - [ ] Worker Threads para operações de buffer e parsing pesado

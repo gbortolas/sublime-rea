@@ -288,7 +288,7 @@ independente + um **ledger de Evidence IDs** (conclusão → evidence ID → tip
 | 3 | **Como funciona a ponte IPC C++↔Python?** | P1.3 | ✅ concluído | [`docs/analysis/api-python.md`](docs/analysis/api-python.md) · [`docs/analysis/ipc-plugin-host.md`](docs/analysis/ipc-plugin-host.md) · [`docs/analysis/ipc-protocol.md`](docs/analysis/ipc-protocol.md) |
 | 4 | **Como é o pipeline de render?** GPU/OpenGL/Skia? Como o viewport é virtualizado? | P1.4 | ✅ concluído | [`docs/analysis/render-pipeline.md`](docs/analysis/render-pipeline.md) |
 | 5 | **Como o editor empacota e resolve recursos?** (`.sublime-package`, `.sublime-syntax`) | P1.6 | ✅ concluído | [`docs/analysis/packaging.md`](docs/analysis/packaging.md) |
-| 6 | **Consolidar o ledger de evidências** de tudo acima | P1.5 | ⬜ aberto | consolidar `docs/analysis/` |
+| 6 | **Consolidar o ledger de evidências** de tudo acima | P1.5 | ✅ concluído | [`docs/analysis/evidence-index.md`](docs/analysis/evidence-index.md) |
 
 **Pronto quando:** cada pergunta tem uma resposta escrita em `docs/analysis/` (ou em
 `docs/architecture/`, na Fase 2), com **evidência rastreável** (`arquivo:linha` ou evidence ID) e
@@ -296,10 +296,10 @@ com os **limites** da conclusão declarados. Conclusão sem evidência = hipóte
 marcada como tal.
 
 > 🧠 **Dica:** os itens **sem Ghidra** (baratos) já foram feitos — **P1.6** (empacotamento) e boa
-> parte do **P1.3** (Track A: API Python + IPC). Da Fase 1 **falta apenas o P1.5** (consolidar o
-> ledger de evidências num índice único `conclusão → Evidence ID → tipo → limites`) — não exige
-> análise nativa nova. Depois disso, a Fase 1 está fechada e começa a **Fase 2** (síntese em
-> `docs/architecture/`).
+> parte do **P1.3** (Track A: API Python + IPC). A **Fase 1 está fechada**: o **P1.5** consolidou
+> todas as 179 linhas de evidência num índice único `conclusão → Evidence ID → tipo → limites`
+> ([`docs/analysis/evidence-index.md`](docs/analysis/evidence-index.md)), **sem** análise nativa nova.
+> Agora começa a **Fase 2** (síntese em `docs/architecture/`).
 > Ferramenta de apoio: a skill `reverse-engineer-anything` (+ `references/native-and-artifacts.md`).
 
 ---
@@ -341,7 +341,7 @@ salvar, com as 7 caixas do topo desta página marcadas ✅). 🎉
 ## 📍 Onde estamos agora
 
 **Estado em uma linha:** ambiente ✅ · binário-alvo **100% analisável** ✅ ·
-Track A (API Python + IPC) ✅ · **Fase 1 quase fechada** (P1.1 ✅ · P1.2 ✅ · P1.3 ✅ · P1.4 ✅ · P1.6 ✅; falta P1.5).
+Track A (API Python + IPC) ✅ · **Fase 1 FECHADA** (P1.1 ✅ · P1.2 ✅ · P1.3 ✅ · P1.4 ✅ · **P1.5 ✅** · P1.6 ✅).
 
 | Frente | Status |
 |---|---|
@@ -352,9 +352,11 @@ Track A (API Python + IPC) ✅ · **Fase 1 quase fechada** (P1.1 ✅ · P1.2 ✅
 | **P1.2** — modelo de concorrência (threads/pools, GTK/GLib, handoff main↔bg) | ✅ (`docs/analysis/concurrency.md`) |
 | **P1.4** — pipeline de render (GTK3 + GL 4.1 instanciado / Skia-Cairo, atlas de glifos, scissor por damage) | ✅ (`docs/analysis/render-pipeline.md`) |
 | **P1.6** — empacotamento de recursos | ✅ (`docs/analysis/packaging.md`) |
+| **P1.5** — ledger de evidências consolidado | ✅ (`docs/analysis/evidence-index.md`: 179 linhas + 48 incógnitas) |
 | **P0.6** — deadline do Ghidra no MCP | ✅ resolvido (setup rodado; MCP relançado com a var) |
-| **Fase 1** — buffer, concorrência, IPC/opcodes, render | 🟡 quase fechada (P1.1 ✅ · P1.2 ✅ · P1.3 ✅ · P1.4 ✅ · P1.6 ✅; **falta P1.5** ledger consolidado) |
-| **Fases 2 e 3** — spec abstrata e o editor em si | ⬜ não começaram |
+| **Fase 1** — buffer, concorrência, IPC/opcodes, render, empacotamento, ledger | ✅ **fechada** (P1.1 ✅ · P1.2 ✅ · P1.3 ✅ · P1.4 ✅ · P1.5 ✅ · P1.6 ✅) |
+| **Fase 2** — spec abstrata (`docs/architecture/`) | ⬜ não começou (**próximo**: P2.1) |
+| **Fase 3** — o editor em Electron/TS (`src/`) | ⬜ não começou |
 
 > 🔄 **Fontes vivas:** [`docs/HANDOFF.md`](docs/HANDOFF.md) (como retomar, pegadinhas operacionais) e
 > [`docs/BACKLOG.md`](docs/BACKLOG.md) (fases P0/P1/P2/P3 e status de cada item). Este README é um
@@ -377,6 +379,7 @@ Track A (API Python + IPC) ✅ · **Fase 1 quase fechada** (P1.1 ✅ · P1.2 ✅
 | [`docs/analysis/packaging.md`](docs/analysis/packaging.md) | Evidência — **empacotamento de recursos**: `.sublime-package` (ZIP sem manifesto), resolução de caminho lógico |
 | [`docs/analysis/concurrency.md`](docs/analysis/concurrency.md) | Evidência — **modelo de concorrência**: main thread GTK/GLib, fábrica de threads POSIX, pools (`io_worker`/`file_read_thread`), scheduler de retorno ao main thread, ledger `E1–E21` |
 | [`docs/analysis/render-pipeline.md`](docs/analysis/render-pipeline.md) | Evidência — **pipeline de render**: `px_render_context` (31 virtuais) + backends `gl_render_context` (OpenGL 4.1, 17 programas, instâncias em texture buffer `RGBA32F`) e `skia_render_context` (Skia raster sobre Cairo); atlas de glifos; `glScissor` por damage; ledger `E1–E27` |
+| [`docs/analysis/evidence-index.md`](docs/analysis/evidence-index.md) | **Índice consolidado de evidências (P1.5)**: as **179 linhas** dos 7 ledgers da Fase 1 num único namespace (`BUF-`/`CON-`/`PY-`/`HOST-`/`IPC-`/`REN-`/`PKG-`), com `conclusão → Evidence ID → tipo → limites`, duplicatas/supersessões e **48 incógnitas** consolidadas |
 | [`bin/ghidra-preanalyze.sh`](bin/ghidra-preanalyze.sh) | Pré-análise headless em projeto persistente (sem deadline) — o "reprocessar sem reanalisar" |
 | [`setup/versions.env`](setup/versions.env) | Versões, URLs e SHA-256 **pinados** (fonte única de verdade do setup) |
 

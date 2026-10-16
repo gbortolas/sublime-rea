@@ -15,8 +15,9 @@
 
 **Estado em uma linha:** ambiente ✅ · binário-alvo **100% analisável** ✅ · Track A (API Python +
 IPC) ✅ · **P1.1 buffer** ✅ · **P1.2 concorrência** ✅ · **P1.3 IPC (framing + opcodes)** ✅ ·
-**P1.4 render** ✅ · **P1.6 empacotamento** ✅ · **P0.6 (MCP)** ✅ · **P3.9 (`JAVA_HOME` no `env.sh`)** ✅ ·
-**falta** P1.5 (ledger consolidado), a Fase 2 (síntese) e a Fase 3 (o editor em Electron/TS).
+**P1.4 render** ✅ · **P1.5 ledger consolidado** ✅ · **P1.6 empacotamento** ✅ · **P0.6 (MCP)** ✅ ·
+**P3.9 (`JAVA_HOME` no `env.sh`)** ✅ · **FASE 1 FECHADA** — **falta** a Fase 2 (síntese) e a Fase 3
+(o editor em Electron/TS).
 
 **✅ Passo operacional resolvido (2026-10-16).** O `setup.py` foi rodado e o MCP `rea` foi relançado
 **já com `REA_GHIDRA_STARTUP_TIMEOUT_MS=900000`** (confirmado em `/proc/*/environ`) — **não** é mais
@@ -30,10 +31,11 @@ python3 setup/setup.py        # idempotente: reescreve setup/env.sh + environmen
 Sem o deadline maior, `open_binary`/`analyze` **via MCP** volta a estourar os 330 s (a análise leva
 ~355 s).
 
-**Próxima tarefa recomendada:** **P1.5 — ledger de evidências consolidado** (último item da Fase 1):
-todos os `docs/analysis/*.md` já têm ledger `E<n>`; consolidar num índice único
-`conclusão → Evidence ID → tipo → limites` **não depende de análise nova** (barato, só leitura de
-docs). Com o P1.5 fechado, a Fase 1 termina e começa a **Fase 2** (P2.1 — `docs/architecture/*.md`).
+**Próxima tarefa recomendada:** **P2.1 — Fase 2 (síntese)**: escrever `docs/architecture/*.md`
+traduzindo os padrões arquiteturais em **spec abstrata** (o "o quê", não o "como" do alvo), **sem**
+copiar código do binário. Insumo pronto: [`docs/analysis/evidence-index.md`](analysis/evidence-index.md)
+— **179 evidências** com tipo/limites e **48 incógnitas** consolidadas (cada incógnita já traz "o que
+fecharia"). A Fase 1 está **fechada**; a Fase 2 é de **redação/síntese**, não de análise nativa nova.
 
 > ✅ **Pegadinha resolvida (2026-10-16, P3.9):** o `setup.py` agora **detecta** um JDK ≥ 21
 > compatível (`JAVA_HOME`, PATH, sdkman, `/usr/lib/jvm`) e escreve um **`export JAVA_HOME=…` ativo**
@@ -275,6 +277,19 @@ como **atlas de glifos `RGBA8` 1024/4096** (`glTexSubImage2D`, BGRA). Viewport =
 Falha ao iniciar GL = **diálogo modal**, não fallback silencioso. `[DESCONHECIDO]`: função exata do
 range de linhas visíveis, política de flush do batch, queda automática para software após falha de GL,
 formato de pixel/sRGB.
+
+### P1.5 — ledger de evidências consolidado (Fase 1)
+
+[`docs/analysis/evidence-index.md`](analysis/evidence-index.md) (422 linhas): reuniu os **7 ledgers**
+da Fase 1 num único índice navegável por namespace — `BUF-` (14) · `CON-` (21) · `PY-` (33) ·
+`HOST-` (26) · `IPC-` (36) · `REN-` (27) · `PKG-` (22) = **179 linhas**, sem lacuna de numeração —
+com as colunas **`conclusão → Evidence ID → tipo → limites`** (IDs originais preservados; fontes
+heterogêneas normalizadas: `ipc-plugin-host.md` não usava prefixo `E`; `render-pipeline.md` põe
+"fonte" antes de "conclusão"; confiança → `limites`). Registra **duplicatas/supersessões** por
+citação explícita (HOST-E21–E26 → IPC-E1–E17/E22–E30; **HOST-E20** revisada quanto à direção dos
+canais; **HOST-E9** revisada — enum numérico) e **48 incógnitas** consolidadas (`PY-U*` 10, `BUF-U*` 5,
+`CON-U*` 6, `HOST-U*` 6, `IPC-U*` 6, `REN-U*` 6, `PKG-U*` 9), cada uma com "o que fecharia". É o
+**insumo direto da Fase 2**. Método: extração mecânica, **sem** análise nativa nova.
 
 ---
 
