@@ -1305,12 +1305,34 @@ def step_doctor(ctx: Ctx, ui: UI, rea_cmd: list[str]) -> None:
             stderr=stderr,
         ) from exc
 
-    if data.get("environment_healthy"):
-        ui.ok("rea doctor: ambiente OK (environment_healthy: true)")
-        ui.mark(9, "ok", "environment_healthy: true")
+    # Gate no campo ESCOPADO ('healthy'): veredito do que foi pedido
+    # (--client opencode --provider ghidra). 'environment_healthy' é um flag
+    # GLOBAL que inclui 'informational_checks' (engines opcionais hopper/ida/jadx
+    # e registro em outros clients), então é false em qualquer máquina real.
+    if data.get("healthy"):
+        ui.ok("rea doctor: ambiente OK (healthy: true)")
+
+        informational = [
+            check
+            for check in data.get("informational_checks", [])
+            if not check.get("ok", True)
+        ]
+        if informational:
+            ui.warn(
+                f"rea doctor: {len(informational)} checagem(ns) informacional(is) fora do escopo "
+                "(engines opcionais e/ou registro em outros clients) — AVISO, "
+                "não afeta o veredito"
+            )
+            for check in informational:
+                name = check.get("name", "?")
+                cls = check.get("classification", "")
+                detail = check.get("detail") or check.get("remediation") or ""
+                ui.warn(f"opcional (esperado): {name} [{cls}]: {detail}")
+
+        ui.mark(9, "ok", "healthy: true")
         return
 
-    reasons = ["environment_healthy: false"]
+    reasons = ["healthy: false"]
     for check in data.get("scope_checks", []):
         if check.get("ok", True):
             continue
@@ -1320,7 +1342,7 @@ def step_doctor(ctx: Ctx, ui: UI, rea_cmd: list[str]) -> None:
         reasons.append(f"{name} [{cls}]: {detail}")
     raise SetupFailure(
         1,
-        "rea doctor: environment_healthy: false",
+        "rea doctor: healthy: false",
         reasons,
         stderr=stderr,
     )

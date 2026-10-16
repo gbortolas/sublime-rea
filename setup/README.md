@@ -109,14 +109,21 @@ colaterais" inclui **não** criar o `setup/.venv`.
 8. **MCP** — `rea setup --client opencode --yes` (repassa `--dry-run`).
 9. **Verificação** — roda `rea doctor --client opencode --provider ghidra --format json`,
    **tolera ruído** (`npx`/avisos) antes do JSON (extrai o último objeto JSON do stdout)
-   e **falha com exit != 0** se `environment_healthy: false`, mostrando os motivos.
+   e **falha com exit != 0** se o campo **escopado `healthy`** for `false`, mostrando os
+   motivos (`scope_checks` com `ok: false`).
+   O gate **não** usa `environment_healthy`: esse é um flag **global** que inclui
+   `informational_checks` (engines opcionais — hopper/ida/jadx — e registro em **outros**
+   clients: `claude_code`, `dsh`, `hermes`, `omp`, `pi`, `vscode`, `windsurf`) e por isso é
+   `false` em praticamente qualquer máquina. Quando `healthy` é `true`, essas pendências
+   informacionais são impressas apenas como **avisos** (não contam como erro nem mudam o
+   exit code).
 
 ### Códigos de saída
 
 | Código | Significado |
 |---|---|
 | `0` | Sucesso (em `--dry-run`, nenhum efeito colateral). |
-| `1` | `rea doctor` não saudável ou erro inesperado. |
+| `1` | `rea doctor` com `healthy: false` (escopo pedido não saudável) ou erro inesperado. |
 | `2` | Uso/config: `versions.env` ausente, ilegível ou com pin faltando/**vazio** (`CHAVE=`). |
 | `3` | Ghidra: lock em uso, falha de download, SHA-256 divergente, extração inválida. |
 | `4` | Alvo: tarball ausente, `tar`/`xz` ausentes ou extração sem o binário ELF esperado. |
@@ -167,12 +174,15 @@ ls -l target/sublime_text/sublime_text                # ELF do alvo extraído
 ```
 
 O próprio `setup.py` já executa o gate do `rea doctor` no fim e retorna exit != 0
-quando `environment_healthy` for `false`.
+quando o campo escopado `healthy` for `false` (o campo global `environment_healthy`
+não é usado como gate — veja a etapa 9 acima).
 
 ## Troubleshooting
 
-- **`rea doctor` com `environment_healthy: false` por `ghidra`** — `GHIDRA_INSTALL_DIR`
+- **`rea doctor` com `healthy: false` por `ghidra`** — `GHIDRA_INSTALL_DIR`
   não está exportado na sessão. Rode `source setup/env.sh` (ou reabra o shell após `--write-rc`).
+  (Avisos de `environment_healthy`/`informational_checks` — engines opcionais e outros
+  clients — são **esperados** e não indicam problema.)
 - **SHA-256 do Ghidra divergente** — download corrompido/proxy. O script apaga o zip e
   rebaixa; se persistir, baixe manualmente de `GHIDRA_URL` e confira contra `versions.env`.
 - **`lock de instalação em uso`** — existe `$REA_TOOLS_DIR/.lock` (outra execução ou lock
