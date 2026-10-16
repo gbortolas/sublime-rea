@@ -113,16 +113,19 @@ colaterais" inclui **não** criar o `setup/.venv`.
    `unicorn`). Idempotente: se o venv já tem os pacotes nas versões exatas, **não
    reinstala** (valida importando e checando as versões). Exporta `REA_PWNTOOLS_PYTHON`
    para o processo.
-7. **`GHIDRA_INSTALL_DIR` / `REA_PWNTOOLS_PYTHON`** — (re)escreve **sempre** `setup/env.sh`
-   (com `REA_TOOLS_DIR`, `GHIDRA_INSTALL_DIR` e `REA_PWNTOOLS_PYTHON`); o `~/.bashrc` só
+7. **`GHIDRA_INSTALL_DIR` / `REA_PWNTOOLS_PYTHON` / `REA_GHIDRA_STARTUP_TIMEOUT_MS`** —
+   (re)escreve **sempre** `setup/env.sh`
+   (com `REA_TOOLS_DIR`, `GHIDRA_INSTALL_DIR`, `REA_PWNTOOLS_PYTHON` e
+   `REA_GHIDRA_STARTUP_TIMEOUT_MS`); o `~/.bashrc` só
    com `--write-rc`, num bloco idempotente (não duplica se o bloco já existir).
 8. **Alvo** — extrai `bin/sublime_text_build_4215_x64.tar.xz` **num diretório temporário**
    e só então faz o `mv` para `target/` (extração atômica: um `tar` interrompido não
    sobrescreve o alvo válido). Valida o binário (`target/sublime_text/sublime_text`):
    tamanho > 1 MiB e magic **ELF** (`\x7fELF`). Idempotente por essa validação.
 9. **MCP** — `rea setup --client opencode --yes` (repassa `--dry-run`) e, em seguida,
-   garante `REA_PWNTOOLS_PYTHON` no bloco `environment` do servidor `rea` do
-   `opencode.jsonc`: o `rea setup` **não** propaga essa variável sozinho (o provider
+   garante `REA_PWNTOOLS_PYTHON` e `REA_GHIDRA_STARTUP_TIMEOUT_MS` no bloco `environment`
+   do servidor `rea` do
+   `opencode.jsonc`: o `rea setup` **não** propaga essas variáveis sozinho (o provider
    offline não expõe `registrationEnvironment`), então o script faz uma edição
    **cirúrgica** por texto (com backup `.bak` e validação do JSON), que o `rea setup`
    passa a **preservar** nas execuções seguintes.
@@ -158,6 +161,7 @@ colaterais" inclui **não** criar o `setup/.venv`.
 | `GHIDRA_INSTALL_DIR` | `$REA_TOOLS_DIR/ghidra_12.1.4_PUBLIC` | Diretório do Ghidra extraído; exportado para o REA. |
 | `REA_PWNTOOLS_PYTHON` | `$REA_TOOLS_DIR/pwntools-venv/bin/python` | Interpretador com `pwntools`/`pyelftools`/`unicorn` pinados; exportado para o REA e gravado no registro MCP. |
 | `REA_PWNTOOLS_VENV_DIRNAME` | `pwntools-venv` | Nome do subdiretório do venv (pin em `versions.env`). |
+| `REA_GHIDRA_STARTUP_TIMEOUT_MS` | `900000` (15 min) | Deadline em ms da auto-análise do provider Ghidra (o default do REA é `330000`; neste alvo a análise mede ~334 s). Exportado no `env.sh` e gravado no registro MCP. |
 | `PWNTOOLS_VERSION` / `PYELFTOOLS_VERSION` / `UNICORN_VERSION` | `4.15.0` / `0.33` / `2.1.2` | Versões exigidas pelo provider offline `pwntools-elf` (pin em `versions.env`). |
 
 Para persistir em novas sessões: `source setup/env.sh` (ou use `--write-rc` uma vez).

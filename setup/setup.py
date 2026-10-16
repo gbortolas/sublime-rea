@@ -1382,22 +1382,34 @@ RC_MARKER = "sublime-rea setup"
 
 
 def step_env(ctx: Ctx, ui: UI, write_rc: bool) -> None:
-    ui.step(7, "Variáveis de ambiente (GHIDRA_INSTALL_DIR, REA_PWNTOOLS_PYTHON)")
+    ui.step(
+        7,
+        f"Variáveis de ambiente (GHIDRA_INSTALL_DIR, {OPENCODE_PWNTOOLS_KEY}, "
+        f"{GHIDRA_STARTUP_TIMEOUT_KEY})",
+    )
+    # O env do usuário tem precedência sobre os defaults (ver _ghidra_startup_timeout_ms).
+    startup_timeout_ms = _ghidra_startup_timeout_ms(ui)
     os.environ["GHIDRA_INSTALL_DIR"] = str(ctx.ghidra_install_dir)
     os.environ["REA_TOOLS_DIR"] = str(ctx.rea_tools_dir)
     os.environ["REA_PWNTOOLS_PYTHON"] = str(ctx.pwntools_python)
+    os.environ[GHIDRA_STARTUP_TIMEOUT_KEY] = startup_timeout_ms
     ui.info(f"GHIDRA_INSTALL_DIR={ctx.ghidra_install_dir}")
-    ui.info(f"REA_PWNTOOLS_PYTHON={ctx.pwntools_python}")
+    ui.info(f"{OPENCODE_PWNTOOLS_KEY}={ctx.pwntools_python}")
+    ui.info(f"{GHIDRA_STARTUP_TIMEOUT_KEY}={startup_timeout_ms} (deadline do provider Ghidra)")
 
     if ui.dry_run:
         ui.show(f"escrever {ENV_FILE} (atômico: temp + rename)")
     else:
+        # `env.sh` é reescrito inteiro (temp + rename), então é idempotente por construção:
+        # reexecutar não duplica linhas. O `~/.bashrc` usa o RC_MARKER abaixo pelo mesmo motivo.
         _write_atomic(
             ENV_FILE,
             "# Gerado por setup/setup.py — 'source' este arquivo para exportar o ambiente do sublime-rea.\n"
             f'export REA_TOOLS_DIR="{ctx.rea_tools_dir}"\n'
             f'export GHIDRA_INSTALL_DIR="{ctx.ghidra_install_dir}"\n'
-            f'export REA_PWNTOOLS_PYTHON="{ctx.pwntools_python}"\n'
+            f'export {OPENCODE_PWNTOOLS_KEY}="{ctx.pwntools_python}"\n'
+            f'export {GHIDRA_STARTUP_TIMEOUT_KEY}="{startup_timeout_ms}"  '
+            f"# deadline (ms) do provider Ghidra; aumente p/ alvos com auto-análise longa\n"
             f'# export JAVA_HOME="/caminho/do/jdk-{ctx.ghidra_jdk_min}"  '
             "# descomente se precisar forçar um JDK\n",
         )
@@ -1508,9 +1520,45 @@ def _target_bin_valid(path: Path) -> bool:
 
 
 # ---------------------------------------------------------------------------
-# Etapa 9 — registrar MCP no opencode (rea setup) + propagar REA_PWNTOOLS_PYTHON
+# Etapa 9 — registrar MCP no opencode (rea setup) + propagar env do REA
 # ---------------------------------------------------------------------------
 OPENCODE_PWNTOOLS_KEY = "REA_PWNTOOLS_PYTHON"
+# Deadline (ms) da auto-análise do provider Ghidra quando o REA sobe o target.
+# O default do REA é 330000 ms (330 s) e ESTE alvo mede ~342 s no headless (auto-análise:
+# 334 s) — ou seja, estourava o default por 4 s (!) e o resultado era descartado.
+GHIDRA_STARTUP_TIMEOUT_KEY = "REA_GHIDRA_STARTUP_TIMEOUT_MS"
+DEFAULT_GHIDRA_STARTUP_TIMEOUT_MS = "900000"  # 15 min (~2,6× o medido)
+
+
+# O REA valida esse valor com ``^[1-9]\d*$`` limitado a int32
+# (rea-agents/dist/config/providerStartupTimeout.js:14-17). Um typo propagado para o
+# ``env.sh`` E para o ``environment`` do MCP faz o zod lançar no boot do servidor `rea` —
+# derrubando TODAS as tools REA. Então validamos aqui e caímos no default.
+GHIDRA_STARTUP_TIMEOUT_MAX_MS = 2147483647
+
+
+def _ghidra_startup_timeout_ms(ui: UI | None = None) -> str:
+    """Valor a gravar: ``REA_GHIDRA_STARTUP_TIMEOUT_MS`` do ambiente, senão o default.
+
+    É o override disponível ao usuário — ex.:
+    ``REA_GHIDRA_STARTUP_TIMEOUT_MS=7200000 python3 setup/setup.py``.
+
+    Valor inválido (mesmo contrato do REA: ``^[1-9]\\d*$``, ``1..2147483647``) não é
+    propagado: com ``ui``, avisa e devolve o default (nunca levanta exceção).
+    """
+    raw = os.environ.get(GHIDRA_STARTUP_TIMEOUT_KEY)
+    if not raw:
+        return DEFAULT_GHIDRA_STARTUP_TIMEOUT_MS
+    if re.fullmatch(r"[1-9]\d*", raw) and int(raw) <= GHIDRA_STARTUP_TIMEOUT_MAX_MS:
+        return raw
+    if ui is not None:
+        ui.warn(
+            f"{GHIDRA_STARTUP_TIMEOUT_KEY}={raw!r} inválido (esperado inteiro positivo "
+            f"até {GHIDRA_STARTUP_TIMEOUT_MAX_MS}, igual ao REA); usando o default "
+            f"{DEFAULT_GHIDRA_STARTUP_TIMEOUT_MS}"
+        )
+    return DEFAULT_GHIDRA_STARTUP_TIMEOUT_MS
+
 
 # Casamento de chaves JSON/JSONC: "chave" seguida de ':'.
 _JSONC_KEY_RE = re.compile(r'"((?:[^"\\]|\\.)*)"\s*:')
@@ -1579,45 +1627,69 @@ def _line_indent(text: str, index: int) -> str:
     return text[line_start:end]
 
 
+def _jsonc_line_comment_start(line: str) -> int | None:
+    """Índice do ``//`` de um comentário de linha (fora de string), ou ``None``."""
+    in_str = False
+    esc = False
+    for i, char in enumerate(line):
+        if in_str:
+            if esc:
+                esc = False
+            elif char == "\\":
+                esc = True
+            elif char == '"':
+                in_str = False
+            continue
+        if char == '"':
+            in_str = True
+        elif char == "/" and line[i : i + 2] == "//":
+            return i
+    return None
+
+
 def _jsonc_env_value_span(
-    text: str, env_open: int, env_close: int
-) -> tuple[int, int, str] | None:
-    """Span ``(start``, ``end``, ``valor)`` do nosso key dentro do objeto ``environment``."""
+    text: str, env_open: int, env_close: int, key: str
+) -> tuple[int, int, object] | None:
+    """Span ``(start``, ``end``, ``valor)`` do key ``key`` dentro do objeto ``environment``.
+
+    Aceita valor de **qualquer tipo JSON/JSONC** (string, número, ``true``/``false``/``null``):
+    um ``"K": 900000`` (número — plausível para um ``*_MS``) precisa ser reconhecido, senão
+    a inserção criaria uma **chave duplicada** no JSONC (o ``json.loads`` ficaria com a última
+    e o assert passaria, mas o arquivo sairia com a chave duas vezes).
+    """
+    decoder = json.JSONDecoder()
     for match in _JSONC_KEY_RE.finditer(text, env_open, env_close):
-        if match.group(1) != OPENCODE_PWNTOOLS_KEY:
+        if match.group(1) != key:
             continue
         i = match.end()
         while i < env_close and text[i] in " \t\r\n":
             i += 1
-        if i < env_close and text[i] == '"':
-            j = i + 1
-            esc = False
-            while j < env_close:
-                char = text[j]
-                if esc:
-                    esc = False
-                elif char == "\\":
-                    esc = True
-                elif char == '"':
-                    return i, j + 1, json.loads(text[i : j + 1])
-                j += 1
+        if i >= env_close:
+            continue
+        try:
+            value, end = decoder.raw_decode(text, i)
+        except ValueError:
+            continue
+        if end > env_close:
+            continue
+        return i, end, value
     return None
 
 
-def _jsonc_rea_env_value(text: str) -> str | None:
-    """Valor atual de ``mcp.servers.rea.environment.REA_PWNTOOLS_PYTHON`` (ou None)."""
+def _jsonc_rea_env_value(text: str, key: str) -> object | None:
+    """Valor atual de ``mcp.servers.rea.environment[key]`` (ou None)."""
     mcp = _jsonc_key_object(text, "mcp")
     servers = _jsonc_key_object(text, "servers", mcp[0]) if mcp else None
     rea = _jsonc_key_object(text, "rea", servers[0]) if servers else None
     env = _jsonc_key_object(text, "environment", rea[0]) if rea else None
     if not env:
         return None
-    span = _jsonc_env_value_span(text, env[0], env[1])
+    span = _jsonc_env_value_span(text, env[0], env[1], key)
     return span[2] if span else None
 
 
-def _jsonc_set_rea_env(text: str, value: str) -> tuple[str | None, bool]:
-    """Insere/atualiza ``REA_PWNTOOLS_PYTHON`` em ``mcp.servers.rea.environment``.
+def _jsonc_set_rea_env(text: str, key: str, value: str) -> tuple[str | None, bool]:
+    """Insere/atualiza ``key=value`` em ``mcp.servers.rea.environment``.
 
     Edição **cirúrgica por texto** (preserva comentários/formatação do JSONC);
     retorna ``(novo_texto, mudou)`` ou ``(None, False)`` se a estrutura não existe.
@@ -1631,7 +1703,7 @@ def _jsonc_set_rea_env(text: str, value: str) -> tuple[str | None, bool]:
     env = _jsonc_key_object(text, "environment", rea_open)
     if env is not None:
         env_open, env_close = env
-        span = _jsonc_env_value_span(text, env_open, env_close)
+        span = _jsonc_env_value_span(text, env_open, env_close, key)
         if span is not None:
             if span[2] == value:
                 return text, False
@@ -1639,17 +1711,30 @@ def _jsonc_set_rea_env(text: str, value: str) -> tuple[str | None, bool]:
         indent = _line_indent(text, env_open) + "  "
         close_indent = _line_indent(text, env_open)
         trimmed = text[:env_close].rstrip()
-        entry = f'{indent}{json.dumps(OPENCODE_PWNTOOLS_KEY)}: {json.dumps(value)}'
+        entry = f"{indent}{json.dumps(key)}: {json.dumps(value)}"
         if trimmed.endswith(("{", ",")):
             new_before = f"{trimmed}\n{entry}"
         else:
-            new_before = f"{trimmed},\n{entry}"
+            # A vírgula tem de seguir o último valor ANTES de um comentário de linha:
+            # em ``"A": "1" // fim`` o ``,`` depois do comentário viraria texto do
+            # comentário (``// fim,``) e o JSONC ficaria inválido — o wiring do env
+            # então não era gravado. Com o comentário na mesma linha, a vírgula entra
+            # antes dele (``"A": "1", // fim``).
+            last_line_start = trimmed.rfind("\n") + 1
+            comment = _jsonc_line_comment_start(trimmed[last_line_start:])
+            if comment is None:
+                new_before = f"{trimmed},\n{entry}"
+            else:
+                comment_at = last_line_start + comment
+                head = trimmed[:comment_at].rstrip()
+                tail = trimmed[comment_at + 2 :]
+                new_before = f"{head}, //{tail}\n{entry}"
         return new_before + "\n" + close_indent + text[env_close:], True
     # servidor sem bloco `environment`: cria um
     indent = _line_indent(text, rea_open) + "  "
     block = (
         f'{indent}"environment": {{\n'
-        f"{indent}  {json.dumps(OPENCODE_PWNTOOLS_KEY)}: {json.dumps(value)}\n"
+        f"{indent}  {json.dumps(key)}: {json.dumps(value)}\n"
         f"{indent}}}"
     )
     sep = ",\n" if text[rea_open + 1 : rea_close].strip() else "\n"
@@ -1698,36 +1783,38 @@ def _strip_jsonc(text: str) -> str:
     return re.sub(r",(\s*[}\]])", r"\1", "".join(out))
 
 
-def _ensure_opencode_pwntools_env(ctx: Ctx, ui: UI) -> bool:
-    """Garante ``REA_PWNTOOLS_PYTHON`` no ``environment`` do servidor rea do opencode.
+def _ensure_opencode_env(ctx: Ctx, ui: UI, key: str, value: str) -> bool:
+    """Garante ``key=value`` no ``environment`` do servidor rea do opencode.
 
-    ``rea setup`` NÃO propaga essa variável (o provider offline pwntools não expõe
-    ``registrationEnvironment``); porém, ao reescrever o documento, o REA **preserva**
-    chaves explícitas já presentes no bloco. Então gravamos a chave uma vez (edição
-    cirúrgica, com backup + validação JSON) e o ``rea setup`` a mantém depois.
+    ``rea setup`` NÃO propaga essas variáveis (o provider offline pwntools não expõe
+    ``registrationEnvironment`` e o deadline do Ghidra não é registrado pelo CLI); porém,
+    ao reescrever o documento, o REA **preserva** chaves explícitas já presentes no bloco.
+    Então gravamos cada chave uma vez (edição cirúrgica, com backup + validação JSON) e o
+    ``rea setup`` a mantém depois. Um valor já presente no JSONC é sobrescrito pelo ``value``
+    vigente (mesmo comportamento de ``REA_PWNTOOLS_PYTHON``); para outro valor, ajuste o
+    JSONC/ambiente e reexecute o setup.
     """
     path = _opencode_config_path()
-    value = str(ctx.pwntools_python)
 
     if ui.dry_run:
-        ui.show(f"garantir {OPENCODE_PWNTOOLS_KEY}={value} em {path}")
+        ui.show(f"garantir {key}={value} em {path}")
         return True
     if not path.is_file():
-        ui.warn(f"config do opencode não encontrado ({path}); registre a variável manualmente")
+        ui.warn(f"config do opencode não encontrado ({path}); registre {key} manualmente")
         return False
 
     original = path.read_text(encoding="utf-8", errors="replace")
-    new_text, changed = _jsonc_set_rea_env(original, value)
+    new_text, changed = _jsonc_set_rea_env(original, key, value)
     if new_text is None:
-        ui.warn(f"não encontrei 'mcp.servers.rea.environment' em {path}; ajuste manualmente")
+        ui.warn(f"não encontrei 'mcp.servers.rea.environment' em {path}; ajuste {key} manualmente")
         return False
     if not changed:
-        ui.ok(f"{OPENCODE_PWNTOOLS_KEY} já consta em {path}")
+        ui.ok(f"{key} já consta em {path}")
         return True
 
     try:
         data = json.loads(_strip_jsonc(new_text))
-        assert data["mcp"]["servers"]["rea"]["environment"][OPENCODE_PWNTOOLS_KEY] == value
+        assert data["mcp"]["servers"]["rea"]["environment"][key] == value
     except Exception as exc:  # noqa: BLE001 - nunca gravar jsonc inválido
         ui.warn(f"edição do jsonc não validou ({exc}); mantendo o original")
         return False
@@ -1735,8 +1822,33 @@ def _ensure_opencode_pwntools_env(ctx: Ctx, ui: UI) -> bool:
     backup = path.with_name(path.name + ".bak")
     shutil.copy2(path, backup)
     _write_atomic(path, new_text)
-    ui.ok(f"{OPENCODE_PWNTOOLS_KEY} gravado em {path} (backup: {backup.name})")
+    ui.ok(f"{key} gravado em {path} (backup: {backup.name})")
     return True
+
+
+# Aviso por chave quando o registro MCP não puder recebê-la.
+_MCP_ENV_HINTS = {
+    OPENCODE_PWNTOOLS_KEY: (
+        "a ferramenta inspect_binary_layout seguirá indisponível na sessão do agente até você "
+        "adicioná-la ao mcp.servers.rea.environment"
+    ),
+    GHIDRA_STARTUP_TIMEOUT_KEY: (
+        "o provider Ghidra usará o deadline default (330 s) e pode falhar em alvos com "
+        "auto-análise longa até você adicioná-la ao mcp.servers.rea.environment"
+    ),
+}
+
+
+def _mcp_env_entries(ctx: Ctx, ui: UI | None = None) -> list[tuple[str, str]]:
+    """Pares ``(chave, valor)`` que devem existir em ``mcp.servers.rea.environment``.
+
+    ``ui`` é repassado para que um deadline inválido no ambiente seja avisado também
+    aqui (o valor que vai ao MCP é sempre o validado/default).
+    """
+    return [
+        (OPENCODE_PWNTOOLS_KEY, str(ctx.pwntools_python)),
+        (GHIDRA_STARTUP_TIMEOUT_KEY, _ghidra_startup_timeout_ms(ui)),
+    ]
 
 
 def step_mcp(ctx: Ctx, ui: UI, rea_cmd: list[str]) -> None:
@@ -1745,7 +1857,8 @@ def step_mcp(ctx: Ctx, ui: UI, rea_cmd: list[str]) -> None:
     if ui.dry_run:
         # repassa --dry-run ao REA quando o próprio script está em dry-run
         ui.dry(" ".join([*cmd, "--dry-run"]))
-        _ensure_opencode_pwntools_env(ctx, ui)
+        for key, value in _mcp_env_entries(ctx, ui):
+            _ensure_opencode_env(ctx, ui, key, value)
         ui.mark(9, "dry", "plano impresso")
         return
     # `REA_PWNTOOLS_PYTHON` já está em os.environ (etapa 6), herdado pelo subprocess.
@@ -1756,18 +1869,15 @@ def step_mcp(ctx: Ctx, ui: UI, rea_cmd: list[str]) -> None:
         )
     ui.ok("MCP registrado para o client 'opencode'")
 
-    try:
-        current = _jsonc_rea_env_value(_opencode_config_path().read_text(encoding="utf-8"))
-    except OSError:
-        current = None
-    if current == str(ctx.pwntools_python):
-        ui.ok("rea setup preservou REA_PWNTOOLS_PYTHON no registro")
-    elif not _ensure_opencode_pwntools_env(ctx, ui):
-        ui.warn(
-            "REA_PWNTOOLS_PYTHON NÃO está no registro MCP; a ferramenta inspect_binary_layout "
-            "seguirá indisponível na sessão do agente até você adicioná-la ao "
-            "mcp.servers.rea.environment"
-        )
+    for key, value in _mcp_env_entries(ctx, ui):
+        try:
+            current = _jsonc_rea_env_value(_opencode_config_path().read_text(encoding="utf-8"), key)
+        except OSError:
+            current = None
+        if current == value:
+            ui.ok(f"rea setup preservou {key} no registro")
+        elif not _ensure_opencode_env(ctx, ui, key, value):
+            ui.warn(f"{key} NÃO está no registro MCP; {_MCP_ENV_HINTS[key]}")
     ui.mark(9, "ok", "registrado")
 
 
