@@ -8,9 +8,14 @@
 
 ## ⚡ COMECE AQUI
 
+> 🚀 **Sessão nova?** O gatilho é a frase do usuário — **“pode continuar os trabalhos!”** (ou
+> equivalente) — e o **bootstrap** vive em [`../AGENTS.md`](../AGENTS.md), que manda **ler este
+> HANDOFF primeiro** (ele é o **ponto de entrada**) e então pegar o próximo item aberto do
+> [`BACKLOG.md`](BACKLOG.md). Não peça contexto: ele está todo em `docs/`.
+
 **Estado em uma linha:** ambiente ✅ · binário-alvo **100% analisável** ✅ · Track A (API Python +
-IPC) ✅ · **P1.1 buffer** ✅ · **P1.6 empacotamento** ✅ · **P0.6 (MCP)** ✅ · **falta** P1.2
-(concorrência), P1.3 (opcodes/framing do IPC), P1.4 (render), P1.5 (ledger consolidado), a Fase 2
+IPC) ✅ · **P1.1 buffer** ✅ · **P1.2 concorrência** ✅ · **P1.6 empacotamento** ✅ · **P0.6 (MCP)** ✅ ·
+**falta** P1.3 (opcodes/framing do IPC), P1.4 (render), P1.5 (ledger consolidado), a Fase 2
 (síntese) e a Fase 3 (o editor em Electron/TS).
 
 **✅ Passo operacional resolvido (2026-10-16).** O `setup.py` foi rodado e o MCP `rea` foi relançado
@@ -25,9 +30,10 @@ python3 setup/setup.py        # idempotente: reescreve setup/env.sh + environmen
 Sem o deadline maior, `open_binary`/`analyze` **via MCP** volta a estourar os 330 s (a análise leva
 ~355 s).
 
-**Próxima tarefa recomendada:** **P1.2 — modelo de concorrência** (thread principal vs. background:
-I/O, indexação, highlight, regex) — pista já colhida no `plugin_host` (ver `ipc-plugin-host.md`).
-Alternativa barata e já desbloqueada: **P1.3 — opcodes de `handle_protocol_message` + framing**.
+**Próxima tarefa recomendada:** **P1.3 — opcodes de `handle_protocol_message` + framing**
+(`read_message`/`write_message`) — a sessão do binário `rea` está **aberta** (reaproveitável, sem
+novo custo de análise de ~355 s). Alternativa barata e já desbloqueada: **P1.4 — pipeline de
+render** (o P1.2 já confirmou toolkit **GTK3/GLib** e indícios de Skia via `libGL`/`libX11`).
 
 **Ambiente do CLI (obrigatório):** `set -a; . ./setup/env.sh; set +a`.
 
@@ -125,10 +131,14 @@ Obtidos com `rea inspect-binary-layout` (provider offline `pwntools-elf`):
 > **Agravante:** o binário é **stripped** — a RE depende de strings, padrões (RTTI/vtables) e da
 > auto-análise do Ghidra.
 >
-> ⚠️ **Hipótese a confirmar (ou derrubar):** a versão anterior deste doc afirmava "C++ **com Qt**".
-> Isso **não foi verificado**. O que se sabe: o alvo linka `libssl`/`libcrypto`/`libsqlite3`/
-> `libpython3.14` e **nada de Qt**, e o render aparenta ser **Skia** (ver P1.4 no BACKLOG). Não
-> assuma vtables/sinais de Qt antes de checar.
+> ⚠️ **Hipótese "Qt" — refutada** ✅ **(confirmada em 2026-10-16, P1.2).** A versão anterior deste
+> doc afirmava "C++ **com Qt**". A verificação independente (P1.2) mostra o contrário: `NEEDED` com
+> `libglib-2.0`/`libgobject-2.0`/`libGL`/`libX11` (e `libgtk-3.so` carregada em runtime), strings
+> `gtk_main`/`g_idle_add`/`g_source_add_unix_fd`/`prctl`, e **zero** referências a Qt. Ou seja: o
+> toolkit é **GTK3/GLib** (**não** Qt) e o render aparenta ser **Skia** via `libGL`/`libX11` — o que
+> **encaminha o P1.4** (render). A lista `libssl`/`libcrypto`/`libsqlite3`/`libpython3.14` citada
+> antes é a do `plugin_host`/API Python (outro contexto) e **não** conflita com isso. Não assuma
+> vtables/sinais de Qt antes de checar.
 
 ---
 
@@ -203,6 +213,17 @@ interno **anônimo** com **múltiplos buffers de heap + array de registros** →
 **piece-table/segmentado [INFERIDO]** (sem Gap Buffer nem Rope nomeados); edição por **comandos
 delta**; **undo por grupos** (*glue*/*soft*); linha por **scan com cache**.
 
+### P1.2 — modelo de concorrência (Fase 1, via Ghidra)
+
+[`docs/analysis/concurrency.md`](analysis/concurrency.md) (371 linhas, ledger E1–E21): o núcleo é um
+processo **GTK3/GLib single-main-thread** (**`gtk_main`** + `g_idle_add`/`g_source_add_unix_fd`
+**[OBSERVADO]**) que delega trabalho a **threads POSIX próprias** (`pthread_create`, stack de
+**2 MiB**, nomeadas via `prctl(PR_SET_NAME)` **[OBSERVADO]**), com **pool de I/O de N threads**
+(`io_worker`, N = setting `io_workers`; **o tamanho N** é **[INFERIDO]**) e **pool on-demand
+limitado a 2** (`file_read_thread` **[OBSERVADO]**); o retorno ao main thread passa por
+**`px_main_thread_scheduler`** **[INFERIDO]**. O `plugin_host` **é processo separado**
+(`posix_spawn`/`execvp` + shm/sem), **não** thread.
+
 ---
 
 ## ▶️ Como retomar
@@ -252,3 +273,21 @@ Material de apoio: skill `reverse-engineer-anything` (+ `references/native-and-a
 | `setup/env.sh` | gerado; `source` obrigatório para o CLI |
 | `docs/analysis/` | evidências da Fase 1 (Track A + Track B) |
 | `docs/HANDOFF.md` · `docs/BACKLOG.md` | este doc · backlog vivo |
+
+---
+
+## 📤 Protocolo de handoff (como fechar a sessão)
+
+Resumo do protocolo do [`../AGENTS.md`](../AGENTS.md) — é o que mantém a próxima sessão **limpa e
+barata**. Ao terminar um item:
+
+1. **Atualize este `HANDOFF.md`** — a “Estado em uma linha”, a **“Próxima tarefa recomendada”** e os
+   achados novos (inclusive o que ficou `[DESCONHECIDO]`).
+2. **Atualize o [`BACKLOG.md`](BACKLOG.md)** — marque `[x]` o item entregue e ajuste o “próximo”.
+3. **Evidência nova** → `docs/analysis/<tema>.md`, no padrão dos existentes (header com sha256 e
+   ranges, “Achado central”, seções e **ledger de evidências** `E<n>`).
+4. **`git commit`** no padrão `feat(analysis): P<id> — <tema> + integração docs`.
+5. **Working tree limpo** — é isso que permite a próxima sessão começar sem arrastar contexto.
+
+> Protocolo completo (bootstrap de sessão + regras invioláveis + economia de contexto):
+> [`../AGENTS.md`](../AGENTS.md).

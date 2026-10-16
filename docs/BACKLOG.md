@@ -50,8 +50,8 @@ máx 2^31−1). Fatos descobertos no `dist/` do `rea-agents@6.5.0` — detalhes 
 ## 📐 P1 — Fase 1 (conteúdo da análise) — **em curso**
 
 Dividir por pergunta (o skill recomenda decompor em escopos independentes, com ledger de Evidence
-IDs). Cada item vira uma seção da spec técnica abstrata. **O binário está destravado** — P1.1/P1.2/
-P1.4 podem ser atacados direto.
+IDs). Cada item vira uma seção da spec técnica abstrata. **O binário está destravado** — P1.3
+(opcodes/framing) e P1.4 (render) podem ser atacados direto.
 
 - [x] **P1.1 — Estrutura de buffer** ✅ entregue: [`docs/analysis/buffer-structure.md`](analysis/buffer-structure.md).
       Achado: classe **`TextBuffer`** (facade, RTTI) delega a um objeto interno **anônimo** com
@@ -59,17 +59,20 @@ P1.4 podem ser atacados direto.
       [INFERIDO]**; **não** há Gap Buffer nem Rope nomeados. Edição por **comandos delta**
       (`insert`/`append`/`…_delete`); **undo por grupos** (com *glue* e *soft* undo/redo); linha por
       **scan com cache**. Ledger E1–E14.
-- [ ] **P1.2 — Modelo de concorrência**: thread principal (UI/event loop) vs threads de background
-      (I/O, indexação, syntax highlighting, busca regex). Evidências: `pthread_*`, pools, filas.
-      *Pista já colhida (Track A):* o `plugin_host` tem `work_queue_runner`/`thread_queue_runner`/
-      `async_thread_queue_runner` + `g_async_work_queue` — ver `ipc-plugin-host.md`.
+- [x] **P1.2 — Modelo de concorrência** ✅ entregue: [`docs/analysis/concurrency.md`](analysis/concurrency.md).
+      Achado: núcleo **GTK3/GLib single-main-thread** (`gtk_main` + `g_idle_add`/`g_source_add_unix_fd`)
+      que delega a **threads POSIX próprias** (`pthread_create`, stack 2 MiB, nomeadas via
+      `prctl(PR_SET_NAME)`); **pool de I/O de N threads** (`io_worker`, N = setting `io_workers`;
+      **o tamanho N** é **[INFERIDO]**) e **pool on-demand limitado a 2** (`file_read_thread`);
+      retorno ao main thread pelo **`px_main_thread_scheduler`** **[INFERIDO]**; o `plugin_host` é
+      **processo**, não thread. Ledger E1–E21.
 - [~] **P1.3 — Ponte IPC C++ ↔ Python**: **lado Python ✅** (`api-python.md`) · **lado IPC ✅**
       (`ipc-plugin-host.md`: shm POSIX + semáforos; canais `subl_send`/`subl_recv`/`subl_arecv`).
       **Falta:** mapear os opcodes de `handle_protocol_message` e o framing de
       `read_message`/`write_message` (precisa do núcleo → agora desbloqueado).
 - [ ] **P1.4 — Pipeline de render**: indícios de GPU/OpenGL/Skia; virtualização de viewport.
-      **E confirmar/derrubar a hipótese "Qt"** — o alvo linka `libssl`/`libcrypto`/`libsqlite3`/
-      `libpython3.14` e **nada de Qt**.
+      Hipótese "Qt" **já refutada** pelo P1.2 — toolkit confirmado **GTK3/GLib**, render provavelmente
+      **Skia** via `libGL`/`libX11`.
 - [ ] **P1.5 — Ledger de evidências**: tabela `conclusão → Evidence ID → tipo → limites`
       (consolidando os ledgers parciais já existentes em `docs/analysis/`).
 - [x] **P1.6 — Modelo de empacotamento** ✅ entregue: [`docs/analysis/packaging.md`](analysis/packaging.md).

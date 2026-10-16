@@ -84,6 +84,11 @@ O fluxo conceitual tem **3 fases**. O diagrama (adaptado de
 3. **Fase 3 — Reimplementação ("cozinhar a receita").** Construímos o editor novo em
    Electron/TypeScript seguindo **só** a spec da Fase 2. É onde o MVP do topo desta página nasce.
 
+> 🤖 **Sessões novas seguem o [`AGENTS.md`](AGENTS.md)** — bootstrap (ler o
+> [`docs/HANDOFF.md`](docs/HANDOFF.md) → pegar o próximo item do
+> [`docs/BACKLOG.md`](docs/BACKLOG.md)) + protocolo de handoff, para começar com contexto limpo e
+> barato.
+
 ---
 
 ## 🧰 Pré-requisitos de ambiente
@@ -277,9 +282,9 @@ independente + um **ledger de Evidence IDs** (conclusão → evidence ID → tip
 | # | Pergunta | Item | Status | Onde está a evidência |
 |---|---|---|---|---|
 | 1 | **Como o buffer é estruturado?** Piece Table / Gap Buffer / Rope? Como faz insert/remove, undo/redo e indexação de linha? | P1.1 | ✅ concluído | [`docs/analysis/buffer-structure.md`](docs/analysis/buffer-structure.md) |
-| 2 | **Qual o modelo de concorrência?** O que roda na thread principal vs. nas de background (I/O, indexação, highlight, regex)? | P1.2 | ⬜ aberto | pista já colhida no `plugin_host` (ver `ipc-plugin-host.md`) |
+| 2 | **Qual o modelo de concorrência?** O que roda na thread principal vs. nas de background (I/O, indexação, highlight, regex)? | P1.2 | ✅ concluído | [`docs/analysis/concurrency.md`](docs/analysis/concurrency.md) |
 | 3 | **Como funciona a ponte IPC C++↔Python?** | P1.3 | 🟡 lado Python ✅ + transporte ✅; falta mapear opcodes e framing | [`docs/analysis/api-python.md`](docs/analysis/api-python.md) · [`docs/analysis/ipc-plugin-host.md`](docs/analysis/ipc-plugin-host.md) |
-| 4 | **Como é o pipeline de render?** GPU/OpenGL/Skia? Como o viewport é virtualizado? | P1.4 | ⬜ aberto | *(inclui confirmar/derrubar a hipótese "Qt")* |
+| 4 | **Como é o pipeline de render?** GPU/OpenGL/Skia? Como o viewport é virtualizado? | P1.4 | ⬜ aberto | *(hipótese "Qt" **refutada** no P1.2 — toolkit = GTK3/GLib)* |
 | 5 | **Como o editor empacota e resolve recursos?** (`.sublime-package`, `.sublime-syntax`) | P1.6 | ✅ concluído | [`docs/analysis/packaging.md`](docs/analysis/packaging.md) |
 | 6 | **Consolidar o ledger de evidências** de tudo acima | P1.5 | ⬜ aberto | consolidar `docs/analysis/` |
 
@@ -289,9 +294,10 @@ com os **limites** da conclusão declarados. Conclusão sem evidência = hipóte
 marcada como tal.
 
 > 🧠 **Dica:** os itens **sem Ghidra** (baratos) já foram feitos — **P1.6** (empacotamento) e boa
-> parte do **P1.3** (Track A: API Python + IPC). Os que faltam (**P1.2** concorrência, **P1.3**
-> opcodes, **P1.4** render) exigem a análise nativa, que é mais lenta (~355 s por sessão).
-> Para o prato principal, comece por **P1.1**, a decisão de arquitetura de que a Fase 3 mais depende.
+> parte do **P1.3** (Track A: API Python + IPC). Os que faltam (**P1.3** opcodes, **P1.4** render,
+> **P1.5** ledger) exigem a análise nativa, que é mais lenta (~355 s por sessão).
+> Para o prato principal, comece por **P1.3** (opcodes/framing), que reaproveita a sessão do binário
+> já aberta.
 > Ferramenta de apoio: a skill `reverse-engineer-anything` (+ `references/native-and-artifacts.md`).
 
 ---
@@ -341,9 +347,10 @@ Track A (API Python + IPC) ✅ · **Fase 1 em andamento**.
 | **Alvo** extraído e identificado (`inspect-binary-layout`) | ✅ |
 | **Track B** — o binário foi analisado **por inteiro** | ✅ (334 s de auto-análise; projeto persistente de 171 MB) |
 | **Track A** — análise **sem** Ghidra: API de plugins + ponte IPC | ✅ (`docs/analysis/api-python.md`, `ipc-plugin-host.md`) |
+| **P1.2** — modelo de concorrência (threads/pools, GTK/GLib, handoff main↔bg) | ✅ (`docs/analysis/concurrency.md`) |
 | **P1.6** — empacotamento de recursos | ✅ (`docs/analysis/packaging.md`) |
 | **P0.6** — deadline do Ghidra no MCP | ✅ resolvido (setup rodado; MCP relançado com a var) |
-| **Fase 1** — buffer, concorrência, opcodes do IPC, render | 🟡 em andamento (P1.1 ✅ buffer · P1.6 ✅ empacotamento) |
+| **Fase 1** — buffer, concorrência, opcodes do IPC, render | 🟡 em andamento (P1.1 ✅ buffer · P1.2 ✅ concorrência · P1.6 ✅ empacotamento) |
 | **Fases 2 e 3** — spec abstrata e o editor em si | ⬜ não começaram |
 
 > 🔄 **Fontes vivas:** [`docs/HANDOFF.md`](docs/HANDOFF.md) (como retomar, pegadinhas operacionais) e
@@ -356,6 +363,7 @@ Track A (API Python + IPC) ✅ · **Fase 1 em andamento**.
 
 | Documento | Para que serve |
 |---|---|
+| [`AGENTS.md`](AGENTS.md) | **Instruções do projeto / bootstrap de sessão** — o gatilho "pode continuar os trabalhos!" manda ler o HANDOFF e pegar o próximo item do BACKLOG |
 | [`docs/SPECIFICATION.md`](docs/SPECIFICATION.md) | **Visão de pesquisa** (pt-BR): objetivos, ferramentas, requisitos técnicos e diretrizes éticas/legais |
 | [`docs/TECHNICAL_SPECIFICATION.md`](docs/TECHNICAL_SPECIFICATION.md) | **Spec técnica** (en): metodologia clean-room, componentes-núcleo, arquitetura-alvo no Electron. É aqui que o projeto aparece como **"Arcane"** |
 | [`docs/HANDOFF.md`](docs/HANDOFF.md) | **Como retomar**: estado atual, pegadinhas operacionais, timeout do Ghidra, fatos observados do alvo |
@@ -364,6 +372,7 @@ Track A (API Python + IPC) ✅ · **Fase 1 em andamento**.
 | [`docs/analysis/api-python.md`](docs/analysis/api-python.md) | Evidência — **API Python de plugins**: superfície pública (3.14), delta vs 3.3, padrões da ponte, ledger `E1–E33` |
 | [`docs/analysis/ipc-plugin-host.md`](docs/analysis/ipc-plugin-host.md) | Evidência — **ponte C++↔Python**: shm POSIX nomeada + semáforos, canais `subl_send`/`subl_recv`/`subl_arecv` |
 | [`docs/analysis/packaging.md`](docs/analysis/packaging.md) | Evidência — **empacotamento de recursos**: `.sublime-package` (ZIP sem manifesto), resolução de caminho lógico |
+| [`docs/analysis/concurrency.md`](docs/analysis/concurrency.md) | Evidência — **modelo de concorrência**: main thread GTK/GLib, fábrica de threads POSIX, pools (`io_worker`/`file_read_thread`), scheduler de retorno ao main thread, ledger `E1–E21` |
 | [`bin/ghidra-preanalyze.sh`](bin/ghidra-preanalyze.sh) | Pré-análise headless em projeto persistente (sem deadline) — o "reprocessar sem reanalisar" |
 | [`setup/versions.env`](setup/versions.env) | Versões, URLs e SHA-256 **pinados** (fonte única de verdade do setup) |
 
@@ -382,8 +391,9 @@ arquitetura de sistemas, não redistribuir nem derivar o produto analisado.
   fundamentar uma conclusão, não para reconstruir o original.
 - **Hipótese ≠ fato.** Onde a evidência não fecha, escreva **"hipótese (a confirmar)"** — e registre
   no ledger de evidências (P1.5) os **limites** da conclusão. Exemplo vivo: a hipótese de que o alvo
-  seria "C++ **com Qt**" **não foi verificada** — o binário linka `libssl`/`libcrypto`/`libsqlite3`/
-  `libpython3.14` e **nada de Qt**, e o render **aparenta** ser Skia (P1.4 no backlog).
+  seria "C++ **com Qt**" foi **refutada** no P1.2 — o toolkit é **GTK3/GLib** (strings
+  `gtk_main`/`g_idle_add`/`g_source_add_unix_fd`; `NEEDED` com `libglib-2.0`/`libGL`/`libX11`; e
+  **zero** referências a Qt), e o render **aparenta** ser Skia (P1.4 no backlog).
 
 > Fonte: seção *Diretrizes Éticas e Legais* de [`docs/SPECIFICATION.md`](docs/SPECIFICATION.md) e
 > §5 *Compliance & Clean-Room Boundaries* de [`docs/TECHNICAL_SPECIFICATION.md`](docs/TECHNICAL_SPECIFICATION.md).

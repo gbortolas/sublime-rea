@@ -65,6 +65,31 @@
   - Node.js IPC / Worker communication protocol for extension isolation.
   - Expose a strongly typed API (TypeScript Interfaces) for plugin hooks.
 
+### 3.5 Implementation Status (evidence, updated 2026-10-16)
+
+Maps the §3.1–§3.4 targets onto delivered Phase 1 evidence. Labelling follows the repo convention:
+`[OBSERVADO]` / `[INFERIDO]` / `[DESCONHECIDO]`.
+
+- **§3.1 Text Buffer** — ✅ evidenced in [`analysis/buffer-structure.md`](analysis/buffer-structure.md):
+  a `TextBuffer` facade over an internal segmented / piece-table-like store `[INFERIDO]` (≈2.4 KB
+  facade, `0x108`-byte anonymous internal object); edges applied as delta commands
+  (`insert_command`/`…_delete_command`); undo grouped (*glue*/*soft*); **no** named Gap Buffer or Rope.
+- **§3.2 Threading & Concurrency** — ✅ evidenced in [`analysis/concurrency.md`](analysis/concurrency.md):
+  a single **GTK3/GLib** main thread (`gtk_main`); an own POSIX thread factory (`pthread_create`,
+  2 MiB stack, `prctl(PR_SET_NAME)`); an N-thread **I/O pool** (`io_worker`) plus an on-demand pool
+  capped at 2 (`file_read_thread`); results marshalled back to the main thread via
+  `px_main_thread_scheduler`.
+- **§3.3 UI Rendering Pipeline** — 🟡 **correction to the model**: the toolkit is **GTK3/GLib**
+  (NEEDED: `libglib-2.0`, `libgobject-2.0`, `libGL`, `libX11`; strings `gtk_main` / `g_idle_add` /
+  `g_source_add_unix_fd`; **zero** Qt), i.e. **not** "bypassing traditional OS widget toolkits" as the
+  original bullet states. Rendering is likely **Skia/GPU** via `libGL` — pending **P1.4**.
+- **§3.4 Extension & IPC Bridge** — 🟡 transport evidenced
+  ([`analysis/api-python.md`](analysis/api-python.md), [`analysis/ipc-plugin-host.md`](analysis/ipc-plugin-host.md)):
+  the Python host is a **separate process** (`posix_spawn`/`execvp` + POSIX shm + semaphores), **not** a
+  thread. Opcodes/framing still open (**P1.3**).
+
+Living index → [`BACKLOG.md`](BACKLOG.md); session protocol → [`../AGENTS.md`](../AGENTS.md).
+
 ---
 
 ## 4. Setup & Integration Instructions for REA Server

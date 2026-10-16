@@ -13,6 +13,10 @@ módulo nativo embutido chamado `sublime_api`; o estado real (buffers, views, se
 vive no C++, e o Python só manipula **handles opacos (int)** — a inteligência do lado Python está
 em `sublime_plugin.py` (registro, dispatch de eventos, subclasse de `Sheet`, importação de pacotes).
 
+**Docs irmãos (Fase 1):** [`buffer-structure.md`](buffer-structure.md) (P1.1 — estrutura de buffer) ·
+[`concurrency.md`](concurrency.md) (P1.2 — modelo de concorrência) ·
+[`ipc-plugin-host.md`](ipc-plugin-host.md) (Track A — ponte C++↔Python) · [`packaging.md`](packaging.md) (P1.6 — empacotamento).
+
 ---
 
 ## 1. 🔎 Escopo e fontes

@@ -17,6 +17,10 @@
 do usuário por cima do pacote embarcado** — não há índice nem build step, tudo é descoberto em
 runtime por varredura de nomes.
 
+**Docs irmãos (Fase 1):** [`buffer-structure.md`](buffer-structure.md) (P1.1 — estrutura de buffer) ·
+[`concurrency.md`](concurrency.md) (P1.2 — modelo de concorrência) ·
+[`ipc-plugin-host.md`](ipc-plugin-host.md) (Track A — ponte C++↔Python) · [`api-python.md`](api-python.md) (API de plugins).
+
 ---
 
 ## 1. 🔎 Escopo e fontes

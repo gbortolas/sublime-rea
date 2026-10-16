@@ -8,6 +8,10 @@
 > `plugin_host-3.14` / `plugin_host-3.3`. `crash_handler` é tratado como *fora do escopo*
 > (seção 7), apenas para descartá-lo como participante.
 
+**Docs irmãos (Fase 1):** [`buffer-structure.md`](buffer-structure.md) (P1.1 — estrutura de buffer) ·
+[`concurrency.md`](concurrency.md) (P1.2 — modelo de concorrência) ·
+[`api-python.md`](api-python.md) (API de plugins) · [`packaging.md`](packaging.md) (P1.6 — empacotamento).
+
 ---
 
 ## 1. Resumo e veredito do mecanismo

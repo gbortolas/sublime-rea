@@ -18,6 +18,10 @@ as mutações são aplicadas por **comandos delta** (`insert_command`/`…_delet
 Rope com nós; o padrão observado é compatível com a **família piece-table/segmentado
 [INFERIDO]**.
 
+**Docs irmãos (Fase 1):** [`concurrency.md`](concurrency.md) (P1.2 — modelo de concorrência) ·
+[`ipc-plugin-host.md`](ipc-plugin-host.md) (Track A — ponte C++↔Python) ·
+[`api-python.md`](api-python.md) (API de plugins) · [`packaging.md`](packaging.md) (P1.6 — empacotamento).
+
 ---
 
 ## 1. 🔎 Escopo e método

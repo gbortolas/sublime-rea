@@ -59,3 +59,17 @@ Este projeto de estudo e pesquisa acadêmica visa investigar a arquitetura inter
 ## ⚠️ Diretrizes Éticas e Legais
 - **Escopo Exclusivamente Acadêmico:** O estudo destina-se apenas à compreensão de conceitos de engenharia de software e arquitetura de sistemas.
 - **Princípio de Sala Limpa (Clean-Room):** Nenhum código do binário original deve ser copiado diretamente. Toda a implementação final no projeto Electron deve ser escrita do zero, baseando-se apenas nos conceitos e especificações técnicas abstratas documentadas.
+
+---
+
+## 📊 Status da execução (atualizado em 2026-10-16)
+
+| Objetivo (ver “Objetivos de Pesquisa”) | Evidência entregue | Status |
+|---|---|---|
+| 1. Gerenciamento de buffer | [`analysis/buffer-structure.md`](analysis/buffer-structure.md) — ledger `E1–E14` | ✅ família piece-table/segmentado `[INFERIDO]`; sem Gap Buffer nem Rope nomeados |
+| 2. Multithread / concorrência | [`analysis/concurrency.md`](analysis/concurrency.md) — ledger `E1–E21` | ✅ main thread **GTK3/GLib** + fábrica POSIX (2 MiB, `prctl`) + pools de I/O |
+| 3. Extensibilidade / ponte IPC | [`analysis/api-python.md`](analysis/api-python.md) · [`analysis/ipc-plugin-host.md`](analysis/ipc-plugin-host.md) | 🟡 lado Python ✅ + transporte ✅ (shm+sem); **falta** opcodes/framing (P1.3) |
+| 4. Transição para Electron | — | ⬜ Fase 3 (não iniciada) |
+| (extra) Empacotamento de recursos | [`analysis/packaging.md`](analysis/packaging.md) — ledger `E1–E22` | ✅ `.sublime-package` = ZIP sem manifesto; precedência `User` > `Default` |
+
+> **Fila viva:** [`BACKLOG.md`](BACKLOG.md) · **Como retomar:** [`HANDOFF.md`](HANDOFF.md) · **Protocolo de sessão:** [`../AGENTS.md`](../AGENTS.md).
