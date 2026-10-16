@@ -1,0 +1,244 @@
+# HANDOFF — sublime-rea
+
+> **Documento de handoff entre sessões** (leia antes de retomar). Atualizado em **2026-10-16**.
+> Specs do projeto: [`SPECIFICATION.md`](SPECIFICATION.md) · [`TECHNICAL_SPECIFICATION.md`](TECHNICAL_SPECIFICATION.md)
+> Backlog vivo: [`BACKLOG.md`](BACKLOG.md)
+
+---
+
+## ⚡ COMECE AQUI
+
+**Estado em uma linha:** ambiente ✅ · binário-alvo **100% analisável** ✅ · ponte C++↔Python ~80% ✅
+· **falta** extrair buffer/threads/render (Fase 1), sintetizar os padrões (Fase 2) e construir o
+editor em Electron/TS (Fase 3).
+
+**⚠️ Passo operacional pendente (~1 min).** O MCP `rea` desta máquina **ainda usa o deadline antigo
+de 330 s**: a var nova só entra no `opencode.jsonc` quando o setup roda — reiniciar o opencode
+**não basta**.
+
+```bash
+cd /home/gbortolas/ai/workspaces/sublime-rea
+python3 setup/setup.py        # idempotente: reescreve setup/env.sh + environment do MCP rea
+# depois: reinicie o opencode (o servidor MCP só relança com o environment novo)
+```
+
+Sem isso, `open_binary`/`analyze` **via MCP** volta a estourar o deadline (a análise leva ~355 s).
+
+**Próxima tarefa recomendada:** **P1.1 — estrutura de buffer** (Piece Table / Gap Buffer / Rope?) —
+é a decisão de arquitetura mais fundamental e a que a Fase 3 mais depende. Para esquentar com algo
+barato e sem Ghidra: **P1.6 — empacotamento** (`.sublime-package`).
+
+**Ambiente do CLI (obrigatório):** `set -a; . ./setup/env.sh; set +a`.
+
+---
+
+## Objetivo do projeto
+
+Trabalho de pós-graduação: **clean-room reverse engineering** do Sublime Text usando a ferramenta
+**REA** (MCP + Ghidra), para extrair **padrões arquiteturais abstratos** (estrutura de buffer,
+concorrência, ponte IPC C++↔Python, render pipeline) e então reimplementar um editor equivalente
+**do zero** em **Electron / TypeScript**. Princípio inegociável: **não copiar código do binário** —
+só conceitos e especificações abstratas.
+
+---
+
+## 📍 Onde estamos
+
+**Não** analisamos o `.deb`. O alvo é o **executável ELF** extraído do `.tar.xz`:
+
+```
+bin/sublime_text_build_4215_x64.tar.xz ──(setup, etapa 8)──▶ target/sublime_text/sublime_text
+```
+
+A análise **começou de verdade** em 2026-10-16:
+
+1. ✅ **ambiente** instalado, configurado e verificado;
+2. ✅ **alvo** extraído e identificado (anatomia ELF via `inspect-binary-layout`);
+3. ✅ **Track A — análise SEM Ghidra**: API Python de plugins + ponte IPC → [`docs/analysis/`](analysis/);
+4. ✅ **Track B — o binário foi analisado por inteiro** (headless + rota nativa do REA validada) —
+   ver [Timeout do Ghidra](#-timeout-do-ghidra--resolvido).
+
+### O que é cada arquivo
+
+| Arquivo | O que é | Status |
+|---|---|---|
+| `bin/sublime_text_build_4215_x64.tar.xz` | tarball oficial do Sublime build 4215 | **fonte do alvo** (22 MB, versionado) |
+| `bin/sublime-text_build-4215_amd64.deb` | pacote Debian do mesmo build | **removido do git** (redundante) |
+| `target/sublime_text/sublime_text` | ELF 9,5 MiB, x86-64, **PIE**, **stripped** | **alvo da análise** |
+| `target/sublime_text/Lib/python314/` | API de plugins em Python puro | ✅ analisado (Track A) |
+| `target/sublime_text/plugin_host-3.14` / `-3.3` | processos que hospedam o Python | ✅ analisado (Track A) |
+| `target/` | gerado pelo setup (gitignored) | descartável |
+
+---
+
+## ✅ Ambiente — PRONTO e verificado
+
+Instalador reprodutível em `setup/` (Python + `rich`), **10 etapas**, idempotente, **sem sudo por padrão**.
+
+```bash
+python3 setup/setup.py --help      # flags: --dry-run, --install-deps, --write-rc
+python3 setup/setup.py             # instala tudo (idempotente)
+```
+
+| Verificação | Resultado |
+|---|---|
+| `rea doctor --client opencode --provider ghidra --format json` | **`healthy: true`** (exit 0) |
+| Ghidra | 12.1.4 headless + native decompiler, em `$REA_TOOLS_DIR/ghidra_12.1.4_PUBLIC` |
+| Java | `JAVA_HOME` = `~/.sdkman/candidates/java/23-zulu` (≥ 21) |
+| REA | `rea-agents@6.5.0` (global via npm) |
+| Provider offline pwntools | venv em `$REA_TOOLS_DIR/pwntools-venv` (pwntools 4.15.0 / pyelftools 0.33 / unicorn 2.1.2) |
+| MCP `rea` no `~/.config/opencode/opencode.jsonc` | `GHIDRA_INSTALL_DIR` + `JAVA_HOME` + `REA_PWNTOOLS_PYTHON` + **`REA_GHIDRA_STARTUP_TIMEOUT_MS`** *(este último: só entra após rodar o setup — ver [COMECE AQUI](#-comece-aqui))* |
+
+Pins em [`setup/versions.env`](../setup/versions.env). Docs em [`setup/README.md`](../setup/README.md).
+
+### ⚠️ Pegadinhas operacionais (aprendidas na marra)
+
+1. **O `env.sh` só é escrito (e a var do MCP só entra no jsonc) quando o `setup.py` roda.** Um
+   restart do opencode sozinho **não** propaga variáveis novas. Ordem correta: `setup.py` →
+   reiniciar o opencode.
+2. **O `rea` CLI exige o ambiente exportado.** O `source setup/env.sh` só é feito automaticamente
+   por shell **interativo** (linha no `~/.bashrc`). Scripts, cron, CI e shells não-interativos
+   **precisam** de:
+   ```bash
+   set -a; . ./setup/env.sh; set +a     # senão: GHIDRA_INSTALL_DIR is not set
+   ```
+3. **`rea doctor` exige `JAVA_HOME` de um JDK ≥ 21.** Sem ele o escopo fica `healthy: false`.
+4. **O `ProjectLocator` do Ghidra recusa path com componente iniciado por `.`** — por isso
+   `$REA_TOOLS_DIR` (`~/.local/...`) é acessado via symlink `~/sr-tools` (ver P3.7 no BACKLOG).
+
+---
+
+## 🔬 Alvo — fatos observados (Evidence)
+
+Obtidos com `rea inspect-binary-layout` (provider offline `pwntools-elf`):
+
+| Campo | Valor |
+|---|---|
+| `sha256` | `8b105b1839d7809f60ec186b6c6dcb2d107e22ad23f42c5f8ba7dec67ab43d92` |
+| Formato | ELF64 x86-64 little-endian, **ET_DYN (PIE)**, execução dinâmica |
+| Entry point | `0x4b4920` |
+| Estrutura | **33 sections / 12 segments / 444 symbols / 34.534 relocations** |
+| Símbolos | **STRIPPED** — sem `.symtab`, só `.dynsym` |
+| Mitigations | PIE=true · NX=true · exec-stack=false · canary=false · RELRO=Partial |
+
+> **Agravante:** o binário é **stripped** — a RE depende de strings, padrões (RTTI/vtables) e da
+> auto-análise do Ghidra.
+>
+> ⚠️ **Hipótese a confirmar (ou derrubar):** a versão anterior deste doc afirmava "C++ **com Qt**".
+> Isso **não foi verificado**. O que se sabe: o alvo linka `libssl`/`libcrypto`/`libsqlite3`/
+> `libpython3.14` e **nada de Qt**, e o render aparenta ser **Skia** (ver P1.4 no BACKLOG). Não
+> assuma vtables/sinais de Qt antes de checar.
+
+---
+
+## 🔓 Timeout do Ghidra — resolvido
+
+A auto-análise **não cabe no deadline default de 330 s**. **Mas o deadline não é fixo**:
+
+```bash
+REA_GHIDRA_STARTUP_TIMEOUT_MS=900000 rea ...        # 900 s = 15 min
+```
+
+> ⚠️ **Correção:** versões anteriores deste doc afirmavam *"não existe env var para o timeout de
+> análise"*. **Errado.** Schema: inteiro positivo decimal, máx `2_147_483_647`
+> (`rea-agents/dist/config/providerStartupTimeout.js:3-16`; default `330_000`).
+
+| Env var | Efeito | Evidência (`rea-agents/dist/`) |
+|---|---|---|
+| `REA_GHIDRA_STARTUP_TIMEOUT_MS` | deadline de import+análise+bridge+ready | `config/providerStartupTimeout.js:3`, `config/environment.js:38` |
+| `REA_GHIDRA_DISABLED_ANALYZERS` | nomes **exatos** de analyzers (case-sensitive, sem glob), `,`, ≤32 → `-preScript ReaGhidraAnalysisOptions.java`. Nome desconhecido = **erro fatal**. | `config/ghidraDisabledAnalyzers.js:9-25`, `bridge/ghidra/ReaGhidraAnalysisOptions.java:20-24` |
+| `REA_GHIDRA_SEED_FILE` | **não** importa análise prévia: é um TSV de assertivas (`address<TAB>kind[<TAB>name]`, `kind ∈ function\|code\|label`, `rea-ghidra-seeds-v1`), aplicado como `-preScript` **antes** da auto-análise | `ghidra/GhidraAnalysisSeeds.js:9-24,51-91`, `ghidra/GhidraLauncher.js:402-409` |
+
+**O REA não consome análise pré-existente.** Ele sempre faz `-import <target> -readOnly
+-deleteProject` num projeto temporário (`ghidra/GhidraLauncher.js:326-381`); não aceita `-process`,
+`.gzf` nem DB do Ghidra. O `snapshot_path=<*.json>` de `open_binary`/`close_binary` é só *replay* de
+evidência do próprio REA — e exige análise completa, logo não resolve nada.
+
+### Track B — pré-análise headless — ✅ **análise completa bem-sucedida**
+
+[`bin/ghidra-preanalyze.sh`](../bin/ghidra-preanalyze.sh) roda o **mesmo** `analyzeHeadless` sem
+deadline e grava num projeto persistente
+(`$REA_TOOLS_DIR/ghidra-projects/sublime-rea/sublime_text.gpr`).
+
+**Resultado (2026-10-16):** `Analysis succeeded` + `Save succeeded` + `Import succeeded`.
+
+| Métrica | Valor |
+|---|---|
+| Auto-análise (relatório do `AutoAnalysisManager`) | **334 s** |
+| Wall clock (import → fim) | **~342 s** (11:42:36 → 11:48:18) |
+| Projeto persistente | `sublime_text.rep` + `sublime_text.gpr`, **171 MB** |
+| Default do REA | `330 s` → **a análise estourava por ~4 s** e o REA descartava tudo |
+| **Validação ponta a ponta** | ✅ **`EXIT=0` em 5m54,8 s** com `REA_GHIDRA_STARTUP_TIMEOUT_MS=900000` (`rea analyze --provider ghidra`) — onde antes era `provider_timeout` aos 330 s |
+
+Ou seja: **o alvo é analisável**; o que faltava era deadline (e o default era tragicômico).
+
+O projeto persistente serve para reprocessamento futuro — gerar um `REA_GHIDRA_SEED_FILE` a partir
+dos nomes recuperados é o único vetor real de "alimentar" o REA:
+
+```bash
+# reprocessar SEM re-analisar:
+analyzeHeadless <PROJECT_LOCATION> sublime_text -process sublime_text -noanalysis -postScript <dump.java>
+```
+
+### Track A — análise SEM Ghidra
+
+Fase 1 que **não** depende do núcleo nativo, em [`docs/analysis/`](analysis/):
+
+| Doc | Conteúdo | Situação |
+|---|---|---|
+| [`api-python.md`](analysis/api-python.md) | superfície da API de plugins 3.14 (64 funcs de módulo, 17 enums, 24 classes, 331 métodos, 284 símbolos `sublime_api.*`) + delta vs 3.3 + 12 padrões da ponte + ledger `E1–E33` | ✅ 353 linhas |
+| [`ipc-plugin-host.md`](analysis/ipc-plugin-host.md) | ponte C++↔Python (**memória compartilhada POSIX nomeada + semáforos nomeados**; canais `subl_send`/`subl_recv`/`subl_arecv`) inferida dos `plugin_host-*`, com disassembly | ✅ 477 linhas |
+
+Achados centrais: (a) a API Python é um **facade fino** sobre o módulo nativo `sublime_api`, com
+**handles opacos (int)** e callbacks Python retidos no C++; (b) o núcleo **cria** os canais e faz
+`fork/exec` do `plugin_host`, que os **abre** — nome = `<id>:subl_<canal>-<versão>`.
+
+---
+
+## ▶️ Como retomar
+
+```bash
+cd /home/gbortolas/ai/workspaces/sublime-rea
+set -a; . ./setup/env.sh; set +a          # ← obrigatório para o CLI
+
+# 1) confirmar que o ambiente continua saudável
+rea doctor --client opencode --provider ghidra --format json
+
+# 2) recon barato do alvo (funciona, não depende do Ghidra)
+rea inspect-binary-layout target/sublime_text/sublime_text --format json
+
+# 3) atacar o Ghidra pela rota nativa do REA (a análise leva ~355 s)
+export REA_GHIDRA_STARTUP_TIMEOUT_MS=900000
+rea open-binary target/sublime_text/sublime_text ...
+
+# 3b) ou consultar o projeto persistente já pré-analisado (Track B)
+bin/ghidra-preanalyze.sh        # cria/atualiza o projeto; ver o header do script
+```
+
+Material de apoio: skill `reverse-engineer-anything` (+ `references/native-and-artifacts.md`).
+
+---
+
+## 🗂️ Estado do repositório
+
+- Repo **git** inicializado (não era antes). Working tree limpo (`git log --oneline` para o histórico).
+- `.gitignore` cobre `target/`, `tools/`, `setup/env.sh`, artefatos Ghidra, venvs, etc.
+- ⚠️ `bin/sublime_text_build_4215_x64.tar.xz` (22 MB) **está versionado** (o `.deb` já foi removido).
+  Avaliar `git rm --cached` + download sob demanda com SHA pinado (ver P3.1 no BACKLOG).
+- ⚠️ `.serena/` aparece como untracked (cache do LSP Serena) — falta cobrir no `.gitignore` (P3.8).
+
+---
+
+## Convenções / diretórios
+
+| Caminho | Papel |
+|---|---|
+| `$REA_TOOLS_DIR` = `~/.local/share/sublime-rea-tools/` | ferramentas baixadas (fora do repo) |
+| `…/ghidra_12.1.4_PUBLIC/` | instalação do Ghidra |
+| `…/pwntools-venv/` | venv do provider offline |
+| `…/ghidra-projects/sublime-rea/` | projeto Ghidra persistente (171 MB, gerado pelo Track B) |
+| `~/sr-tools` | symlink → `$REA_TOOLS_DIR` (o Ghidra recusa `.` no path) |
+| `target/` | alvo extraído (gitignored) |
+| `setup/env.sh` | gerado; `source` obrigatório para o CLI |
+| `docs/analysis/` | evidências da Fase 1 (Track A) |
+| `docs/HANDOFF.md` · `docs/BACKLOG.md` | este doc · backlog vivo |

@@ -48,3 +48,6 @@ venv/
 # --- misc ---
 *.log
 .DS_Store
+
+# Cache do LSP Serena
+.serena/
