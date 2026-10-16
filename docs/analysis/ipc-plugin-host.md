@@ -8,8 +8,9 @@
 > `plugin_host-3.14` / `plugin_host-3.3`. `crash_handler` é tratado como *fora do escopo*
 > (seção 7), apenas para descartá-lo como participante.
 
-**Docs irmãos (Fase 1):** [`buffer-structure.md`](buffer-structure.md) (P1.1 — estrutura de buffer) ·
-[`concurrency.md`](concurrency.md) (P1.2 — modelo de concorrência) ·
+**Docs irmãos (Fase 1):** [`ipc-protocol.md`](ipc-protocol.md) (**P1.3 — framing, anel, semáforos e
+enum de opcodes** deste mesmo IPC) · [`buffer-structure.md`](buffer-structure.md) (P1.1 — estrutura de
+buffer) · [`concurrency.md`](concurrency.md) (P1.2 — modelo de concorrência) ·
 [`api-python.md`](api-python.md) (API de plugins) · [`packaging.md`](packaging.md) (P1.6 — empacotamento).
 
 ---
@@ -30,6 +31,18 @@ com **três canais** por instância de host:
 | `subl_recv`   | inbound síncrono: núcleo → host |
 | `subl_arecv`  | inbound assíncrono ("async recv"): núcleo → host |
 
+> ⚠️ **Revisão P1.3 — direção dos canais [INFERIDO], confiança média.** A tabela acima supõe
+> **host → núcleo** por `subl_send`. A evidência nova ([`ipc-protocol.md`](ipc-protocol.md) §5,
+> ledger `E16–E19`) aponta o **contrário**: o host **lê** o canal de entrada em `bundle+0x10` =
+> `subl_send` e **escreve** a requisição em `bundle+0x8`/`+0x18` = `subl_recv`/`subl_arecv` → com
+> nomes **relativos ao núcleo**, `subl_send` é o canal de **entrada do host** (núcleo → host) e
+> `subl_recv`/`subl_arecv` são as **saídas** (host → núcleo, síncrona/assíncrona). Ou seja: os três
+> nomes **não mudam** (seguem como em §3.1), mas o **sentido** lido de cada um é o inverso do que
+> esta tabela afirma. A afirmação antiga fica **registrada como superada — não foi apagada**;
+> confiança **média** (padrão request/response + offsets do bundle em `main`). Ressalva viva: o uso
+> do `subl_arecv` por threads não-main **não** foi seguido até o consumidor
+> ([`ipc-protocol.md`](ipc-protocol.md) §7.2).
+
 O núcleo **cria** os objetos e **faz spawn** do host; o host **só abre** (nunca cria —
 ver §4). O nome de cada objeto embute o id da instância e a **versão do Python/host**
 (`-3.14` / `-3.3`), o que evita colisão entre os dois hosts.
@@ -40,7 +53,8 @@ Dentro de cada `shm_channel` há um **buffer circular delimitado** com:
 - framing de mensagem com **comprimento** (leitura em duas etapas: header + corpo).
 
 As mensagens são despachadas por `handle_protocol_message(opcode, payload)`, com um
-**enum textual de ~281 comandos** (`api_*`) — seção 3.3.
+**enum de ~281 comandos** (`api_*`) — seção 3.3. *(Correção P1.3: o enum é **numérico**, não
+textual — `uint32 id ∈ [1,281]`; ver [`ipc-protocol.md`](ipc-protocol.md) §6.4.)*
 
 ---
 
@@ -207,22 +221,16 @@ impedir colisão quando `plugin_host-3.3` e `plugin_host-3.14` coexistem.
 
 ### 3.6 Disassembly dirigido (comportamento, não só nomes)
 
-`create_shared_memory(name, size, err)` @`0xf81a9` — sequência literal observada:
+`create_shared_memory(name, size, err)` @`0xf81a9` — sequência observada:
 
-```
-push $0x2f; pop %rsi          ; '/'       → nome passa a "/<name>"
-… append '/' + name (string_buffer) …     ; monta o nome a partir do buffer + '/'
-strlen(name) / append(name)   ; resolve_path-ish
-mov  $0xc2,%esi               ; flags = O_RDWR|O_CREAT|O_EXCL  (0x2|0x40|0x80)
-mov  $0x1c0,%edx              ; mode  = 0700
-call shm_open@plt             ; <-- shm_open("/<name>", 0xc2, 0700)
-call ftruncate@plt            ; <-- dimensiona
-call mmap@plt                 ; <-- PROT_READ|PROT_WRITE(3), MAP_SHARED(1), fd, 0
-call close@plt                ; fecha o fd, mantém o mapeamento
-```
+- **prepende `/`** (constante `0x2f`) ao nome, que passa a `/<name>`, montado num `string_buffer`
+  (`strlen` + *append*, no estilo de `resolve_path`);
+- **flags `0xc2`** = `O_RDWR|O_CREAT|O_EXCL` (`0x2|0x40|0x80`) e **mode `0x1c0`** = `0700`;
+- chama `shm_open("/<name>", 0xc2, 0700)` (via PLT) → `ftruncate` (dimensiona) →
+  `mmap` (`PROT_READ|PROT_WRITE`(3), `MAP_SHARED`(1), fd, 0) → `close` (fecha o fd, mantém o mapeamento).
 
 `open_shared_memory(name, size, err)` @`0xf861d`: `shm_open` (sem `O_CREAT`) →
-`mmap` → `close`. `close_shared_memory(shm_handle)` @`0x1a871d`: `jmp munmap`.
+`mmap` → `close`. `close_shared_memory(shm_handle)` @`0x1a871d`: desvia para `munmap`.
 
 `create_shm_channel(name, err)` @`0xf8293`:
 `unlink_shared_memory(name)` → `create_shared_memory(name, size, err)` → `new shm_channel`
@@ -239,9 +247,9 @@ Semântica de sinal (disassembly das funções `shm_channel`):
 | Função | Chamadas observadas | Leitura |
 |---|---|---|
 | `wait_read_signal(long)` | `sem_wait` → `clock_gettime` → `sem_timedwait` → `__errno_location` | espera por dado, com *deadline* (`sem_timedwait`) |
-| `wait_write_signal()` | `jmp sem_wait` | espera por espaço, **bloqueante** |
-| `signal_reader()` | `jmp sem_post` | publica "dado disponível" para o leitor |
-| `signal_writer()` | `jmp sem_post` | publica "espaço liberado" para o escritor |
+| `wait_write_signal()` | desvia para `sem_wait` | espera por espaço, **bloqueante** |
+| `signal_reader()` | desvia para `sem_post` | publica "dado disponível" para o leitor |
+| `signal_writer()` | desvia para `sem_post` | publica "espaço liberado" para o escritor |
 | `write_message(buf,len)` | `pthread_mutex_lock` → `write_bytes` → `pthread_mutex_unlock` → `signal_reader` | escrita atômica + aviso |
 | `read_message(sb,int,long)` | `read_bytes` (header) → `string_buffer::resize` → `read_bytes` (corpo) → `signal_writer` | **framing com comprimento** (2 etapas) |
 
@@ -300,7 +308,7 @@ plugin_host (main)
 
 Pontos-chave comprovados:
 
-- **O host nunca cria objetos.** Não há **nenhuma** referência (`call`) a
+- **O host nunca cria objetos.** Não há **nenhuma** chamada a
   `create_shm_channel` (`0xf8293`) em `plugin_host-3.14` → o host só chama
   `open_shm_channel`, **três vezes**, na mesma função (`main`): `0x1a2e63`, `0x1a2e91`,
   `0x1a2ebf`. Logo, o **núcleo é o criador** (corroborado por
@@ -310,11 +318,14 @@ Pontos-chave comprovados:
   (`shm_unlink`), padrão "unlink-after-open" que evita vazamento de nomes. O objeto
   permanece vivo enquanto houver mapeamentos.
 - **Bundle com índice:** o resultado de cada `open_shm_channel` é guardado em
-  `bundle->channel[i]` (ex.: `mov %rax,0x8(%rbx)` para o `recv`, `rbx = g_shm_bundles`),
+  `bundle->channel[i]` (ex.: o ponteiro do canal `recv` é gravado em `+0x8` sobre a base `g_shm_bundles`),
   o que casa com `shm_bundle::fetch(index)` / `size()`. A ordem observada no host é
   **recv (0), send (1), arecv (2)**.
-- O loop de `main` itera os canais com **stride `0x20`** (`add $0x20,%r12`),
+- O loop de `main` itera os canais com **stride `0x20`** (avanço de `0x20` no ponteiro de iteração),
   consistente com `sizeof(shm_channel)`.
+  > ⚠️ **Caveat (P1.3):** `ipc-protocol.md` §3.2 mede o objeto alocado pelo *ctor* de `shm_channel`
+  > em **`0x58`** bytes, o que **não** casa com o stride `0x20` deste loop — a incompatibilidade está
+  > registrada como `[DESCONHECIDO]` lá; o loop pode iterar outro vetor (ex.: array de ponteiros).
 
 ---
 
@@ -397,7 +408,7 @@ dos plugins.
 | `shm_open` / `shm_unlink` | **ausentes** |
 | `sem_open` / `sem_unlink` / `sem_close` | **ausentes** (só `sem_init` **anônimo**, `Check failed: sem_init(&semaphore_, 0, value) == 0`) |
 | `mmap` | **ausente** (só `munmap`) |
-| `subl_send` / `subl_recv` / `sub*` de canal | **ausentes** |
+| `subl_send` / `subl_recv` e demais nomes de canal | **ausentes** |
 | Transporte próprio | `socketpair` + `sendmsg`/`recvmsg` + `epoll_create1` + `eventfd` |
 
 Ou seja: o handler usa socketpair/`sendmsg`/`recvmsg` (protocolo do Crashpad) e
@@ -412,46 +423,47 @@ semáforos **anônimos** — nada disso é o anel de memória compartilhada do S
 
 ## 8. Limites e incógnitas
 
-1. **Layout binário do canal (desconhecido).** `shm_bundle::config(size)`/`fetch(index)`
-   sugerem uma **região fixa com N sub-canais**; os *offsets* internos de cada
-   `shm_channel` (cabeçalho do anel, ponteiros de leitura/escrita, contadores) **não**
-   foram recuperados. Não sabemos o `size` passado a `config`/`create_shared_memory`
-   nem a capacidade de cada anel.
-2. **Framing de `read_message`/`write_message`.** Sabe-se que há **duas leituras**
-   (header → `string_buffer::resize` → corpo), logo a mensagem tem um **prefixo de
-   comprimento**; a codificação exata do prefixo (largura, endianness, se inclui mais
-   campos) é **desconhecida**.
-3. **Enum de opcodes de `handle_protocol_message(unsigned long, …)`.** O 1º parâmetro é
-   um `unsigned long` (provável id/opcode) **e/ou** o payload traz um nome textual. As
-   **281–282 strings `api_*`** (ex.: `api_view_text_point_utf8`, `api_view_run_command`,
-   `api_plugin_host_loaded_plugins`) são os candidatos naturais a nomes de comando, mas
-   o **mapeamento `api_*` → valor do opcode não foi estabelecido**.
-4. **Nome do objeto: barra inicial.** Os literais **não** trazem `/`. Provou-se que
-   `create_shared_memory` **prepende** `/` (`push $0x2f`) antes de `shm_open`; resta
+### ✅ Resolvidas pelo P1.3 (ver [`ipc-protocol.md`](ipc-protocol.md))
+
+| # (aqui) | Incógnita antiga | Resolução |
+|---|---|---|
+| 1 | **Layout binário do canal.** Offsets internos do `shm_channel`, `size` de `config`/`create_shared_memory` e capacidade de cada anel **não recuperados** | **resolvida** — região shm = `0x80000` literal; anel com header `0x80` (índices `u64` @`0x0`/`0x40`), dados @`0x80`, capacidade **constante** `0x7ff80`; objeto `shm_channel` = `0x58` com semáforos @`0x0`/`0x8`, mutex @`0x10`, ring @`0x38`, base @`0x40`, size @`0x48`, creator @`0x50`, poison @`0x51`; bundle = 1 canal ×`0x78` ([`ipc-protocol.md`](ipc-protocol.md) §3 e §5, `E8–E11`/`E15–E17`) |
+| 2 | **Framing de `read_message`/`write_message`.** Largura/endianness do prefixo e campos extras | **resolvida** — prefixo = **4 bytes `uint32` LE** nativo; corpo sem NUL e sem terminador garantido; **nenhum** campo além do comprimento (tipo/opcode/flags **não** existem no framing) ([`ipc-protocol.md`](ipc-protocol.md) §2, `E1–E7`) |
+| 3 | **Enum de opcodes.** “Textual” e/ou 1º parâmetro `unsigned long`; mapeamento `api_*` → opcode | **resolvida** — dispatch **100% numérico**: opcode = 1º `uint32` do payload; o `unsigned long` é o **índice do bundle** (`stride 0x78`); dois enums: **U** (host→núcleo) = 281 ids `1..281` (tabela `.rodata 0x104a70`, Anexo A) e **V** (núcleo→host) = 71 ids `1..71` (`.rodata 0x81e28`) ([`ipc-protocol.md`](ipc-protocol.md) §6, `E22–E30`) |
+| 8 | **Nomes exatos dos dois semáforos** por canal | **resolvida** — templates `%s:r` (val inicial 0) e `%s:w` (val inicial 1) → `<canal>:r` / `<canal>:w` (p.ex. `<id>:subl_send-3.14:r`); `open` faz `sem_unlink` imediato após cada `sem_open` ([`ipc-protocol.md`](ipc-protocol.md) §4, `E12–E14`) |
+
+### Incógnitas remanescentes (renumeradas)
+
+1. **Nome do objeto: barra inicial.** Os literais **não** trazem `/`. Provou-se que
+   `create_shared_memory` **prepende** `/` (constante `0x2f`) antes de `shm_open`; resta
    confirmar se o **núcleo** faz o mesmo caminho e se há *normalização* por
    `resolve_path` (por usuário/sessão). O candidato a base `sublime.XXXXXX`
    (`mkstemp`) tem uso **não confirmado** (pode ser path de arquivo/log, não de shm).
-5. **Significado exato de `argv[1]`.** É o id usado no nome (`%s` no host). O núcleo
+2. **Significado exato de `argv[1]`.** É o id usado no nome (`%s` no host). O núcleo
    formata com `%u`; **não** foi confirmado que seja o **PID** (nem de quem: núcleo ou
    host).
-6. **Os 8 argumentos de CLI.** `main` exige `argc > 7` e consome `argv[1..7]`; o
+3. **Os 8 argumentos de CLI.** `main` exige `argc > 7` e consome `argv[1..7]`; o
    **contrato completo** (nomes/semântica de `argv[5..7]`, e a flag `argv[4]=="true"`)
    não foi totalmente reconstruído.
-7. **`socketpair`/`sendmsg`/`recvmsg` no núcleo e nos hosts.** Presentes, mas **não** são
+4. **`socketpair`/`sendmsg`/`recvmsg` no núcleo e nos hosts.** Presentes, mas **não** são
    o transporte de mensagens de plugin. Uso exato **não determinado** (cliente Crashpad
    é o suspeito principal; pode haver também um canal auxiliar — o host cita
    `--shared-client-connection`).
-8. **Dois semáforos por canal: nomes exatos.** Sabe-se que há `sem_open` ×2 por canal e
-   `sem_unlink` ×2 no destroy; os **sufixos de nome** (p.ex. algo como `…:subl_send-…`
-   + variante) **não** foram recuperados (os `sprintf` que os montam usam buffers de
-   pilha, não literais adicionais visíveis).
-9. **`sublime_text` é "cega" para símbolos.** Só exporta 12 dynsyms (família `malloc`);
+5. **`sublime_text` é "cega" para símbolos.** Só exporta 12 dynsyms (família `malloc`);
    o lado do núcleo foi caracterizado por **strings + imports**, não por símbolos
    (`shm_channel` no núcleo é código estático, sem nomes). Toda afirmação sobre o lado
    do núcleo tem confiança um degrau abaixo daquelas sobre o host.
-10. **Detalhe do bit em `.data` (`0x20fc30`)**: próximo ao literal `"3.14"`; a leitura
-    exata (`testb $0x1`) e a variante "dinâmica" de versão (`[g_alive+0x18]`, nula
-    estaticamente) não foram totalmente explicadas.
+6. **Detalhe do bit em `.data` (`0x20fc30`)**: próximo ao literal `"3.14"`; a leitura
+   exata (teste do bit `0x1`) e a variante "dinâmica" de versão (`[g_alive+0x18]`, nula
+   estaticamente) não foram totalmente explicadas. *(Relacionada a
+   [`ipc-protocol.md`](ipc-protocol.md) §7.3, incógnita do campo `shm_channel+0x50`.)*
+
+> **Pendências herdadas / novas do P1.3** (sem promoção de confiança) vivem em
+> [`ipc-protocol.md`](ipc-protocol.md) §7: padding do header do anel `0x8..0x40`/`0x48..0x80`;
+> semântica exata do trio de canais do bundle (por que o request/response **lê** de `subl_send` e
+> **escreve** em `subl_recv`; quando `subl_arecv` é usado por thread não-main); uso real de
+> `shm_channel+0x50`; modo **síncrono vs assíncrono** por id e geração do `req_id`; quais ids
+> retornam `true` em `is_app_blocking_while_sending`; subcódigos de `data[0] == 0`.
 
 ---
 
@@ -461,15 +473,15 @@ semáforos **anônimos** — nada disso é o anel de memória compartilhada do S
 |---|---|---|---|---|
 | 1 | IPC = memória compartilhada POSIX nomeada + semáforos nomeados | `create_shared_memory` chama `shm_open`/`ftruncate`/`mmap`/`close`; `create_shm_channel` chama `sem_open` ×2; `destroy` faz `sem_unlink` ×2; `close` faz `munmap`+`sem_close` ×2 | disassembly (`objdump -d` PLT calls) | **alta** |
 | 2 | Três canais: `subl_send`, `subl_recv`, `subl_arecv` | 3× `sprintf("%s:subl_%s%s")` + 3× `open_shm_channel` em `main`; strings nos dois lados | disassembly + strings | **alta** |
-| 3 | Núcleo cria; host só abre | host-3.14/3.3: zero `call create_shm_channel`; 3× `call open_shm_channel`; núcleo tem `]: failed to create shm channel for worker ` | disassembly + string | **alta** |
-| 4 | Nome = `<id>:subl_<canal>-<versão>`, prefixado com `/` | literais `%u:subl_*%s` (núcleo) e `%s:subl_*%s` (host); `-%s` @`0x75cb5` + literal `"3.14"` (`0x20fc31`) / `"3.3"` (`0x636680`); `push $0x2f` antes de `shm_open` | disassembly + `.data` | **alta** (média em `argv[1]`=PID) |
-| 5 | Mutex por canal + 2 semáforos (leitura/escrita) | `write_message`: `pthread_mutex_lock`→`write_bytes`→`unlock`→`signal_reader`; `signal_*`: `jmp sem_post` | disassembly | **alta** |
-| 6 | Espera com timeout no `read`, bloqueante no `write` | `wait_read_signal`: `sem_wait`+`clock_gettime`+`sem_timedwait`; `wait_write_signal`: `jmp sem_wait` | disassembly | **alta** |
+| 3 | Núcleo cria; host só abre | host-3.14/3.3: zero chamadas a `create_shm_channel`; 3× chamada a `open_shm_channel`; núcleo tem `]: failed to create shm channel for worker ` | disassembly + string | **alta** |
+| 4 | Nome = `<id>:subl_<canal>-<versão>`, prefixado com `/` | literais `%u:subl_*%s` (núcleo) e `%s:subl_*%s` (host); `-%s` @`0x75cb5` + literal `"3.14"` (`0x20fc31`) / `"3.3"` (`0x636680`); prefixo `/` (constante `0x2f`) prependido antes de `shm_open` | disassembly + `.data` | **alta** (média em `argv[1]`=PID) |
+| 5 | Mutex por canal + 2 semáforos (leitura/escrita) | `write_message`: `pthread_mutex_lock`→`write_bytes`→`unlock`→`signal_reader`; `signal_*`: desvia para `sem_post` | disassembly | **alta** |
+| 6 | Espera com timeout no `read`, bloqueante no `write` | `wait_read_signal`: `sem_wait`+`clock_gettime`+`sem_timedwait`; `wait_write_signal`: desvia para `sem_wait` | disassembly | **alta** |
 | 7 | Mensagem tem prefixo de comprimento | `read_message`: `read_bytes`→`string_buffer::resize`→`read_bytes` | disassembly | **alta** |
 | 8 | Dispatch por `handle_protocol_message(unsigned long, string_buffer const&)` | símbolo `_Z23handle_protocol_messagemRK13string_buffer` @`0x17677e`, chamado no loop de `main` | símbolo + disassembly | **alta** |
 | 9 | Enum de protocolo textual `api_*` (281/282 comandos) | `strings \| grep '^api_…$'` = 281 (3.14), 282 (3.3) | strings | **média** (contagem alta; o *mapeamento* para opcode é incógnita §8.3) |
 | 10 | Bundle com índice de canais | `shm_bundle::config/init/size/fetch`, `g_shm_bundles`, `send_channel(shm_bundle*)`; store `bundle->chan[i]` | símbolos + disassembly | **alta** |
-| 11 | Host exige ≥8 argumentos | `main`: `cmp $0x7,%ebp; jg …` senão `dprintf`+`return 1`; `init_paths_from_args(3,&argv[5])` | disassembly | **alta** |
+| 11 | Host exige ≥8 argumentos | `main`: compara a contagem de argumentos com `0x7` (prossegue se maior), senão `dprintf`+`return 1`; `init_paths_from_args(3,&argv[5])` | disassembly | **alta** |
 | 12 | `plugin_host-3.3` embute CPython 3.3.7 | 1582 `Py_*`/`_Py_*` definidos (`readelf -sW`), `3.3.7`@`0xf1b54`, `python3.3.zip`@`0xe963f`, `Py_Initialize`@`0x3dd22c` | dynsym + strings | **alta** |
 | 13 | `plugin_host-3.14` liga `libpython3.14.so.1.0` | `NEEDED` + `RUNPATH=$ORIGIN`; 0 `Py_*` definidos, ~80 importados (`Py_InitializeFromConfig`, `PyConfig_*`) | `readelf -d` + dynsym | **alta** |
 | 14 | IPC idêntico entre 3.3 e 3.14 | mesmos símbolos de canal e mesmos 3 nomes nos dois hosts; mesma sequência em `main` | símbolos + disassembly | **alta** |
@@ -478,4 +490,16 @@ semáforos **anônimos** — nada disso é o anel de memória compartilhada do S
 | 17 | Núcleo e hosts importam o mesmo par shm/sem | `nm -D -u`: `shm_open, shm_unlink, mmap, munmap, ftruncate, sem_open, sem_post, sem_wait, sem_timedwait, sem_unlink, sem_close` | imports | **alta** |
 | 18 | Thread dedicada ao canal assíncrono no núcleo | literal `shm_reader` @`0xf56d4` imediatamente após `%u:subl_arecv%s` @`0xf56c4` | strings (adjacência) | **média** (adjacência é forte, mas nome de thread) |
 | 19 | Modelo multi-thread com filas de trabalho | `g_async_work_queue(_runner)`, `work_queue`, RTTI `*_queue_runner`, `is_main_thread()`, `start_process_monitor_thread` | símbolos | **alta** |
-| 20 | Mensagens do host → núcleo saem por `subl_send` | `send_channel(shm_bundle*)` @`0x175dc1` + 3 nomes | símbolos | **média** (direção inferida; não segui o buffer até o índice) |
+| 20 | Mensagens do host → núcleo saem por `subl_send` | `send_channel(shm_bundle*)` @`0x175dc1` + 3 nomes | símbolos | **média** (direção inferida; não segui o buffer até o índice) — ⚠️ **revisado em P1.3**: a evidência nova inverte a direção (`subl_send` = **entrada do host**); ver §1 nota de revisão e [`ipc-protocol.md`](ipc-protocol.md) `E18`/`E19` |
+| 21 | Framing = `[uint32 LE len][payload len bytes]`, sem tipo/opcode/flags; corpo sem terminador NUL | store de 4 bytes do comprimento @`0xe012b`; `resize` `0xd7a2c`; `malloc(len)` sem `+1` @`0xe5e60` | disassembly | **alta** ([`ipc-protocol.md`](ipc-protocol.md) `E1–E7`) |
+| 22 | Anel shm `0x80000`: índices `u64` @`0x0`/`0x40`, dados @`0x80`, capacidade **constante** `0x7ff80` (útil `0x7ff7f`) | constante `0x80000` como 2º argumento `0xf82ae`; divisão pelo divisor `0x7ff80` | disassembly | **alta** ([`ipc-protocol.md`](ipc-protocol.md) `E8–E10`) |
+| 23 | `shm_channel` = `0x58`: sem @`0x0`/`0x8`, mutex @`0x10`, ring @`0x38`, base @`0x40`, size @`0x48`, creator @`0x50`, poison @`0x51` | ctor `0xf84fc`, dtor `0xf84a4`, mark-dead `0xfa3f0` | disassembly | **alta** ([`ipc-protocol.md`](ipc-protocol.md) `E11`) |
+| 24 | Semáforos nomeados `<canal>:r` (val 0) e `<canal>:w` (val 1); `open` = *unlink-after-open* | literais `%s:r` `0x7aafe` / `%s:w` `0x7a26f`; `sem_open` `0xf8317`/`0xf8344`; `sem_unlink` `0xf8592`/`0xf85d1` | disassembly + bytes | **alta** ([`ipc-protocol.md`](ipc-protocol.md) `E12–E14`) |
+| 25 | Bundle = 1 elemento de `0x78`; canais em `+0x8` `subl_recv`, `+0x10` `subl_send`, `+0x18` `subl_arecv`; *slot* por papel de thread | `config(1)` `0x1a2de4`; literais `0x78b1f`/`0x7b132`/`0x751fb`; `send_channel` `0x175dd1` | disassembly | **alta** ([`ipc-protocol.md`](ipc-protocol.md) `E15–E17`) |
+| 26 | Dispatch **numérico**: opcode = 1º `uint32` do payload; `unsigned long` = índice do bundle; enum **U** = 281 ids (`1..281`, `.rodata 0x104a70`) e enum **V** = 71 ids (`1..71`, `.rodata 0x81e28`); tabelas de saltos densas | `handle_protocol_message` @`0x17677e`; dispatcher gêmeo do núcleo @`0x54d999`; `main` @`0x1a2f99`–`0x1a2fc7` | disassembly + readelf | **alta** ([`ipc-protocol.md`](ipc-protocol.md) `E22–E30`, Anexo A) |
+
+> **Notas de revisão P1.3:** (a) o enum **não** é textual — a linha 9 acima descrevia 281–282
+> literais `api_*` como “candidatos a nomes de comando”; o mapeamento **foi** estabelecido e é
+> **numérico** (`id 1..281` ↔ `api_*`, Anexo A de [`ipc-protocol.md`](ipc-protocol.md)); (b) a linha
+> 20 fica **superada** quanto à direção (mantida como registro da inferência antiga); (c) pendências
+> remanescentes em [`ipc-protocol.md`](ipc-protocol.md) §7.

@@ -50,8 +50,8 @@ máx 2^31−1). Fatos descobertos no `dist/` do `rea-agents@6.5.0` — detalhes 
 ## 📐 P1 — Fase 1 (conteúdo da análise) — **em curso**
 
 Dividir por pergunta (o skill recomenda decompor em escopos independentes, com ledger de Evidence
-IDs). Cada item vira uma seção da spec técnica abstrata. **O binário está destravado** — P1.3
-(opcodes/framing) e P1.4 (render) podem ser atacados direto.
+IDs). Cada item vira uma seção da spec técnica abstrata. **O binário está destravado** — P1.4
+(render) e P1.5 (ledger consolidado) podem ser atacados direto.
 
 - [x] **P1.1 — Estrutura de buffer** ✅ entregue: [`docs/analysis/buffer-structure.md`](analysis/buffer-structure.md).
       Achado: classe **`TextBuffer`** (facade, RTTI) delega a um objeto interno **anônimo** com
@@ -66,15 +66,23 @@ IDs). Cada item vira uma seção da spec técnica abstrata. **O binário está d
       **o tamanho N** é **[INFERIDO]**) e **pool on-demand limitado a 2** (`file_read_thread`);
       retorno ao main thread pelo **`px_main_thread_scheduler`** **[INFERIDO]**; o `plugin_host` é
       **processo**, não thread. Ledger E1–E21.
-- [~] **P1.3 — Ponte IPC C++ ↔ Python**: **lado Python ✅** (`api-python.md`) · **lado IPC ✅**
-      (`ipc-plugin-host.md`: shm POSIX + semáforos; canais `subl_send`/`subl_recv`/`subl_arecv`).
-      **Falta:** mapear os opcodes de `handle_protocol_message` e o framing de
-      `read_message`/`write_message` (precisa do núcleo → agora desbloqueado).
+- [x] **P1.3 — Ponte IPC C++ ↔ Python** ✅ entregue: **lado Python** em
+      [`docs/analysis/api-python.md`](analysis/api-python.md) · **lado mecanismo** em
+      [`docs/analysis/ipc-plugin-host.md`](analysis/ipc-plugin-host.md) (shm POSIX + semáforos;
+      canais `subl_send`/`subl_recv`/`subl_arecv`) · **lado protocolo** em
+      [`docs/analysis/ipc-protocol.md`](analysis/ipc-protocol.md). Achado: framing =
+      `[uint32 LE len][payload]` (sem tipo/opcode), anel em shm de `0x80000` (header `0x80`,
+      índices `u64` @`0x0`/`0x40`, capacidade constante `0x7ff80`), semáforos `<canal>:r`/`:w` e
+      **dispatch 100% numérico** por tabela de saltos — enums **U** (host→núcleo, **281 ids**,
+      Anexo A com o mapa completo `id → api_*`) e **V** (núcleo→host, **71 ids**); 3.3 e 3.14 falam
+      o **mesmo** protocolo. Ledger E1–E36 (consolida os dois relatórios). **Direção dos canais
+      revisada** (`subl_send` = entrada do host) — `[INFERIDO]`, confiança média.
 - [ ] **P1.4 — Pipeline de render**: indícios de GPU/OpenGL/Skia; virtualização de viewport.
       Hipótese "Qt" **já refutada** pelo P1.2 — toolkit confirmado **GTK3/GLib**, render provavelmente
-      **Skia** via `libGL`/`libX11`.
+      **Skia** via `libGL`/`libX11`. ← **próximo**.
 - [ ] **P1.5 — Ledger de evidências**: tabela `conclusão → Evidence ID → tipo → limites`
-      (consolidando os ledgers parciais já existentes em `docs/analysis/`).
+      (consolidando os ledgers parciais já existentes em `docs/analysis/` — **todos** os docs da
+      Fase 1 têm ledger `E<n>`; alternativa barata ao P1.4, não depende de análise nova).
 - [x] **P1.6 — Modelo de empacotamento** ✅ entregue: [`docs/analysis/packaging.md`](analysis/packaging.md).
       Achado: namespace lógico **plano** — cada `<Nome>.sublime-package` é um **ZIP sem manifesto**
       exposto como `Packages/<Nome>/…`; a **extensão** define o papel; precedência **`User` >

@@ -14,9 +14,10 @@
 > [`BACKLOG.md`](BACKLOG.md). Não peça contexto: ele está todo em `docs/`.
 
 **Estado em uma linha:** ambiente ✅ · binário-alvo **100% analisável** ✅ · Track A (API Python +
-IPC) ✅ · **P1.1 buffer** ✅ · **P1.2 concorrência** ✅ · **P1.6 empacotamento** ✅ · **P0.6 (MCP)** ✅ ·
-**falta** P1.3 (opcodes/framing do IPC), P1.4 (render), P1.5 (ledger consolidado), a Fase 2
-(síntese) e a Fase 3 (o editor em Electron/TS).
+IPC) ✅ · **P1.1 buffer** ✅ · **P1.2 concorrência** ✅ · **P1.3 IPC (framing + opcodes)** ✅ ·
+**P1.6 empacotamento** ✅ · **P0.6 (MCP)** ✅ ·
+**falta** P1.4 (render), P1.5 (ledger consolidado), a Fase 2 (síntese) e a Fase 3 (o editor em
+Electron/TS).
 
 **✅ Passo operacional resolvido (2026-10-16).** O `setup.py` foi rodado e o MCP `rea` foi relançado
 **já com `REA_GHIDRA_STARTUP_TIMEOUT_MS=900000`** (confirmado em `/proc/*/environ`) — **não** é mais
@@ -30,10 +31,12 @@ python3 setup/setup.py        # idempotente: reescreve setup/env.sh + environmen
 Sem o deadline maior, `open_binary`/`analyze` **via MCP** volta a estourar os 330 s (a análise leva
 ~355 s).
 
-**Próxima tarefa recomendada:** **P1.3 — opcodes de `handle_protocol_message` + framing**
-(`read_message`/`write_message`) — a sessão do binário `rea` está **aberta** (reaproveitável, sem
-novo custo de análise de ~355 s). Alternativa barata e já desbloqueada: **P1.4 — pipeline de
-render** (o P1.2 já confirmou toolkit **GTK3/GLib** e indícios de Skia via `libGL`/`libX11`).
+**Próxima tarefa recomendada:** **P1.4 — pipeline de render** (o P1.2 já confirmou toolkit
+**GTK3/GLib** e indícios de **Skia** via `libGL`/`libX11`; hipótese "Qt" refutada) — atacável pelo
+Ghidra/`objdump` sobre o alvo já analisável, sem desbloquear nada novo. Alternativa barata e já
+desbloqueada: **P1.5 — ledger de evidências consolidado** (todos os `docs/analysis/*.md` agora têm
+ledger `E<n>`; consolidar num único índice `conclusão → Evidence ID → tipo → limites` não depende de
+análise nova).
 
 **Ambiente do CLI (obrigatório):** `set -a; . ./setup/env.sh; set +a`.
 
@@ -198,7 +201,8 @@ Fase 1 que **não** depende do núcleo nativo, em [`docs/analysis/`](analysis/):
 | Doc | Conteúdo | Situação |
 |---|---|---|
 | [`api-python.md`](analysis/api-python.md) | superfície da API de plugins 3.14 (64 funcs de módulo, 17 enums, 24 classes, 331 métodos, 284 símbolos `sublime_api.*`) + delta vs 3.3 + 12 padrões da ponte + ledger `E1–E33` | ✅ 353 linhas |
-| [`ipc-plugin-host.md`](analysis/ipc-plugin-host.md) | ponte C++↔Python (**memória compartilhada POSIX nomeada + semáforos nomeados**; canais `subl_send`/`subl_recv`/`subl_arecv`) inferida dos `plugin_host-*`, com disassembly | ✅ 477 linhas |
+| [`ipc-plugin-host.md`](analysis/ipc-plugin-host.md) | ponte C++↔Python (**memória compartilhada POSIX nomeada + semáforos nomeados**; canais `subl_send`/`subl_recv`/`subl_arecv`) inferida dos `plugin_host-*`, com disassembly | ✅ 502 linhas |
+| [`ipc-protocol.md`](analysis/ipc-protocol.md) | **wire protocol** do IPC (P1.3): framing `[uint32 len][payload]`, anel em shm (`0x80000`), `shm_channel`/`shm_bundle`, semáforos `<canal>:r`/`:w` e **dispatch numérico** com os enums **U** (281 ids, Anexo A) e **V** (71 ids) | ✅ 797 linhas |
 | [`packaging.md`](analysis/packaging.md) | **empacotamento de recursos** (P1.6): `.sublime-package` (ZIPs **sem manifesto**) + `.sublime-syntax`; namespace lógico plano, extensão = contrato, precedência `User` > `Default` | ✅ 370 linhas |
 
 Achados centrais: (a) a API Python é um **facade fino** sobre o módulo nativo `sublime_api`, com
@@ -223,6 +227,25 @@ processo **GTK3/GLib single-main-thread** (**`gtk_main`** + `g_idle_add`/`g_sour
 limitado a 2** (`file_read_thread` **[OBSERVADO]**); o retorno ao main thread passa por
 **`px_main_thread_scheduler`** **[INFERIDO]**. O `plugin_host` **é processo separado**
 (`posix_spawn`/`execvp` + shm/sem), **não** thread.
+
+### P1.3 — wire protocol do IPC (Fase 1, via `objdump`/`readelf`)
+
+[`docs/analysis/ipc-protocol.md`](analysis/ipc-protocol.md) (797 linhas, ledger E1–E36 — consolida os
+ledgers dos dois relatórios de P1.3): o transporte é um **anel circular em shm** de `0x80000` B
+(header `0x80`, índices `u64` @`0x0`/`0x40`, dados @`0x80`, capacidade **constante** `0x7ff80`) e a
+mensagem é `[uint32 LE len][payload]`, **sem** campo de tipo/opcode; o **opcode é o 1º `uint32` do
+payload** e o dispatch é **numérico por tabela de saltos densa**, com **dois enums**: **U**
+(host→núcleo, **281 ids** `1..281`, tabela `.rodata 0x104a70`, **Anexo A** com o mapa completo
+`id → api_*`) e **V** (núcleo→host, **71 ids** `1..71`, `.rodata 0x81e28`). O 1º parâmetro
+`unsigned long` de `handle_protocol_message` é o **índice do bundle**, não o opcode; `data[0] == 0` é
+o ***escape*** para o motor de requisições pendentes (resposta assíncrona). Os semáforos são
+`<canal>:r` / `<canal>:w`. **3.3 e 3.14 falam o mesmo protocolo** (U=281, V=71) — a diferença é
+*surface* Python (`lib_path` a mais no 3.14). ⚠️ Achado que **contradiz** a tabela de §1 do doc irmão:
+o **sentido** dos canais é o inverso do que se supunha (`subl_send` = **entrada do host**, nomes
+relativos ao núcleo) **[INFERIDO], confiança média** — registrado como revisão, sem apagar a
+afirmação antiga. Ficam `[DESCONHECIDO]`: padding do header do anel (`0x8..0x40`, `0x48..0x80`),
+uso de `subl_arecv` por thread não-main, `shm_channel+0x50`, modo síncrono vs assíncrono por id /
+geração do `req_id`, quais ids bloqueiam o app e sub-códigos de `data[0] == 0`.
 
 ---
 
