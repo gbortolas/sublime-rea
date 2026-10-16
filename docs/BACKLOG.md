@@ -35,16 +35,15 @@ máx 2^31−1). Fatos descobertos no `dist/` do `rea-agents@6.5.0` — detalhes 
   instalado. Só valeria a pena se o Ghidra não tivesse destravado (ver P3.5).
 - [x] **P0.5 — Estratégia escolhida e registrada** (Track A agora + Track B em background).
 
-### ⏳ P0.6 — Operacional pendente (1 min)
+### ✅ P0.6 — Operacional (CONCLUÍDO)
 
-- [ ] **P0.6 — Rodar o setup e reiniciar o opencode**, para o MCP `rea` parar de usar os 330 s:
+- [x] **P0.6 — `setup.py` rodado + MCP `rea` com o deadline novo** ✅ (2026-10-16). O `setup.py`
+  reescreveu `setup/env.sh` e o `environment` do MCP `rea`; o processo `rea mcp` foi relançado **já
+  com `REA_GHIDRA_STARTUP_TIMEOUT_MS=900000`** (confirmado em `/proc/*/environ`) — **não** foi
+  preciso reiniciar o opencode manualmente.
   ```bash
   python3 setup/setup.py     # idempotente (escreve setup/env.sh + environment do MCP rea)
-  # depois: reiniciar o opencode
   ```
-  Verificado em 2026-10-16: a var **não** está no `opencode.jsonc`, nem no `env.sh`, nem no
-  `~/.bashrc`, e **nenhum** dos processos `rea mcp` a tem no `/proc/*/environ`. Restart sozinho
-  **não** propaga — o setup precisa rodar primeiro.
 
 ---
 
@@ -54,9 +53,12 @@ Dividir por pergunta (o skill recomenda decompor em escopos independentes, com l
 IDs). Cada item vira uma seção da spec técnica abstrata. **O binário está destravado** — P1.1/P1.2/
 P1.4 podem ser atacados direto.
 
-- [ ] **P1.1 — Estrutura de buffer** ⭐ *próxima tarefa recomendada*: Piece Table / Gap Buffer /
-      Rope? Como faz insert/remove, undo/redo e indexação de linha. Evidências: RTTI/vtables,
-      alocadores, contadores, strings.
+- [x] **P1.1 — Estrutura de buffer** ✅ entregue: [`docs/analysis/buffer-structure.md`](analysis/buffer-structure.md).
+      Achado: classe **`TextBuffer`** (facade, RTTI) delega a um objeto interno **anônimo** com
+      **múltiplos buffers de heap + array de registros** → família **piece-table/segmentado
+      [INFERIDO]**; **não** há Gap Buffer nem Rope nomeados. Edição por **comandos delta**
+      (`insert`/`append`/`…_delete`); **undo por grupos** (com *glue* e *soft* undo/redo); linha por
+      **scan com cache**. Ledger E1–E14.
 - [ ] **P1.2 — Modelo de concorrência**: thread principal (UI/event loop) vs threads de background
       (I/O, indexação, syntax highlighting, busca regex). Evidências: `pthread_*`, pools, filas.
       *Pista já colhida (Track A):* o `plugin_host` tem `work_queue_runner`/`thread_queue_runner`/
@@ -70,9 +72,10 @@ P1.4 podem ser atacados direto.
       `libpython3.14` e **nada de Qt**.
 - [ ] **P1.5 — Ledger de evidências**: tabela `conclusão → Evidence ID → tipo → limites`
       (consolidando os ledgers parciais já existentes em `docs/analysis/`).
-- [ ] **P1.6 — Modelo de empacotamento** *(barato, sem Ghidra — bom para esquentar)*: 50+
-      `.sublime-package` (zips) + `.sublime-syntax`; como o núcleo resolve recursos/sintaxes (ver
-      `load_resource`/`find_resources` em `api-python.md`). `unzip -l` + ler um `.sublime-syntax`.
+- [x] **P1.6 — Modelo de empacotamento** ✅ entregue: [`docs/analysis/packaging.md`](analysis/packaging.md).
+      Achado: namespace lógico **plano** — cada `<Nome>.sublime-package` é um **ZIP sem manifesto**
+      exposto como `Packages/<Nome>/…`; a **extensão** define o papel; precedência **`User` >
+      `Default`**; motor de sintaxe YAML (`contexts`/`patterns`). Ledger E1–E22.
 
 ---
 

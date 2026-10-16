@@ -8,25 +8,26 @@
 
 ## ⚡ COMECE AQUI
 
-**Estado em uma linha:** ambiente ✅ · binário-alvo **100% analisável** ✅ · ponte C++↔Python ~80% ✅
-· **falta** extrair buffer/threads/render (Fase 1), sintetizar os padrões (Fase 2) e construir o
-editor em Electron/TS (Fase 3).
+**Estado em uma linha:** ambiente ✅ · binário-alvo **100% analisável** ✅ · Track A (API Python +
+IPC) ✅ · **P1.1 buffer** ✅ · **P1.6 empacotamento** ✅ · **P0.6 (MCP)** ✅ · **falta** P1.2
+(concorrência), P1.3 (opcodes/framing do IPC), P1.4 (render), P1.5 (ledger consolidado), a Fase 2
+(síntese) e a Fase 3 (o editor em Electron/TS).
 
-**⚠️ Passo operacional pendente (~1 min).** O MCP `rea` desta máquina **ainda usa o deadline antigo
-de 330 s**: a var nova só entra no `opencode.jsonc` quando o setup roda — reiniciar o opencode
-**não basta**.
+**✅ Passo operacional resolvido (2026-10-16).** O `setup.py` foi rodado e o MCP `rea` foi relançado
+**já com `REA_GHIDRA_STARTUP_TIMEOUT_MS=900000`** (confirmado em `/proc/*/environ`) — **não** é mais
+preciso reiniciar o opencode manualmente. Para reproduzir numa máquina nova:
 
 ```bash
 cd /home/gbortolas/ai/workspaces/sublime-rea
 python3 setup/setup.py        # idempotente: reescreve setup/env.sh + environment do MCP rea
-# depois: reinicie o opencode (o servidor MCP só relança com o environment novo)
 ```
 
-Sem isso, `open_binary`/`analyze` **via MCP** volta a estourar o deadline (a análise leva ~355 s).
+Sem o deadline maior, `open_binary`/`analyze` **via MCP** volta a estourar os 330 s (a análise leva
+~355 s).
 
-**Próxima tarefa recomendada:** **P1.1 — estrutura de buffer** (Piece Table / Gap Buffer / Rope?) —
-é a decisão de arquitetura mais fundamental e a que a Fase 3 mais depende. Para esquentar com algo
-barato e sem Ghidra: **P1.6 — empacotamento** (`.sublime-package`).
+**Próxima tarefa recomendada:** **P1.2 — modelo de concorrência** (thread principal vs. background:
+I/O, indexação, highlight, regex) — pista já colhida no `plugin_host` (ver `ipc-plugin-host.md`).
+Alternativa barata e já desbloqueada: **P1.3 — opcodes de `handle_protocol_message` + framing**.
 
 **Ambiente do CLI (obrigatório):** `set -a; . ./setup/env.sh; set +a`.
 
@@ -188,10 +189,19 @@ Fase 1 que **não** depende do núcleo nativo, em [`docs/analysis/`](analysis/):
 |---|---|---|
 | [`api-python.md`](analysis/api-python.md) | superfície da API de plugins 3.14 (64 funcs de módulo, 17 enums, 24 classes, 331 métodos, 284 símbolos `sublime_api.*`) + delta vs 3.3 + 12 padrões da ponte + ledger `E1–E33` | ✅ 353 linhas |
 | [`ipc-plugin-host.md`](analysis/ipc-plugin-host.md) | ponte C++↔Python (**memória compartilhada POSIX nomeada + semáforos nomeados**; canais `subl_send`/`subl_recv`/`subl_arecv`) inferida dos `plugin_host-*`, com disassembly | ✅ 477 linhas |
+| [`packaging.md`](analysis/packaging.md) | **empacotamento de recursos** (P1.6): `.sublime-package` (ZIPs **sem manifesto**) + `.sublime-syntax`; namespace lógico plano, extensão = contrato, precedência `User` > `Default` | ✅ 370 linhas |
 
 Achados centrais: (a) a API Python é um **facade fino** sobre o módulo nativo `sublime_api`, com
 **handles opacos (int)** e callbacks Python retidos no C++; (b) o núcleo **cria** os canais e faz
 `fork/exec` do `plugin_host`, que os **abre** — nome = `<id>:subl_<canal>-<versão>`.
+
+### P1.1 — estrutura de buffer (Fase 1, via Ghidra)
+
+[`docs/analysis/buffer-structure.md`](analysis/buffer-structure.md) (275 linhas, ledger E1–E14): o
+buffer é a classe C++ **`TextBuffer`** (facade, RTTI em `.rodata`) que delega o texto a um objeto
+interno **anônimo** com **múltiplos buffers de heap + array de registros** → família
+**piece-table/segmentado [INFERIDO]** (sem Gap Buffer nem Rope nomeados); edição por **comandos
+delta**; **undo por grupos** (*glue*/*soft*); linha por **scan com cache**.
 
 ---
 
@@ -240,5 +250,5 @@ Material de apoio: skill `reverse-engineer-anything` (+ `references/native-and-a
 | `~/sr-tools` | symlink → `$REA_TOOLS_DIR` (o Ghidra recusa `.` no path) |
 | `target/` | alvo extraído (gitignored) |
 | `setup/env.sh` | gerado; `source` obrigatório para o CLI |
-| `docs/analysis/` | evidências da Fase 1 (Track A) |
+| `docs/analysis/` | evidências da Fase 1 (Track A + Track B) |
 | `docs/HANDOFF.md` · `docs/BACKLOG.md` | este doc · backlog vivo |
