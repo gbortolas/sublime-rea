@@ -1,0 +1,50 @@
+# ---------------------------------------------------------------------------
+# sublime-rea — .gitignore
+# Ignora apenas artefatos gerados/baixados. NÃO ignora bin/, docs/ nem setup/.
+# ---------------------------------------------------------------------------
+
+# --- alvo extraído / build ---
+target/
+build/
+dist/
+*.o
+*.so
+*.class
+
+# --- ferramentas baixadas (ex.: se REA_TOOLS_DIR apontar para dentro do repo) ---
+tools/
+
+# --- artefatos do Ghidra ---
+ghidra_*/
+ghidra_*_PUBLIC/
+ghidra_*.zip
+*.part
+*.gpr
+*.rep/
+*.gzf
+*.ghidra
+*.lock
+
+# --- ambiente específico da máquina (gerado) ---
+.env
+setup/env.sh
+
+# --- node ---
+node_modules/
+npm-debug.log*
+yarn-error.log*
+.pnpm-debug.log*
+
+# --- python ---
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+
+# --- IDE / editor ---
+.idea/
+.vscode/
+
+# --- misc ---
+*.log
+.DS_Store
