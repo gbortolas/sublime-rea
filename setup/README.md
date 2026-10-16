@@ -6,8 +6,9 @@ com a ferramenta **REA** (MCP) + **Ghidra**:
 
 - **REA** (`rea-agents@6.5.0`) — cliente MCP de engenharia reversa.
 - **Ghidra 12.1.4** — provider de análise profunda exigido pelo REA (pinado).
+- **pwntools-elf** — provider offline (venv Python dedicado) usado por `inspect_binary_layout`.
 - **Alvo** Sublime Text build 4215 — extraído do bundle local `bin/`.
-- **Registro MCP** no client `opencode`.
+- **Registro MCP** no client `opencode` (inclui `REA_PWNTOOLS_PYTHON`).
 - **Verificação** final com `rea doctor`.
 
 O instalador canônico é **`setup/setup.py`**. O antigo `setup/setup.sh` (bash) permanece
@@ -22,6 +23,7 @@ no disco apenas como **legacy** — não é mais o recomendado.
 | `versions.env` | Versões, URLs e SHA-256 pinados (fonte única de verdade). |
 | `env.sh` | **Gerado** pelo `setup.py`; `source` para exportar o ambiente. Ignorado pelo git. |
 | `.venv/` | **Gerado** pelo bootstrap do `rich` (só quando o `rich` falta no `python3`). Ignorado pelo git. |
+| `$REA_TOOLS_DIR/pwntools-venv/` | **Gerado** pela etapa 6: venv com `pwntools`/`pyelftools`/`unicorn` pinados, apontado por `REA_PWNTOOLS_PYTHON` (fora do repo). |
 | `README.md` | Este documento. |
 
 ## Requisitos
@@ -36,6 +38,11 @@ no disco apenas como **legacy** — não é mais o recomendado.
 - **Java:** JDK **>= 21** (ver seção *Java/JDK*). O script **não** instala JDK.
 - **Rede:** acesso a `github.com` (~543 MiB de download do Ghidra) e ao registry npm.
 - **Disco:** ~1,5 GiB livres para o Ghidra extraído em `$REA_TOOLS_DIR`.
+- **pwntools (offline):** a etapa 6 cria um venv Python em `$REA_TOOLS_DIR/pwntools-venv`
+  e instala `pwntools`/`pyelftools`/`unicorn` (pinados). Precisa do módulo `venv` do Python;
+  se faltar `ensurepip`/`python3-venv`, o script obtém o `pip` via **`get-pip.py`** (sem
+  sudo). Custa ~1–2 min e alguns **~200 MiB** adicionais em `$REA_TOOLS_DIR`; requer rede
+  a `pypi.org` (e a `bootstrap.pypa.io` no fallback).
 
 ## Uso
 
@@ -77,7 +84,7 @@ O `rich` **nunca** é fatal: se não estiver disponível, o script continua func
 Em `--dry-run` e `--help` o bootstrap é **pulado** — o contrato de "zero efeitos
 colaterais" inclui **não** criar o `setup/.venv`.
 
-## O que o script faz (passo a passo)
+## O que o script faz (10 etapas)
 
 1. **SO/arch** — confere Linux x86_64; avisa (sem abortar) em outros ambientes.
 2. **Deps base** — checa `tar xz python3 git node>=20 npm`; lista o que falta; instala
@@ -99,15 +106,27 @@ colaterais" inclui **não** criar o `setup/.venv`.
    → `mv` final (o Ghidra anterior é guardado em `.old.<pid>` e só removido após o novo
    dir estar no lugar; restaurado se o `mv` falhar) → valida `support/launch.properties`.
    Lock, `.part` e o dir temporário são limpos sempre (cleanup garantido).
-6. **`GHIDRA_INSTALL_DIR`** — (re)escreve **sempre** `setup/env.sh` (com `REA_TOOLS_DIR` e
-   `GHIDRA_INSTALL_DIR`); o `~/.bashrc` só com `--write-rc`, num bloco idempotente
-   (não duplica se o bloco já existir).
-7. **Alvo** — extrai `bin/sublime_text_build_4215_x64.tar.xz` **num diretório temporário**
+6. **pwntools (offline)** — cria um venv Python em `$REA_TOOLS_DIR/pwntools-venv` (via
+   `python3 -m venv`; se faltar `ensurepip`/`python3-venv`, obtém o `pip` com o
+   `get-pip.py` oficial, **sem sudo**) e instala os pinos `pwntools==4.15.0`,
+   `pyelftools==0.33`, `unicorn==2.1.2` (+ `setuptools==80.9.0`, exigido pelo import do
+   `unicorn`). Idempotente: se o venv já tem os pacotes nas versões exatas, **não
+   reinstala** (valida importando e checando as versões). Exporta `REA_PWNTOOLS_PYTHON`
+   para o processo.
+7. **`GHIDRA_INSTALL_DIR` / `REA_PWNTOOLS_PYTHON`** — (re)escreve **sempre** `setup/env.sh`
+   (com `REA_TOOLS_DIR`, `GHIDRA_INSTALL_DIR` e `REA_PWNTOOLS_PYTHON`); o `~/.bashrc` só
+   com `--write-rc`, num bloco idempotente (não duplica se o bloco já existir).
+8. **Alvo** — extrai `bin/sublime_text_build_4215_x64.tar.xz` **num diretório temporário**
    e só então faz o `mv` para `target/` (extração atômica: um `tar` interrompido não
    sobrescreve o alvo válido). Valida o binário (`target/sublime_text/sublime_text`):
    tamanho > 1 MiB e magic **ELF** (`\x7fELF`). Idempotente por essa validação.
-8. **MCP** — `rea setup --client opencode --yes` (repassa `--dry-run`).
-9. **Verificação** — roda `rea doctor --client opencode --provider ghidra --format json`,
+9. **MCP** — `rea setup --client opencode --yes` (repassa `--dry-run`) e, em seguida,
+   garante `REA_PWNTOOLS_PYTHON` no bloco `environment` do servidor `rea` do
+   `opencode.jsonc`: o `rea setup` **não** propaga essa variável sozinho (o provider
+   offline não expõe `registrationEnvironment`), então o script faz uma edição
+   **cirúrgica** por texto (com backup `.bak` e validação do JSON), que o `rea setup`
+   passa a **preservar** nas execuções seguintes.
+10. **Verificação** — roda `rea doctor --client opencode --provider ghidra --format json`,
    **tolera ruído** (`npx`/avisos) antes do JSON (extrai o último objeto JSON do stdout)
    e **falha com exit != 0** se o campo **escopado `healthy`** for `false`, mostrando os
    motivos (`scope_checks` com `ok: false`).
@@ -128,6 +147,7 @@ colaterais" inclui **não** criar o `setup/.venv`.
 | `3` | Ghidra: lock em uso, falha de download, SHA-256 divergente, extração inválida. |
 | `4` | Alvo: tarball ausente, `tar`/`xz` ausentes ou extração sem o binário ELF esperado. |
 | `5` | `rea setup --client opencode` falhou. |
+| `6` | pwntools: falha ao criar o venv, obter o `pip` ou instalar os pacotes pinados. |
 | `130` | Interrompido com Ctrl-C. |
 
 ## Diretórios e variáveis
@@ -136,8 +156,32 @@ colaterais" inclui **não** criar o `setup/.venv`.
 |---|---|---|
 | `REA_TOOLS_DIR` | `~/.local/share/sublime-rea-tools` | Onde o Ghidra é baixado/extraído (fora do repo). |
 | `GHIDRA_INSTALL_DIR` | `$REA_TOOLS_DIR/ghidra_12.1.4_PUBLIC` | Diretório do Ghidra extraído; exportado para o REA. |
+| `REA_PWNTOOLS_PYTHON` | `$REA_TOOLS_DIR/pwntools-venv/bin/python` | Interpretador com `pwntools`/`pyelftools`/`unicorn` pinados; exportado para o REA e gravado no registro MCP. |
+| `REA_PWNTOOLS_VENV_DIRNAME` | `pwntools-venv` | Nome do subdiretório do venv (pin em `versions.env`). |
+| `PWNTOOLS_VERSION` / `PYELFTOOLS_VERSION` / `UNICORN_VERSION` | `4.15.0` / `0.33` / `2.1.2` | Versões exigidas pelo provider offline `pwntools-elf` (pin em `versions.env`). |
 
 Para persistir em novas sessões: `source setup/env.sh` (ou use `--write-rc` uma vez).
+
+## Provider offline pwntools (`REA_PWNTOOLS_PYTHON`)
+
+A ferramenta `inspect_binary_layout` usa o provider **offline `pwntools-elf`**. Ele **não**
+é um binário: o REA executa um interpretador **Python fornecido pelo usuário** e exige as
+versões exatas `pwntools 4.15.0`, `pyelftools 0.33` e `Unicorn 2.1.2` (o REA **nunca**
+instala Python nem pacotes). Sem isso, a ferramenta responde `provider_unavailable`.
+
+Por isso a **etapa 6** do `setup.py` cria um **venv dedicado** em
+`$REA_TOOLS_DIR/<REA_PWNTOOLS_VENV_DIRNAME>` (default `.../pwntools-venv`) e faz o
+`pip install` dos pinos (`+ setuptools==80.9.0`, exigido pelo `import unicorn`). Esse
+caminho é exportado como:
+
+- `REA_PWNTOOLS_PYTHON="$REA_TOOLS_DIR/pwntools-venv/bin/python"` em `setup/env.sh`; e
+- a mesma chave dentro de `mcp.servers.rea.environment` no `opencode.jsonc` — é assim que
+  o **agente** (via MCP lançado pelo opencode) enxerga a variável.
+
+O `rea setup` **não** propaga `REA_PWNTOOLS_PYTHON` sozinho; o `setup.py` grava a chave
+com uma edição cirúrgica do JSONC (backup `.bak` + validação), que o `rea setup` passa a
+**preservar**. Para trocar o diretório do venv, ajuste `REA_PWNTOOLS_VENV_DIRNAME` em
+`versions.env` (ou remova o venv e rode o setup de novo para recriá-lo).
 
 ## Java / JDK
 
@@ -171,11 +215,13 @@ python3 setup/setup.py --dry-run                      # exit 0; mostra mkdir →
 sha256sum "$REA_TOOLS_DIR"/ghidra_12.1.4_PUBLIC_*.zip # bate com versions.env
 rea doctor --client opencode --provider ghidra --format json | python3 -m json.tool
 ls -l target/sublime_text/sublime_text                # ELF do alvo extraído
+source setup/env.sh                                   # exporta REA_PWNTOOLS_PYTHON
+rea inspect-binary-layout target/sublime_text/sublime_text --format json | python3 -m json.tool
 ```
 
 O próprio `setup.py` já executa o gate do `rea doctor` no fim e retorna exit != 0
 quando o campo escopado `healthy` for `false` (o campo global `environment_healthy`
-não é usado como gate — veja a etapa 9 acima).
+não é usado como gate — veja a etapa 10 acima).
 
 ## Troubleshooting
 
@@ -183,6 +229,16 @@ não é usado como gate — veja a etapa 9 acima).
   não está exportado na sessão. Rode `source setup/env.sh` (ou reabra o shell após `--write-rc`).
   (Avisos de `environment_healthy`/`informational_checks` — engines opcionais e outros
   clients — são **esperados** e não indicam problema.)
+- **`inspect_binary_layout` retorna `provider_unavailable`** — `REA_PWNTOOLS_PYTHON` não
+  está disponível para o REA. Rode `source setup/env.sh` (ou reabra o shell) e confirme a
+  chave em `mcp.servers.rea.environment` no `opencode.jsonc`: o agente só enxerga a
+  variável pelo **registro MCP** (reinicie o opencode após o setup).
+- **venv do pwntools quebrado / pacotes ausentes ou em versão errada** — remova o
+  diretório `$REA_TOOLS_DIR/pwntools-venv` e rode o setup novamente (ele recria o venv e
+  reinstala os pinos). Para inspecionar: `"$REA_TOOLS_DIR/pwntools-venv/bin/python" -m pip list`.
+- **`ensurepip`/`python3-venv` ausente** — o setup contorna baixando o `get-pip.py` oficial
+  (**sem sudo**). Se não houver rede para `bootstrap.pypa.io`/`pypi.org`, instale
+  `python3-venv` (`sudo apt-get install python3-venv`) e rode de novo.
 - **SHA-256 do Ghidra divergente** — download corrompido/proxy. O script apaga o zip e
   rebaixa; se persistir, baixe manualmente de `GHIDRA_URL` e confira contra `versions.env`.
 - **`lock de instalação em uso`** — existe `$REA_TOOLS_DIR/.lock` (outra execução ou lock

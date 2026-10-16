@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""setup.py — instalador idempotente do ambiente do projeto sublime-rea.
+"""setup.py — instalador idempotente (10 etapas) do ambiente do projeto sublime-rea.
 
 Porta 1:1 de ``setup/setup.sh`` (mantido como legacy) para Python 3.10+, com saída
 colorida via `rich` e as MESMAS garantias de segurança/idempotência:
@@ -8,7 +8,9 @@ colorida via `rich` e as MESMAS garantias de segurança/idempotência:
 * sem flags, NUNCA usa ``sudo`` e NUNCA altera o rc do shell;
 * SHA-256 do Ghidra verificado **antes** de extrair;
 * download atômico (``.part`` -> ``mv``), lock de instalação e cleanup garantido;
-* dependências base só instaladas com ``--install-deps``.
+* dependências base só instaladas com ``--install-deps``;
+* provisiona o provider offline ``pwntools-elf`` (venv dedicado + pinos) e propaga
+  ``REA_PWNTOOLS_PYTHON`` para o ``setup/env.sh`` e para o registro MCP do opencode.
 
 Uso::
 
@@ -44,7 +46,7 @@ from pathlib import Path
 # ---------------------------------------------------------------------------
 # Constantes base
 # ---------------------------------------------------------------------------
-TOTAL_STEPS = 9
+TOTAL_STEPS = 10
 PROJECT_NAME = "sublime-rea"
 RICH_VERSION_FALLBACK = "13.9.4"
 BOOTSTRAP_ENV = "SUBLIME_REA_RICH_BOOTSTRAPPED"
@@ -54,6 +56,7 @@ EXIT_USAGE = 2
 EXIT_GHIDRA = 3
 EXIT_TARGET = 4
 EXIT_MCP = 5
+EXIT_PWNTOOLS = 6
 
 SCRIPT_DIR = Path(__file__).resolve().parent
 REPO_ROOT = SCRIPT_DIR.parent
@@ -157,15 +160,16 @@ def _create_venv(venv_dir: Path) -> bool:
         import venv as venv_mod
     except ImportError:  # python3-venv ausente
         return False
-    try:
-        venv_mod.EnvBuilder(with_pip=True, clear=False).create(str(venv_dir))
-        return True
-    except Exception:  # noqa: BLE001 - ensurepip indisponível, etc.
+    # O módulo `venv` faz `sys.exit(1)` (SystemExit, NÃO Exception) quando o
+    # `ensurepip` falta; por isso capturamos também SystemExit e caímos para
+    # `with_pip=False` (o pip é obtido depois via ensurepip/get-pip.py).
+    for with_pip in (True, False):
         try:
-            venv_mod.EnvBuilder(with_pip=False, clear=False).create(str(venv_dir))
-        except Exception:  # noqa: BLE001
-            return False
-        return (venv_dir / "bin" / "python").is_file()
+            venv_mod.EnvBuilder(with_pip=with_pip, clear=False).create(str(venv_dir))
+            break
+        except (Exception, SystemExit):  # noqa: BLE001 - ensurepip indisponível, etc.
+            continue
+    return (venv_dir / "bin" / "python").is_file()
 
 
 def _python_has_rich(python: Path | str) -> bool:
@@ -655,12 +659,23 @@ class Ctx:
         self.node_min = v("NODE_MIN_MAJOR")
         self.rich_version = versions.get("RICH_VERSION") or RICH_VERSION_FALLBACK
 
+        self.pwntools_version = v("PWNTOOLS_VERSION")
+        self.pyelftools_version = v("PYELFTOOLS_VERSION")
+        self.unicorn_version = v("UNICORN_VERSION")
+        self.setuptools_version = v("SETUPTOOLS_VERSION")
+        self.pwntools_venv_dirname = (
+            versions.get("REA_PWNTOOLS_VENV_DIRNAME") or "pwntools-venv"
+        )
+        self.get_pip_url = versions.get("GET_PIP_URL") or "https://bootstrap.pypa.io/get-pip.py"
+
         default_tools = versions.get("REA_TOOLS_DIR_DEFAULT") or str(
             Path("~/.local/share/sublime-rea-tools").expanduser()
         )
         self.rea_tools_dir = Path(os.environ.get("REA_TOOLS_DIR") or default_tools).expanduser()
         self.ghidra_zip_path = self.rea_tools_dir / self.ghidra_zip_filename
         self.ghidra_install_dir = self.rea_tools_dir / self.ghidra_extracted_dirname
+        self.pwntools_venv_dir = self.rea_tools_dir / self.pwntools_venv_dirname
+        self.pwntools_python = self.pwntools_venv_dir / "bin" / "python"
         self.tarball = REPO_ROOT / self.sublime_tarball
         self.target_bin = REPO_ROOT / self.sublime_target_bin
         self.target_dir = REPO_ROOT / "target"
@@ -669,6 +684,8 @@ class Ctx:
         return [
             ("REA", f"{self.rea_package} {self.rea_version}"),
             ("Ghidra", f"{self.ghidra_version} (JDK >= {self.ghidra_jdk_min})"),
+            ("pwntools", f"{self.pwntools_version} + pyelftools {self.pyelftools_version}"
+                         f" + unicorn {self.unicorn_version}"),
             ("Node", f">= {self.node_min}"),
             ("Alvo", f"Sublime Text build {self.sublime_build}"),
             ("rich", self.rich_version),
@@ -1107,16 +1124,270 @@ def _mib(size_bytes: str) -> str:
 
 
 # ---------------------------------------------------------------------------
-# Etapa 6 — GHIDRA_INSTALL_DIR -> setup/env.sh (e, opcionalmente, ~/.bashrc)
+# Etapa 6 — provider offline pwntools (inspect_binary_layout)
+#   O REA NUNCA instala Python/pacotes: ele exige um interpretador apontado por
+#   REA_PWNTOOLS_PYTHON com pwntools/pyelftools/unicorn PINADOS. Aqui criamos um
+#   venv dedicado em $REA_TOOLS_DIR/<dir> e instalamos os 3 pacotes exatos.
+# ---------------------------------------------------------------------------
+_PWNTOOLS_PROBE = (
+    "import importlib.metadata as m, json;"
+    "import pwn, elftools, unicorn, pkg_resources;"  # noqa: F401
+    "print(json.dumps({k: m.version(k) for k in "
+    "('pwntools', 'pyelftools', 'unicorn', 'setuptools')}))"
+)
+
+
+def _pwntools_versions(python: Path | str, ctx: Ctx) -> dict | None:
+    """Retorna as versões instaladas (importando os módulos) ou ``None``."""
+    try:
+        result = proc([str(python), "-c", _PWNTOOLS_PROBE], timeout=300)
+    except Exception:  # noqa: BLE001 - venv ausente/exec falhou
+        return None
+    if result.returncode != 0:
+        return None
+    try:
+        return json.loads((result.stdout or "").strip().splitlines()[-1])
+    except (ValueError, IndexError):
+        return None
+
+
+def _pwntools_env_ok(python: Path | str, ctx: Ctx) -> bool:
+    """True se os 3 pacotes estão presentes nas versões PINADAS."""
+    data = _pwntools_versions(python, ctx)
+    if not data:
+        return False
+    return (
+        data.get("pwntools") == ctx.pwntools_version
+        and data.get("pyelftools") == ctx.pyelftools_version
+        and data.get("unicorn") == ctx.unicorn_version
+        and data.get("setuptools") == ctx.setuptools_version
+    )
+
+
+def _pip_install_pwntools(python: Path | str, ctx: Ctx) -> bool:
+    specs = [
+        f"pwntools=={ctx.pwntools_version}",
+        f"pyelftools=={ctx.pyelftools_version}",
+        f"unicorn=={ctx.unicorn_version}",
+        # `unicorn` 2.1.2 importa `pkg_resources` (fornecido pelo setuptools<81); em
+        # venvs criados sem `ensurepip` (via get-pip.py) ele não vem por padrão.
+        f"setuptools=={ctx.setuptools_version}",
+    ]
+    cmd = [str(python), "-m", "pip", "install", "--disable-pip-version-check", *specs]
+
+    def pip() -> subprocess.CompletedProcess[str]:
+        return subprocess.run(cmd, capture_output=True, text=True, timeout=1800)
+
+    try:
+        result = pip()
+        blob = (result.stdout or "") + (result.stderr or "")
+        if result.returncode != 0 and "No module named pip" in blob:
+            subprocess.run(
+                [str(python), "-m", "ensurepip", "--upgrade"],
+                capture_output=True,
+                text=True,
+                timeout=600,
+            )
+            result = pip()
+        if result.returncode != 0:
+            raise SetupFailure(
+                EXIT_PWNTOOLS,
+                "falha ao instalar os pacotes do pwntools",
+                [(result.stderr or result.stdout or "").strip()[-500:]],
+            )
+    except subprocess.TimeoutExpired as exc:
+        raise SetupFailure(
+            EXIT_PWNTOOLS, "timeout instalando os pacotes do pwntools", [str(exc)]
+        ) from exc
+    return _pwntools_env_ok(python, ctx)
+
+
+def _python_has_pip(python: Path | str) -> bool:
+    try:
+        return (
+            proc([str(python), "-m", "pip", "--version"], timeout=120).returncode == 0
+        )
+    except Exception:  # noqa: BLE001
+        return False
+
+
+@contextmanager
+def _suppress_output():
+    """Silencia fd 1 e fd 2.
+
+    O módulo ``venv`` faz ``print(...)`` (stdout) + ``sys.exit(1)`` quando o
+    ``ensurepip`` falta; sem isso o usuário veria um "falhou" enganoso mesmo
+    quando recuperamos o venv em seguida.
+    """
+    sys.stdout.flush()
+    sys.stderr.flush()
+    devnull = os.open(os.devnull, os.O_WRONLY)
+    saved_out = os.dup(1)
+    saved_err = os.dup(2)
+    try:
+        os.dup2(devnull, 1)
+        os.dup2(devnull, 2)
+        yield
+    finally:
+        # Flush AINDA com os fds redirecionados: um `print()` bufferizado dentro
+        # do bloco sairia no fd 1 real depois do restore.
+        sys.stdout.flush()
+        sys.stderr.flush()
+        os.dup2(saved_out, 1)
+        os.dup2(saved_err, 2)
+        os.close(devnull)
+        os.close(saved_out)
+        os.close(saved_err)
+
+
+def _bootstrap_pip(python: Path | str, ctx: Ctx, ui: UI) -> bool:
+    """Garante ``pip`` no venv SEM sudo.
+
+    Ordem: ``pip`` já presente → ``ensurepip`` → bootstrapper oficial ``get-pip.py``
+    (necessário em Debian/Ubuntu sem ``python3-venv``).
+    """
+    if _python_has_pip(python):
+        return True
+    try:
+        subprocess.run(
+            [str(python), "-m", "ensurepip", "--upgrade"],
+            capture_output=True,
+            text=True,
+            timeout=600,
+        )
+    except Exception:  # noqa: BLE001 - ensurepip indisponível
+        pass
+    if _python_has_pip(python):
+        return True
+
+    ui.info("pip ausente no venv; baixando o bootstrapper oficial (get-pip.py)...")
+    tmp = Path(tempfile.mkstemp(prefix=".get-pip.", suffix=".py", dir=str(ctx.rea_tools_dir))[1])
+    try:
+        request = urllib.request.Request(
+            ctx.get_pip_url, headers={"User-Agent": f"{PROJECT_NAME}-setup"}
+        )
+        with urllib.request.urlopen(request, timeout=60) as response, tmp.open("wb") as fh:
+            shutil.copyfileobj(response, fh)
+        result = subprocess.run(
+            [str(python), str(tmp), "--disable-pip-version-check", "--no-warn-script-location"],
+            capture_output=True,
+            text=True,
+            timeout=900,
+        )
+        if result.returncode != 0:
+            ui.warn(f"get-pip.py falhou: {(result.stderr or result.stdout or '').strip()[-300:]}")
+            return False
+    except Exception as exc:  # noqa: BLE001
+        ui.warn(f"não foi possível baixar/rodar o get-pip.py: {exc}")
+        return False
+    finally:
+        tmp.unlink(missing_ok=True)
+    return _python_has_pip(python)
+
+
+def step_pwntools(ctx: Ctx, ui: UI) -> None:
+    ui.step(6, "Provider offline pwntools (inspect_binary_layout)")
+    venv_python = ctx.pwntools_python
+    # Exporta para o processo: o `rea setup` (etapa 9) herda este ambiente.
+    os.environ["REA_PWNTOOLS_PYTHON"] = str(venv_python)
+
+    if ui.dry_run:
+        ui.info(f"REA_PWNTOOLS_PYTHON={venv_python}")
+        ui.show(f"python3 -m venv {ctx.pwntools_venv_dir}  # apenas se ausente")
+        ui.show(
+            f"{venv_python} -m pip install pwntools=={ctx.pwntools_version} "
+            f"pyelftools=={ctx.pyelftools_version} unicorn=={ctx.unicorn_version} "
+            f"setuptools=={ctx.setuptools_version}"
+        )
+        ui.mark(6, "dry", "plano impresso")
+        return
+
+    if _pwntools_env_ok(venv_python, ctx):
+        ui.ok(f"venv já pronto e pinado: {ctx.pwntools_venv_dir}")
+        ui.info(f"REA_PWNTOOLS_PYTHON={venv_python}")
+        ui.mark(6, "ok", "já instalado")
+        return
+
+    if not venv_python.is_file():
+        try:
+            import venv as venv_mod  # noqa: F401
+        except ImportError as exc:  # python3-venv ausente
+            raise SetupFailure(
+                EXIT_PWNTOOLS,
+                "módulo 'venv' do Python indisponível",
+                [
+                    f"não foi possível importar 'venv': {exc}",
+                    "instale o suporte a venv (Debian/Ubuntu: sudo apt-get install python3-venv) "
+                    "e rode o setup novamente.",
+                    f"venv alvo: {ctx.pwntools_venv_dir}",
+                ],
+            ) from exc
+
+        ensure_dir(ui, ctx.rea_tools_dir)
+        ui.info(f"criando venv em {ctx.pwntools_venv_dir} ...")
+        with _suppress_output():
+            created = _create_venv(ctx.pwntools_venv_dir)
+        if not created or not venv_python.is_file():
+            raise SetupFailure(
+                EXIT_PWNTOOLS,
+                "falha ao criar o venv do pwntools",
+                [
+                    f"'{venv_python}' não pôde ser criado com 'python3 -m venv'.",
+                    "instale python3-venv (Debian/Ubuntu: sudo apt-get install python3-venv) "
+                    "e rode o setup novamente.",
+                ],
+            )
+        ui.ok(f"venv criado: {ctx.pwntools_venv_dir}")
+
+    if not _bootstrap_pip(venv_python, ctx, ui):
+        raise SetupFailure(
+            EXIT_PWNTOOLS,
+            "pip indisponível no venv do pwntools",
+            [
+                "não consegui obter 'pip' no venv (ensurepip e get-pip.py falharam).",
+                "instale python3-venv (Debian/Ubuntu: sudo apt-get install python3-venv) "
+                "e rode o setup novamente.",
+                f"venv: {ctx.pwntools_venv_dir}",
+            ],
+        )
+
+    ui.info(
+        "instalando pacotes pinados: "
+        f"pwntools=={ctx.pwntools_version}, pyelftools=={ctx.pyelftools_version}, "
+        f"unicorn=={ctx.unicorn_version} ..."
+    )
+    if not _pip_install_pwntools(venv_python, ctx):
+        raise SetupFailure(
+            EXIT_PWNTOOLS,
+            "pacotes do pwntools ausentes/incorretos após a instalação",
+            [
+                "esperado: "
+                f"pwntools=={ctx.pwntools_version}, pyelftools=={ctx.pyelftools_version}, "
+                f"unicorn=={ctx.unicorn_version}",
+                f"confira manualmente: {venv_python} -m pip list",
+            ],
+        )
+
+    ui.ok(
+        f"pwntools {ctx.pwntools_version} + pyelftools {ctx.pyelftools_version} + "
+        f"unicorn {ctx.unicorn_version} prontos em {ctx.pwntools_venv_dir}"
+    )
+    ui.mark(6, "ok", f"venv em {ctx.pwntools_venv_dir}")
+
+
+# ---------------------------------------------------------------------------
+# Etapa 7 — GHIDRA_INSTALL_DIR -> setup/env.sh (e, opcionalmente, ~/.bashrc)
 # ---------------------------------------------------------------------------
 RC_MARKER = "sublime-rea setup"
 
 
 def step_env(ctx: Ctx, ui: UI, write_rc: bool) -> None:
-    ui.step(6, "Variáveis de ambiente (GHIDRA_INSTALL_DIR)")
+    ui.step(7, "Variáveis de ambiente (GHIDRA_INSTALL_DIR, REA_PWNTOOLS_PYTHON)")
     os.environ["GHIDRA_INSTALL_DIR"] = str(ctx.ghidra_install_dir)
     os.environ["REA_TOOLS_DIR"] = str(ctx.rea_tools_dir)
+    os.environ["REA_PWNTOOLS_PYTHON"] = str(ctx.pwntools_python)
     ui.info(f"GHIDRA_INSTALL_DIR={ctx.ghidra_install_dir}")
+    ui.info(f"REA_PWNTOOLS_PYTHON={ctx.pwntools_python}")
 
     if ui.dry_run:
         ui.show(f"escrever {ENV_FILE} (atômico: temp + rename)")
@@ -1126,6 +1397,7 @@ def step_env(ctx: Ctx, ui: UI, write_rc: bool) -> None:
             "# Gerado por setup/setup.py — 'source' este arquivo para exportar o ambiente do sublime-rea.\n"
             f'export REA_TOOLS_DIR="{ctx.rea_tools_dir}"\n'
             f'export GHIDRA_INSTALL_DIR="{ctx.ghidra_install_dir}"\n'
+            f'export REA_PWNTOOLS_PYTHON="{ctx.pwntools_python}"\n'
             f'# export JAVA_HOME="/caminho/do/jdk-{ctx.ghidra_jdk_min}"  '
             "# descomente se precisar forçar um JDK\n",
         )
@@ -1150,17 +1422,17 @@ def step_env(ctx: Ctx, ui: UI, write_rc: bool) -> None:
     else:
         ui.info("rc não alterado (use --write-rc para persistir no ~/.bashrc)")
 
-    ui.mark(6, "ok", "env.sh escrito" if not ui.dry_run else "dry-run")
+    ui.mark(7, "ok", "env.sh escrito" if not ui.dry_run else "dry-run")
 
 
 # ---------------------------------------------------------------------------
-# Etapa 7 — extrair o alvo (Sublime Text) em target/
+# Etapa 8 — extrair o alvo (Sublime Text) em target/
 # ---------------------------------------------------------------------------
 def step_target(ctx: Ctx, ui: UI) -> None:
-    ui.step(7, f"Extraindo alvo (Sublime Text build {ctx.sublime_build})")
+    ui.step(8, f"Extraindo alvo (Sublime Text build {ctx.sublime_build})")
     if _target_bin_valid(ctx.target_bin):
         ui.ok(f"alvo já extraído: {ctx.target_bin}")
-        ui.mark(7, "ok", "já extraído")
+        ui.mark(8, "ok", "já extraído")
         return
 
     rel_bin = ctx.target_bin.relative_to(ctx.target_dir)
@@ -1173,7 +1445,7 @@ def step_target(ctx: Ctx, ui: UI) -> None:
         ui.show(f"mkdir <tmp> && tar -xJf {ctx.tarball} -C <tmp>")
         ui.show("validar o alvo (tamanho > 1 MiB e magic ELF) ANTES de promover")
         ui.show(f"mv <tmp>/{top_name} {ctx.target_dir}/  # atômico, preservando o anterior")
-        ui.mark(7, "dry", "plano impresso")
+        ui.mark(8, "dry", "plano impresso")
         return
 
     if not ctx.tarball.is_file():
@@ -1217,7 +1489,7 @@ def step_target(ctx: Ctx, ui: UI) -> None:
             EXIT_TARGET, "extração do alvo falhou", [f"{ctx.target_bin} inválido após o tar."]
         )
     ui.ok(f"extraído: {ctx.target_bin}")
-    ui.mark(7, "ok", str(ctx.target_bin))
+    ui.mark(8, "ok", str(ctx.target_bin))
 
 
 ELF_MAGIC = b"\x7fELF"
@@ -1236,28 +1508,271 @@ def _target_bin_valid(path: Path) -> bool:
 
 
 # ---------------------------------------------------------------------------
-# Etapa 8 — registrar MCP no opencode
+# Etapa 9 — registrar MCP no opencode (rea setup) + propagar REA_PWNTOOLS_PYTHON
 # ---------------------------------------------------------------------------
+OPENCODE_PWNTOOLS_KEY = "REA_PWNTOOLS_PYTHON"
+
+# Casamento de chaves JSON/JSONC: "chave" seguida de ':'.
+_JSONC_KEY_RE = re.compile(r'"((?:[^"\\]|\\.)*)"\s*:')
+
+
+def _opencode_config_path() -> Path:
+    """Config do opencode: honra ``OPENCODE_CONFIG``, senão ``XDG_CONFIG_HOME``."""
+    override = os.environ.get("OPENCODE_CONFIG")
+    if override:
+        return Path(override).expanduser()
+    base = Path(os.environ.get("XDG_CONFIG_HOME") or (Path.home() / ".config")) / "opencode"
+    for name in ("opencode.jsonc", "opencode.json"):
+        candidate = base / name
+        if candidate.is_file():
+            return candidate
+    return base / "opencode.jsonc"
+
+
+def _jsonc_match_brace(text: str, open_index: int) -> int | None:
+    """Índice do ``}``/``]`` que fecha o ``{``/``[`` em ``open_index`` (string-aware)."""
+    depth = 0
+    in_str = False
+    esc = False
+    i = open_index
+    while i < len(text):
+        char = text[i]
+        if in_str:
+            if esc:
+                esc = False
+            elif char == "\\":
+                esc = True
+            elif char == '"':
+                in_str = False
+        elif char == '"':
+            in_str = True
+        elif char in "{[":
+            depth += 1
+        elif char in "}]":
+            depth -= 1
+            if depth == 0:
+                return i
+        i += 1
+    return None
+
+
+def _jsonc_key_object(text: str, key: str, start: int = 0) -> tuple[int, int] | None:
+    """Span ``(open``, ``close)`` do objeto-valor de ``key`` a partir de ``start``."""
+    for match in _JSONC_KEY_RE.finditer(text, start):
+        if match.group(1) != key:
+            continue
+        index = match.end()
+        while index < len(text) and text[index] in " \t\r\n":
+            index += 1
+        if index < len(text) and text[index] == "{":
+            close = _jsonc_match_brace(text, index)
+            if close is not None:
+                return index, close
+    return None
+
+
+def _line_indent(text: str, index: int) -> str:
+    line_start = text.rfind("\n", 0, index) + 1
+    end = line_start
+    while end < len(text) and text[end] in " \t":
+        end += 1
+    return text[line_start:end]
+
+
+def _jsonc_env_value_span(
+    text: str, env_open: int, env_close: int
+) -> tuple[int, int, str] | None:
+    """Span ``(start``, ``end``, ``valor)`` do nosso key dentro do objeto ``environment``."""
+    for match in _JSONC_KEY_RE.finditer(text, env_open, env_close):
+        if match.group(1) != OPENCODE_PWNTOOLS_KEY:
+            continue
+        i = match.end()
+        while i < env_close and text[i] in " \t\r\n":
+            i += 1
+        if i < env_close and text[i] == '"':
+            j = i + 1
+            esc = False
+            while j < env_close:
+                char = text[j]
+                if esc:
+                    esc = False
+                elif char == "\\":
+                    esc = True
+                elif char == '"':
+                    return i, j + 1, json.loads(text[i : j + 1])
+                j += 1
+    return None
+
+
+def _jsonc_rea_env_value(text: str) -> str | None:
+    """Valor atual de ``mcp.servers.rea.environment.REA_PWNTOOLS_PYTHON`` (ou None)."""
+    mcp = _jsonc_key_object(text, "mcp")
+    servers = _jsonc_key_object(text, "servers", mcp[0]) if mcp else None
+    rea = _jsonc_key_object(text, "rea", servers[0]) if servers else None
+    env = _jsonc_key_object(text, "environment", rea[0]) if rea else None
+    if not env:
+        return None
+    span = _jsonc_env_value_span(text, env[0], env[1])
+    return span[2] if span else None
+
+
+def _jsonc_set_rea_env(text: str, value: str) -> tuple[str | None, bool]:
+    """Insere/atualiza ``REA_PWNTOOLS_PYTHON`` em ``mcp.servers.rea.environment``.
+
+    Edição **cirúrgica por texto** (preserva comentários/formatação do JSONC);
+    retorna ``(novo_texto, mudou)`` ou ``(None, False)`` se a estrutura não existe.
+    """
+    mcp = _jsonc_key_object(text, "mcp")
+    servers = _jsonc_key_object(text, "servers", mcp[0]) if mcp else None
+    rea = _jsonc_key_object(text, "rea", servers[0]) if servers else None
+    if not rea:
+        return None, False
+    rea_open, rea_close = rea
+    env = _jsonc_key_object(text, "environment", rea_open)
+    if env is not None:
+        env_open, env_close = env
+        span = _jsonc_env_value_span(text, env_open, env_close)
+        if span is not None:
+            if span[2] == value:
+                return text, False
+            return text[: span[0]] + json.dumps(value) + text[span[1] :], True
+        indent = _line_indent(text, env_open) + "  "
+        close_indent = _line_indent(text, env_open)
+        trimmed = text[:env_close].rstrip()
+        entry = f'{indent}{json.dumps(OPENCODE_PWNTOOLS_KEY)}: {json.dumps(value)}'
+        if trimmed.endswith(("{", ",")):
+            new_before = f"{trimmed}\n{entry}"
+        else:
+            new_before = f"{trimmed},\n{entry}"
+        return new_before + "\n" + close_indent + text[env_close:], True
+    # servidor sem bloco `environment`: cria um
+    indent = _line_indent(text, rea_open) + "  "
+    block = (
+        f'{indent}"environment": {{\n'
+        f"{indent}  {json.dumps(OPENCODE_PWNTOOLS_KEY)}: {json.dumps(value)}\n"
+        f"{indent}}}"
+    )
+    sep = ",\n" if text[rea_open + 1 : rea_close].strip() else "\n"
+    return (
+        text[:rea_close] + f"{sep}{block}\n" + _line_indent(text, rea_open) + text[rea_close:],
+        True,
+    )
+
+
+def _strip_jsonc(text: str) -> str:
+    """Remove comentários ``//`` ``/* */`` e vírgulas finais (para validação via json)."""
+    out: list[str] = []
+    i = 0
+    n = len(text)
+    in_str = False
+    esc = False
+    while i < n:
+        char = text[i]
+        if in_str:
+            out.append(char)
+            if esc:
+                esc = False
+            elif char == "\\":
+                esc = True
+            elif char == '"':
+                in_str = False
+            i += 1
+            continue
+        if char == '"':
+            in_str = True
+            out.append(char)
+            i += 1
+            continue
+        if char == "/" and i + 1 < n and text[i + 1] == "/":
+            while i < n and text[i] not in "\r\n":
+                i += 1
+            continue
+        if char == "/" and i + 1 < n and text[i + 1] == "*":
+            i += 2
+            while i + 1 < n and not (text[i] == "*" and text[i + 1] == "/"):
+                i += 1
+            i += 2
+            continue
+        out.append(char)
+        i += 1
+    return re.sub(r",(\s*[}\]])", r"\1", "".join(out))
+
+
+def _ensure_opencode_pwntools_env(ctx: Ctx, ui: UI) -> bool:
+    """Garante ``REA_PWNTOOLS_PYTHON`` no ``environment`` do servidor rea do opencode.
+
+    ``rea setup`` NÃO propaga essa variável (o provider offline pwntools não expõe
+    ``registrationEnvironment``); porém, ao reescrever o documento, o REA **preserva**
+    chaves explícitas já presentes no bloco. Então gravamos a chave uma vez (edição
+    cirúrgica, com backup + validação JSON) e o ``rea setup`` a mantém depois.
+    """
+    path = _opencode_config_path()
+    value = str(ctx.pwntools_python)
+
+    if ui.dry_run:
+        ui.show(f"garantir {OPENCODE_PWNTOOLS_KEY}={value} em {path}")
+        return True
+    if not path.is_file():
+        ui.warn(f"config do opencode não encontrado ({path}); registre a variável manualmente")
+        return False
+
+    original = path.read_text(encoding="utf-8", errors="replace")
+    new_text, changed = _jsonc_set_rea_env(original, value)
+    if new_text is None:
+        ui.warn(f"não encontrei 'mcp.servers.rea.environment' em {path}; ajuste manualmente")
+        return False
+    if not changed:
+        ui.ok(f"{OPENCODE_PWNTOOLS_KEY} já consta em {path}")
+        return True
+
+    try:
+        data = json.loads(_strip_jsonc(new_text))
+        assert data["mcp"]["servers"]["rea"]["environment"][OPENCODE_PWNTOOLS_KEY] == value
+    except Exception as exc:  # noqa: BLE001 - nunca gravar jsonc inválido
+        ui.warn(f"edição do jsonc não validou ({exc}); mantendo o original")
+        return False
+
+    backup = path.with_name(path.name + ".bak")
+    shutil.copy2(path, backup)
+    _write_atomic(path, new_text)
+    ui.ok(f"{OPENCODE_PWNTOOLS_KEY} gravado em {path} (backup: {backup.name})")
+    return True
+
+
 def step_mcp(ctx: Ctx, ui: UI, rea_cmd: list[str]) -> None:
-    ui.step(8, "Registrando MCP no opencode (rea setup --client opencode)")
+    ui.step(9, "Registrando MCP no opencode (rea setup --client opencode)")
     cmd = [*rea_cmd, "setup", "--client", "opencode", "--yes"]
     if ui.dry_run:
         # repassa --dry-run ao REA quando o próprio script está em dry-run
         ui.dry(" ".join([*cmd, "--dry-run"]))
-        ui.mark(8, "dry", "plano impresso")
+        _ensure_opencode_pwntools_env(ctx, ui)
+        ui.mark(9, "dry", "plano impresso")
         return
+    # `REA_PWNTOOLS_PYTHON` já está em os.environ (etapa 6), herdado pelo subprocess.
     result = run(ui, cmd, check=False)
-    if result.returncode == 0:
-        ui.ok("MCP registrado para o client 'opencode'")
-        ui.mark(8, "ok", "registrado")
-    else:
+    if result.returncode != 0:
         raise SetupFailure(
             EXIT_MCP, "'rea setup --client opencode' falhou", [f"exit code {result.returncode}"]
         )
+    ui.ok("MCP registrado para o client 'opencode'")
+
+    try:
+        current = _jsonc_rea_env_value(_opencode_config_path().read_text(encoding="utf-8"))
+    except OSError:
+        current = None
+    if current == str(ctx.pwntools_python):
+        ui.ok("rea setup preservou REA_PWNTOOLS_PYTHON no registro")
+    elif not _ensure_opencode_pwntools_env(ctx, ui):
+        ui.warn(
+            "REA_PWNTOOLS_PYTHON NÃO está no registro MCP; a ferramenta inspect_binary_layout "
+            "seguirá indisponível na sessão do agente até você adicioná-la ao "
+            "mcp.servers.rea.environment"
+        )
+    ui.mark(9, "ok", "registrado")
 
 
 # ---------------------------------------------------------------------------
-# Etapa 9 — verificação final: rea doctor (preserva o diagnóstico)
+# Etapa 10 — verificação final: rea doctor (preserva o diagnóstico)
 # ---------------------------------------------------------------------------
 def _parse_last_json_object(text: str) -> dict:
     """Extrai o último objeto JSON do stdout, tolerando ruído antes dele.
@@ -1285,12 +1800,12 @@ def _parse_last_json_object(text: str) -> dict:
 
 
 def step_doctor(ctx: Ctx, ui: UI, rea_cmd: list[str]) -> None:
-    ui.step(9, "Verificação final (rea doctor)")
+    ui.step(10, "Verificação final (rea doctor)")
     cmd = [*rea_cmd, "doctor", "--client", "opencode", "--provider", "ghidra", "--format", "json"]
 
     if ui.dry_run:
         ui.dry(" ".join(cmd))
-        ui.mark(9, "dry", "plano impresso")
+        ui.mark(10, "dry", "plano impresso")
         return
 
     result = proc(cmd, timeout=600)
@@ -1329,7 +1844,7 @@ def step_doctor(ctx: Ctx, ui: UI, rea_cmd: list[str]) -> None:
                 detail = check.get("detail") or check.get("remediation") or ""
                 ui.warn(f"opcional (esperado): {name} [{cls}]: {detail}")
 
-        ui.mark(9, "ok", "healthy: true")
+        ui.mark(10, "ok", "healthy: true")
         return
 
     reasons = ["healthy: false"]
@@ -1384,6 +1899,7 @@ def run_all(ctx: Ctx, ui: UI, args: argparse.Namespace) -> int:
     step_java(ctx, ui)
     rea_cmd = step_rea(ctx, ui)
     step_ghidra(ctx, ui)
+    step_pwntools(ctx, ui)
     step_env(ctx, ui, args.write_rc)
     step_target(ctx, ui)
     step_mcp(ctx, ui, rea_cmd)
