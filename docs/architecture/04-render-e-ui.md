@@ -13,7 +13,7 @@ arquitetural**.
 Notação de componentes (glossário do projeto, usada daqui em diante): `RenderPipeline` (base abstrata
 do desenho) · `Canvas2DBackend` / `WebGPUBackend` (backends) · `Viewport` · `PropertySystem` ·
 `DocumentRegistry` / `DocumentHandle` / `Buffer` / `TextStore` · `CommandBus` · `Scheduler` / `TaskPool` ·
-`ExtensionHost` / `ExtensionBridge`. Codinome provisório do editor: **Arcane**.
+`ExtensionHost` / `ExtensionBridge`. Editor-alvo: **Scribe**.
 
 ---
 
@@ -186,7 +186,7 @@ batch tem teto `MAX_GLYPH_INSTANCES = 8192` (`REN-E7`).
   O texto é desenhado em **Canvas 2D** ou **WebGPU** dentro do *renderer* (Chromium); o DOM serve só
   para a *casca* (menus, diálogos, painéis), nunca para o corpo do editor. Scroll é virtualizado
   (`DEC-REN-4`).
-  *Racional:* requisito do alvo-Arcane — 1 nó por linha/caractere causa *layout thrashing* e pressão
+  *Racional:* requisito do alvo-Scribe — 1 nó por linha/caractere causa *layout thrashing* e pressão
   de GC insustentáveis em buffers grandes. O alvo desenha em canvas/GL por natureza (`REN-E18`,
   `REN-E20`); é a mesma conclusão por outro caminho.
   *Evidence:* `REN-E18`, `REN-E20` (padrão de virtualização); restante = decisão de projeto.
@@ -251,7 +251,7 @@ export interface Control { readonly properties: ReadonlyMap<string, Property<unk
 
 ## 6. 🔀 Divergências deliberadas (onde NÃO seguimos o alvo, e por quê)
 
-| # | Alvo | Arcane (nós) | Por quê |
+| # | Alvo | Scribe (nós) | Por quê |
 |---|---|---|---|
 | D1 | Render na **main thread** da GTK (`REN-E3`) | Shaping/raster de glifos em **worker** com `OffscreenCanvas`; **composição** na main thread | Exceção explícita do enunciado: evita bloquear o frame com shaping pesado, sem introduzir uma “thread de render” compartilhando estado |
 | D2 | Backend hardware = **OpenGL 4.1** com *texture buffer* `RGBA32F` + `texelFetch` (`REN-E10`) | **WebGPU** com *storage buffer* + instancing | API idiomática do Chromium; `texelFetch`/texture buffer são exclusivos de GL. Mesmo *padrão* (batch instanciado), outro mecanismo |
@@ -285,7 +285,7 @@ export interface Control { readonly properties: ReadonlyMap<string, Property<unk
 
 ## 8. ⚠️ Incógnitas que afetam este módulo (refs `REN-U*`)
 
-| ID | Incógnita | Impacto no Arcane |
+| ID | Incógnita | Impacto no Scribe |
 |---|---|---|
 | `REN-U1` | **Critério de visibilidade** — algoritmo que enumera as linhas visíveis (o clip por *damage* é observado; a função não) | `DEC-REN-4` define critério **próprio** por índice de linha + *fold*; reavaliar se o alvo for reanalisado |
 | `REN-U2` | **Política de flush do batch** (teto vs fim de camada vs teste de textura) | Adotamos **teto** (8192/128) como heurística; pode gerar mais *flushes* que o alvo |
@@ -295,7 +295,7 @@ export interface Control { readonly properties: ReadonlyMap<string, Property<unk
 | `REN-U6` | **Nº exato de programas** (17 nomes; tabela pode ter variantes) | Não bloqueia: `DEC-REN-2` parametriza por flags em vez de enumerar programas |
 
 > **Limite limpo:** nada acima autoriza ler o código do alvo. Toda incógnita em aberto é resolvida
-> no Arcane por **decisão de projeto documentada** (marcada como escolha nossa) — não por tentativa de
+> no Scribe por **decisão de projeto documentada** (marcada como escolha nossa) — não por tentativa de
 > copiar o original.
 
 ---

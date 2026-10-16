@@ -16,8 +16,8 @@
 **Estado em uma linha:** ambiente ✅ · binário-alvo **100% analisável** ✅ · Track A (API Python +
 IPC) ✅ · **FASE 1 FECHADA** (P1.1 buffer ✅ · P1.2 concorrência ✅ · P1.3 IPC ✅ · P1.4 render ✅ ·
 P1.5 ledger consolidado ✅ · P1.6 empacotamento ✅) · **FASE 2 FECHADA** (P2.1: `docs/architecture/`,
-6 docs + README, **61 decisões `DEC-*`**) · **falta** o codinome (**P2.3**) e a Fase 3 (o editor em
-Electron/TS, **P2.2**).
+6 docs + README, **61 decisões `DEC-*`**) · **falta** só a Fase 3 (o editor em Electron/TS, **P2.2**) —
+codinome decidido: **Scribe** (**P2.3** ✅).
 
 **✅ Passo operacional resolvido (2026-10-16).** O `setup.py` foi rodado e o MCP `rea` foi relançado
 **já com `REA_GHIDRA_STARTUP_TIMEOUT_MS=900000`** (confirmado em `/proc/*/environ`) — **não** é mais
@@ -31,12 +31,12 @@ python3 setup/setup.py        # idempotente: reescreve setup/env.sh + environmen
 Sem o deadline maior, `open_binary`/`analyze` **via MCP** volta a estourar os 330 s (a análise leva
 ~355 s).
 
-**Próxima tarefa recomendada:** **P2.3 — decidir o codinome** (hoje *Arcane*, provisório) e então
-**P2.2 — Fase 3**: criar o scaffold `src/` (Electron + TypeScript) **seguindo a spec da Fase 2**
-([`docs/architecture/`](architecture/) — 6 docs, **61 decisões `DEC-*`** com rastreabilidade
-`conclusão (Evidence) → DEC → status`). A Fase 3 é **escrita de código do zero**, não análise — o
-insumo arquitetural está pronto nesta pasta. Ordem: P2.3 (decisão de 1 minuto, bloqueia o nome dos
-pacotes) → P2.2 (buffer/`TextStore` → workers → render → API de extensão).
+**Próxima tarefa recomendada:** **P2.2 — Fase 3**: criar o scaffold `src/` (Electron + TypeScript)
+**seguindo a spec da Fase 2** ([`docs/architecture/`](architecture/) — 6 docs, **61 decisões `DEC-*`**
+com rastreabilidade `conclusão (Evidence) → DEC → status`). O codinome está decidido — **Scribe**
+(P2.3 ✅). A Fase 3 é **escrita de código do zero**, não análise: o insumo arquitetural está pronto
+nesta pasta. Ordem sugerida: `Buffer`/`TextStore` → `Scheduler`/`TaskPool` → `RenderPipeline`/`Viewport`
+→ `ExtensionBridge`/`ExtensionAPI`.
 
 > ✅ **Pegadinha resolvida (2026-10-16, P3.9):** o `setup.py` agora **detecta** um JDK ≥ 21
 > compatível (`JAVA_HOME`, PATH, sdkman, `/usr/lib/jvm`) e escreve um **`export JAVA_HOME=…` ativo**
@@ -304,7 +304,7 @@ alvo → mapeamento **Electron/TS**), **glossário canônico** de componentes (`
 `Viewport`/`PackageResolver`/`PropertySystem`) e rastreabilidade global Fase 1 → Fase 2. Docs: `01` buffer ·
 `02` concorrência · `03` extensão/IPC · `04` render · `05` empacotamento · `06` padrões transversais.
 **Clean-room**: nenhum bloco/assembly/pseudocódigo do alvo — só contratos e decisões nossas (marcadas).
-Codinome **Arcane** é provisório (**P2.3** pendente).
+Codinome **Scribe** (decidido em **P2.3** ✅).
 
 ---
 

@@ -3,7 +3,7 @@
 > Fase 2 (P2.1) · síntese clean-room do alvo (sha256 8b105b18…43d92) · insumo: evidence-index.md · 2026-10-16
 
 > **Escopo:** traduzir o padrão *ponte núcleo ↔ host de plugins* observado na Fase 1 em **design
-> patterns e contratos** para o **Arcane** (Electron + TypeScript). Nenhum bloco de implementação,
+> patterns e contratos** para o **Scribe** (Electron + TypeScript). Nenhum bloco de implementação,
 > assembly, pseudocódigo ou byte do alvo é reproduzido — só **nomes, contagens, tamanhos, offsets e
 > papel arquitetural**, como manda o regime clean-room. Toda afirmação sobre o alvo traz o
 > **Evidence ID** de [`evidence-index.md`](../analysis/evidence-index.md) (§4/§5/§6/§9/§10).
@@ -304,7 +304,7 @@ export interface ExtensionAPI {
 
 ## 6. 🔀 Divergências deliberadas (onde NÃO seguimos o alvo, e por quê)
 
-| # | Alvo (observado) | Arcane (nosso) | Por quê |
+| # | Alvo (observado) | Scribe (nosso) | Por quê |
 |---|---|---|---|
 | D1 | shm POSIX + 2 semáforos nomeados por canal (`HOST-E1`, `IPC-E12`) | `MessageChannel`/`MessagePort` | idiomático em Electron/Node; sem syscalls manuais nem `sem_unlink` |
 | D2 | Framing `[uint32 len][payload]` (`IPC-E1`) | sem framing — structured clone delimita | o comprimento é redundante no transporte novo |

@@ -2,7 +2,7 @@
 > Fase 2 (P2.1) · síntese clean-room do alvo (sha256 8b105b18…43d92) · insumo: evidence-index.md · 2026-10-16
 
 > **Entregável:** **P2.1** — a spec abstrata de **concorrência e scheduling** do editor-alvo
-> (**Arcane**, codinome provisório), escrita para ser implementada em **Electron + TypeScript**.
+> (**Scribe**), escrita para ser implementada em **Electron + TypeScript**.
 > Alvo da análise: o ELF64 x86-64 PIE **stripped** `target/sublime_text/sublime_text`
 > (`sha256 8b105b1839d7809f60ec186b6c6dcb2d107e22ad23f42c5f8ba7dec67ab43d92`).
 > **Clean-room:** só **nomes, assinaturas, contagens, tamanhos, endereços e papel arquitetural** —

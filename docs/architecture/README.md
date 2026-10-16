@@ -14,8 +14,7 @@ arquitetura** (`DEC-*`) para a reimplementação em **Electron + TypeScript**, e
 deliberadamente nos afastamos** do alvo. Cada afirmação sobre o alvo cita **Evidence IDs**; cada
 escolha nossa é marcada **"escolha nossa (não observada no alvo)"**.
 
-**Codinome:** o editor-alvo aparece como **Arcane** (nome provisório — a decisão formal é o item
-**P2.3** do [`../BACKLOG.md`](../BACKLOG.md)).
+**Nome:** o editor-alvo chama-se **Scribe** (decidido em **P2.3**).
 
 ---
 
@@ -28,7 +27,7 @@ escolha nossa é marcada **"escolha nossa (não observada no alvo)"**.
 | [`03-extensao-e-ipc.md`](03-extensao-e-ipc.md) | Extensão & IPC (host de plugins como processo isolado) | `DEC-IPC-1…12` | `api-python.md` + `ipc-plugin-host.md` + `ipc-protocol.md` (`PY-`/`HOST-`/`IPC-`) |
 | [`04-render-e-ui.md`](04-render-e-ui.md) | Render & UI (contexto abstrato, batching, viewport virtualizado) | `DEC-REN-1…8` | `render-pipeline.md` (`REN-E1–E27`) |
 | [`05-empacotamento-e-recursos.md`](05-empacotamento-e-recursos.md) | Empacotamento & recursos (namespace lógico, resolução em camadas) | `DEC-PKG-1…12` | `packaging.md` (`PKG-E1–E22`), `PY-E19`/`PY-E22` |
-| [`06-padroes-transversais.md`](06-padroes-transversais.md) | Padrões transversais (o que reaparece em todo o Arcane) | `DEC-TR-1…7` | o índice inteiro (visão cruzada) |
+| [`06-padroes-transversais.md`](06-padroes-transversais.md) | Padrões transversais (o que reaparece em todo o Scribe) | `DEC-TR-1…7` | o índice inteiro (visão cruzada) |
 
 > **Ordem de leitura sugerida:** `01` → `02` → `03` → `04` → `05` (componentes) e, por último,
 > `06` (o catálogo que amarra todos). Para reconstruir o *porquê* de qualquer decisão, vá do `DEC-*`
@@ -61,9 +60,9 @@ A Fase 1 converge para uma arquitetura em **3 fronteiras**:
    (U=281 host→núcleo, V=71 núcleo→host) (`IPC-E1`, `IPC-E30`).
 3. **Host de plugins** — processo separado (não thread) que embute CPython (`HOST-E3`, `CON-E19`).
 
-### 2.2 O mapeamento para o Arcane (Electron/TS) `[escolha nossa]`
+### 2.2 O mapeamento para o Scribe (Electron/TS) `[escolha nossa]`
 
-| Fronteira do alvo | No Arcane | Componentes |
+| Fronteira do alvo | No Scribe | Componentes |
 |---|---|---|
 | Núcleo na **main thread** | **main process** (Node) + **renderer** (Chromium); trabalho pesado vai a **`worker_threads`** | `Buffer`, `TextStore`, `DocumentRegistry`, `CommandBus`, `Scheduler`, `TaskPool` |
 | Ponte IPC binária em shm | **`MessagePort`** sobre `utilityProcess`, com **serialização tipada** e request/response por id | `ExtensionHost`, `ExtensionBridge`, `ExtensionAPI` |
@@ -147,7 +146,7 @@ A Fase 1 converge para uma arquitetura em **3 fronteiras**:
 - **Hipótese ≠ fato:** onde a Fase 1 deixou `[DESCONHECIDO]`, a Fase 2 **decide mesmo assim** e
   registra a incógnita na §"Incógnitas que afetam este módulo" do doc dono (referenciando `U*`).
 - **Pendências que afetam esta fase:**
-  - **P2.3 — codinome:** decidir o nome antes de virar código (hoje: *Arcane*, provisório).
+  - **P2.3 — nome:** ✅ decidido (**Scribe**).
   - **Incógnitas com maior impacto** (ver [`../analysis/evidence-index.md`](../analysis/evidence-index.md) §10):
     `BUF-U1`/`BUF-U4` (topologia do store e cache de linha), `CON-U1`/`CON-U5` (identidade da main
     thread e coalescing do scheduler), `IPC-U5`/`IPC-U6` (quais ids bloqueiam; subcódigos de `data[0]`),

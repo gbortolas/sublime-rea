@@ -1,7 +1,7 @@
 # TECHNICAL SPECIFICATION: Clean-Room Reverse Engineering & High-Performance Text Editor Architecture
 
 ## 1. Project Overview & Meta Information
-- **Project Name:** Arcane / High-Performance Electron Text Editor Core
+- **Project Name:** Scribe / High-Performance Electron Text Editor Core
 - **Repository / Reference Tooling:** REA (Reverse Engineering Agent)
   - **GitHub URL:** https://github.com/morluto/rea
 - **Scope:** Academic Research & Clean-Room Architectural Re-implementation

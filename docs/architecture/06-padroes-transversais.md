@@ -1,4 +1,4 @@
-# 06 · Padrões transversais — o que reaparece em todo o Arcane
+# 06 · Padrões transversais — o que reaparece em todo o Scribe
 
 > Fase 2 (P2.1) · síntese clean-room do alvo (sha256 8b105b18…43d92) · insumo: evidence-index.md · 2026-10-16
 
@@ -8,14 +8,14 @@ estruturais** aplicados de forma consistente — e são exatamente os que **sobr
 descrevem **contratos e ciclos de vida**, não implementação.
 
 **Escopo.** Isto é **catálogo transversal**: 1 seção por padrão, cada uma com *nome · forma no alvo (com
-Evidence IDs) · como o Arcane implementa · armadilhas*. O detalhe de cada componente vive nos docs `01`–`05`
+Evidence IDs) · como o Scribe implementa · armadilhas*. O detalhe de cada componente vive nos docs `01`–`05`
 — aqui só se aponta para eles. Nenhum trecho, pseudocódigo ou assembly do alvo é reproduzido; snippets são
 **do nosso código**.
 
 **Componentes (glossário canônico, sem variação):** `Buffer` · `TextStore` · `DocumentRegistry` ·
 `DocumentHandle` · `CommandBus` · `Scheduler` · `TaskPool` · `ExtensionHost` · `ExtensionBridge` ·
-`ExtensionAPI` · `RenderPipeline` · `Viewport` · `PackageResolver` · `PropertySystem`. Codinome provisório:
-**Arcane** (P2.3 no [`../BACKLOG.md`](../BACKLOG.md)).
+`ExtensionAPI` · `RenderPipeline` · `Viewport` · `PackageResolver` · `PropertySystem`. Projeto:
+**Scribe**.
 
 **Rótulos:** `[OBSERVADO]` / `[INFERIDO]` / `[DESCONHECIDO]` descrevem o **alvo**; toda decisão nossa leva
 **“escolha nossa (não observada no alvo)”**.
@@ -55,7 +55,7 @@ viewport, props e recursos → leia aqui.
 - **Sem cache global** de objetos (instâncias recriadas); só memoização **por instância** em `Settings` —
   `PY-E5`. A superfície concentra-se numa façade grande: `View` = 133 métodos nativos — `PY-E32`.
 
-**Como o Arcane implementa.** `Buffer` é a façade pública; `TextStore` é privado. Toda referência cruza a
+**Como o Scribe implementa.** `Buffer` é a façade pública; `TextStore` é privado. Toda referência cruza a
 fronteira como `DocumentHandle` **opaco com geração** — o `DocumentRegistry` **recusa** handle velho em vez
 de resolvê-lo para o documento errado.
 
@@ -89,7 +89,7 @@ Store/delta/undo: `DEC-BUF-*` (`01`). Contrato de handle e reciclagem: **`DEC-TR
   perigosa:** `el_callbacks` **não** filtra → hook ausente = `AttributeError` — `PY-E13`.
 - **Retenção:** callbacks Python e **objetos inteiros** de listener ficam retidos no C++ — `PY-E9`, `PY-E10`.
 
-**Como o Arcane implementa.** `Signal<T>` tipado com **token de descarte obrigatório** — o inverso do alvo,
+**Como o Scribe implementa.** `Signal<T>` tipado com **token de descarte obrigatório** — o inverso do alvo,
 onde o desanexo é opcional e o objeto inteiro fica preso (`PY-E10`). Observador de vida longa
 (`DocumentRegistry`) usa referência fraca; só observador curto (frame) é forte.
 
@@ -107,7 +107,7 @@ Desanexo/weak ref: **`DEC-TR-2`**.
 - **Hook opcional que explode:** copiar `el_callbacks` (`PY-E13`) é copiar um crash — interface tipada com
   no-op explícito.
 - **Ordem implícita:** `PY-E14` documenta **um** hook; o resto é "ordem do loop" `[DESCONHECIDO]`. Em
-  Arcane a ordem é **declarada** por prioridade.
+  Scribe a ordem é **declarada** por prioridade.
 - Retenção forte no host (`PY-E9`/`PY-E10`) → `ExtensionHost` guarda **ids**, nunca o objeto do plugin.
 
 ---
@@ -126,7 +126,7 @@ Desanexo/weak ref: **`DEC-TR-2`**.
   aberto/fechado **pelo host** — `PY-E17`; a Command Palette usa heurística de `TypeError` — `PY-E18`; há
   separação main-thread × worker — `PY-E27`.
 
-**Como o Arcane implementa.** `CommandBus` é o **ponto único** de mutação: todo comando devolve os `Edit`
+**Como o Scribe implementa.** `CommandBus` é o **ponto único** de mutação: todo comando devolve os `Edit`
 aplicados e o undo guarda os **inversos** (delta), não snapshots. O agrupamento é uma **transação** explícita,
 substituindo o par implícito *glue/soft*.
 
@@ -161,7 +161,7 @@ bus.run('buffer.insert', { text }, { group: 'typing.42' });         // group = u
   de N threads (`io_worker`, N = setting) — `CON-E9`; pool **on-demand limitado a 2** — `CON-E10`; modelo
   assíncrono declarado (`promise`/`future_core`/`io_scheduler`/`async_file_system`) — `CON-E14`.
 
-**Como o Arcane implementa.** `Scheduler` com **lanes** de prioridade (`input` > `edit` > `layout` >
+**Como o Scribe implementa.** `Scheduler` com **lanes** de prioridade (`input` > `edit` > `layout` >
 `background`) + `TaskPool` sobre `worker_threads`; **escrita única**: só a lane de edição muta
 `TextStore`/`Viewport`, e o resultado volta por `MessagePort`.
 
@@ -201,7 +201,7 @@ Lanes/limites de pool: `DEC-CON-*` (`02`). Escrita única + posse de handle em i
   `IPC-E15`–`IPC-E17`; `data[0]==0` = ***escape*** do motor de requisições pendentes — `IPC-E34`; tabela
   "blocking by opcode" (**68**) — `IPC-E35`; **6** `fn` remapeadas no boot — `IPC-E36`.
 
-**Como o Arcane implementa.** `ExtensionBridge` com **tabela de opcodes gerada** a partir da interface
+**Como o Scribe implementa.** `ExtensionBridge` com **tabela de opcodes gerada** a partir da interface
 `ExtensionAPI` — a numeração é **derivada**, preservando a propriedade que o alvo obtém do `PyMethodDef[]`
 (`IPC-E27`): *id e superfície não podem divergir*. Payload = CBOR (escolha nossa) e um `MessagePort` por
 **papel** (main/async), espelhando o *slot* por thread (`HOST-E25`).
@@ -242,7 +242,7 @@ Protocolo/canais/versionamento: `DEC-IPC-*` (`03`). Opcode desconhecido e chamad
 - Props filtradas por **escopo/seletor** — `PKG-E22`; override `User` > `Default` declarado — `PKG-E21`;
   ordem de merge `[DESCONHECIDO]` — `PKG-U2`.
 
-**Como o Arcane implementa.** `PropertySystem` com **schema declarado**: cada propriedade é um objeto tipado
+**Como o Scribe implementa.** `PropertySystem` com **schema declarado**: cada propriedade é um objeto tipado
 (`defineProperty`) com default, escopo e evento de mudança (liga-se ao §2). O valor é **resolvido em
 camadas** e o resultado é cacheado por escopo, invalidado por evento — nada de leitura em hot path.
 
@@ -279,7 +279,7 @@ Sizing de pools: `DEC-CON-*` (`02`).
 - Render na **main/GTK thread** por tick de frame — `REN-E3`; texto moldado na **CPU** → atlas `RGBA8` —
   `REN-E15`, `REN-E16`.
 
-**Como o Arcane implementa.** `RenderPipeline` **grava operações** (draw list) e os backends as executam — é
+**Como o Scribe implementa.** `RenderPipeline` **grava operações** (draw list) e os backends as executam — é
 o que torna o backend realmente plugável. `Canvas2D` e `WebGPU` implementam a **mesma** interface pequena, e
 o texto é moldado numa camada **única** compartilhada.
 
@@ -320,7 +320,7 @@ silencioso.
 - `[DESCONHECIDO]`: ordem de merge (`PKG-U2`), precedência entre raízes (`PKG-U3`), algoritmo de `extends`
   (`PKG-U7`), regra da variante de plataforma (`PKG-U8`), semântica de hidden (`PKG-U4`).
 
-**Como o Arcane implementa.** `PackageResolver` com **lista ordenada de camadas** e resolução
+**Como o Scribe implementa.** `PackageResolver` com **lista ordenada de camadas** e resolução
 **determinística por índice** (menor vence) — o que o alvo deixa implícito, nós **declaramos e testamos**.
 Nome lógico = `<pkg>/<path>`; o tipo de recurso vem de uma **tabela gerada**; `extends` é resolvido
 **eagerly**, com detecção de ciclo.
@@ -338,7 +338,7 @@ Camadas/tipos/merge: `DEC-PKG-*` (`05`). Props por escopo: §6 / **`DEC-TR-6`**.
 - **Precedência ambígua** é a origem do bug "funciona na minha máquina" (`PKG-U3`): uma ordem declarada, um
   teste por camada.
 - **ZIP sem manifesto** (`PKG-E2`) + ausência de versão/dependências (`PKG-U6`): não repetir — o pacote do
-  Arcane tem metadado mínimo (nome, versão, engines).
+  Scribe tem metadado mínimo (nome, versão, engines).
 - Não depender de ordem de entradas do ZIP (`PKG-E4`).
 
 ---
@@ -356,7 +356,7 @@ Camadas/tipos/merge: `DEC-PKG-*` (`05`). Props por escopo: §6 / **`DEC-TR-6`**.
   vai no **nome do canal** (`-3.14`/`-3.3`) — `HOST-E4` —, mas os enums são **idênticos** entre versões —
   `IPC-E30`.
 
-**Como o Arcane implementa.** Máquina de estados explícita por `ExtensionHost`, com **fila de eventos
+**Como o Scribe implementa.** Máquina de estados explícita por `ExtensionHost`, com **fila de eventos
 pré-`ready`** (o análogo do *deferred load* de `PY-E28`) e replay **ordenado** — determinístico, ao contrário
 da re-síntese observada. O handshake carrega API version + hash da tabela (§5).
 
@@ -373,7 +373,7 @@ Ciclo de vida, auto-load e mock mode: `DEC-IPC-*` (`03`). Tabela de opcodes: §5
 - **Host que nunca fica `ready`** → timeout + *kill*; não herdar "pendura para sempre".
 - **Mismatch de versão** deve falhar **cedo e alto** (hash no handshake), não virar crash misterioso no
   dispatcher.
-- **Contrato posicional de argv** (`HOST-E11`, `HOST-U3`) é frágil: Arcane passa configuração **estruturada**
+- **Contrato posicional de argv** (`HOST-E11`, `HOST-U3`) é frágil: Scribe passa configuração **estruturada**
   (JSON/env), não 8 posições anônimas — escolha nossa.
 - **Mock mode** (`PY-E22`) é capacidade real: *feature* de primeira classe nos testes do `ExtensionBridge`.
 
@@ -381,7 +381,7 @@ Ciclo de vida, auto-load e mock mode: `DEC-IPC-*` (`03`). Tabela de opcodes: §5
 
 ## 10. 🖥️ Síntese: quais padrões adotamos no editor-alvo
 
-| # | Padrão | Componente Arcane | Verbo da adoção |
+| # | Padrão | Componente Scribe | Verbo da adoção |
 |---|---|---|---|
 | 1 | Façade + handle opaco | `Buffer` / `DocumentHandle` / `DocumentRegistry` | **integral**, + geração no id |
 | 2 | Observer/listener | `Buffer`→`Viewport`→`RenderPipeline` + hooks | **adoção**, com descarte obrigatório |

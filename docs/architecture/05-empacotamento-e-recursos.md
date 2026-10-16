@@ -9,7 +9,7 @@ são **54 ZIPs sem manifesto**; o **tipo do arquivo** (extensão) define o *pape
 
 **Componentes afetados (glossário do projeto).** `PackageResolver` (principal) · `PropertySystem` ·
 `RenderPipeline` · `CommandBus` · `ExtensionHost` / `ExtensionBridge` · `TaskPool` · `Scheduler`.
-Codinome provisório do projeto: **Arcane**.
+Projeto: **Scribe**.
 
 ---
 
@@ -256,7 +256,7 @@ gramática (`extends`) usa `resolve` sobre o **mesmo** namespace (DEC-PKG-8).
 
 ## 5. 🔀 Divergências deliberadas (onde NÃO seguimos o alvo, e por quê)
 
-| # | Alvo (`PKG-*`) | Nossa escolha (Arcane) | Por quê |
+| # | Alvo (`PKG-*`) | Nossa escolha (Scribe) | Por quê |
 |---|---|---|---|
 | D1 | **ZIP** sem manifesto (`PKG-E2`, `PKG-E4`) | **`asar`** ou pasta plana em dev (DEC-PKG-5) | `asar` já é pacote-montado do Electron; evita reimplementar ZIP |
 | D2 | Namespace por nome lógico **e** duas raízes implícitas (`PKG-E20`) | **Camadas explícitas** `os → app → user` (DEC-PKG-3) | precedência determinística e testável; `PKG-U2`/`PKG-U3` ficam fechadas por decisão |

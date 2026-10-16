@@ -103,7 +103,7 @@ próximo trabalho é a **Fase 2** (P2.1).
 ## 📄 P2 — Fases 2 e 3 do projeto
 
 > **Fase 2 (P2.1) ✅ fechada** (2026-10-16) — spec abstrata em [`docs/architecture/`](architecture/)
-> (6 docs + README, **61 decisões `DEC-*`**). **Próximo:** P2.3 (codinome) → P2.2 (scaffold `src/`).
+> (6 docs + README, **61 decisões `DEC-*`**). **Próximo:** P2.2 (scaffold `src/`).
 
 - [x] **P2.1 — Fase 2** ✅ entregue: [`docs/architecture/`](architecture/) (README + `01`–`06`).
       Síntese clean-room dos padrões em **6 docs** com **61 decisões `DEC-*`** (BUF 10 · CON 12 ·
@@ -117,9 +117,10 @@ próximo trabalho é a **Fase 2** (P2.1).
       - [ ] Worker Threads para operações de buffer e parsing pesado
       - [ ] Renderização por Canvas 2D / WebGPU com scroll virtualizado
       - [ ] API de extensão tipada + protocolo IPC
-- [ ] **P2.3 — Alinhar o nome do projeto:** `TECHNICAL_SPECIFICATION.md:4` chama de **"Arcane"**; a
-      outra spec não nomeia. Decidir o nome antes de virar código (a spec da Fase 2 usa **"Arcane"**
-      como codinome provisório). **Bloqueia o P2.2** (pesquisa do usuário).
+- [x] **P2.3 — Nome do projeto** ✅ **decidido: `Scribe`** (2026-10-16). O editor-alvo chama-se
+      **Scribe**; aplicado em `TECHNICAL_SPECIFICATION.md` ("Scribe / High-Performance Electron Text
+      Editor Core"), em [`docs/architecture/`](architecture/) e no `README.md`. O repositório segue
+      **`sublime-rea`** (nome do repo, não do produto).
 
 ---
 

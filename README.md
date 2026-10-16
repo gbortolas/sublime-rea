@@ -14,9 +14,9 @@ em **Electron + TypeScript** (Canvas 2D / WebGPU + Worker Threads).
 > ⚠️ **Princípio inegociável:** **nenhuma linha de código do binário é copiada.** Só conceitos e
 > especificações abstratas. Ver [Ética / clean-room](#-ética--clean-room).
 
-> 📝 **Nome do projeto: a definir.** [`docs/TECHNICAL_SPECIFICATION.md`](docs/TECHNICAL_SPECIFICATION.md)
-> chama o alvo de **"Arcane"**; o repositório se chama **sublime-rea**. Decidir o nome é o item
-> **P2.3** do backlog — até lá, este README usa "sublime-rea" só como nome do repo.
+> 📝 **Nome do projeto: Scribe.** O codinome do editor-alvo é **Scribe** (decidido em **P2.3**; ver
+> [`docs/TECHNICAL_SPECIFICATION.md`](docs/TECHNICAL_SPECIFICATION.md)). O repositório continua
+> **sublime-rea**.
 
 ---
 
@@ -368,7 +368,7 @@ Track A (API Python + IPC) ✅ · **Fase 1 FECHADA** (P1.1–P1.6 ✅) · **Fase
 | **P0.6** — deadline do Ghidra no MCP | ✅ resolvido (setup rodado; MCP relançado com a var) |
 | **Fase 1** — buffer, concorrência, IPC/opcodes, render, empacotamento, ledger | ✅ **fechada** (P1.1 ✅ · P1.2 ✅ · P1.3 ✅ · P1.4 ✅ · P1.5 ✅ · P1.6 ✅) |
 | **Fase 2** — spec abstrata (`docs/architecture/`) | ✅ **fechada** (P2.1 ✅: `01`–`06` + README; 61 decisões `DEC-*`) |
-| **P2.3** — codinome do projeto (hoje *Arcane*, provisório) | ⬜ pendente (decidir antes de virar código) |
+| **P2.3** — nome do projeto **Scribe** | ✅ decidido (aplicado nas specs e em `docs/architecture/`) |
 | **Fase 3** — o editor em Electron/TS (`src/`) | ⬜ não começou (**próximo**: P2.2) |
 
 > 🔄 **Fontes vivas:** [`docs/HANDOFF.md`](docs/HANDOFF.md) (como retomar, pegadinhas operacionais) e
@@ -383,7 +383,7 @@ Track A (API Python + IPC) ✅ · **Fase 1 FECHADA** (P1.1–P1.6 ✅) · **Fase
 |---|---|
 | [`AGENTS.md`](AGENTS.md) | **Instruções do projeto / bootstrap de sessão** — o gatilho "pode continuar os trabalhos!" manda ler o HANDOFF e pegar o próximo item do BACKLOG |
 | [`docs/SPECIFICATION.md`](docs/SPECIFICATION.md) | **Visão de pesquisa** (pt-BR): objetivos, ferramentas, requisitos técnicos e diretrizes éticas/legais |
-| [`docs/TECHNICAL_SPECIFICATION.md`](docs/TECHNICAL_SPECIFICATION.md) | **Spec técnica** (en): metodologia clean-room, componentes-núcleo, arquitetura-alvo no Electron. É aqui que o projeto aparece como **"Arcane"** |
+| [`docs/TECHNICAL_SPECIFICATION.md`](docs/TECHNICAL_SPECIFICATION.md) | **Spec técnica** (en): metodologia clean-room, componentes-núcleo, arquitetura-alvo no Electron. É a spec que nomeia o produto como **Scribe** |
 | [`docs/HANDOFF.md`](docs/HANDOFF.md) | **Como retomar**: estado atual, pegadinhas operacionais, timeout do Ghidra, fatos observados do alvo |
 | [`docs/BACKLOG.md`](docs/BACKLOG.md) | **Placar vivo**: itens P0 (destravar), P1 (Fase 1), P2 (Fases 2–3), P3 (housekeeping) |
 | [`setup/README.md`](setup/README.md) | O **instalador reproduzível**: 10 etapas, flags, variáveis, troubleshooting, códigos de saída |

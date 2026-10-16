@@ -9,8 +9,8 @@ esqueleto claro de *storage* + *façade* + *comando* + *grupo de undo*, ainda qu
 storage permaneça `[DESCONHECIDO]` (`BUF-U1`).
 
 Este documento traduz a evidência da Fase 1 (P1.1 + o recorte de handles/comandos de P1 API de
-plugins) em **decisões de arquitetura** para o editor-alvo **Arcane** (codinome provisório — P2.3
-pendente), que roda em **Electron + TypeScript** (main Node, renderer Chromium, `worker_threads`).
+plugins) em **decisões de arquitetura** para o editor-alvo **Scribe**, que roda em
+**Electron + TypeScript** (main Node, renderer Chromium, `worker_threads`).
 Nada aqui transcreve implementação do alvo: só **nomes, contagens, tamanhos, offsets e papel**.
 
 ---
@@ -95,7 +95,7 @@ representações distintas*.
 
 ## 3. 🖥️ Decisões de arquitetura para o editor-alvo
 
-Componentes do Arcane referidos aqui: **`Buffer`** (façade pública), **`TextStore`** (estrutura
+Componentes do Scribe referidos aqui: **`Buffer`** (façade pública), **`TextStore`** (estrutura
 interna segmentada), **`DocumentRegistry`** (buffers abertos + handles opacos), **`DocumentHandle`**
 (id numérico opaco), **`CommandBus`** (comandos nomeados + agrupamento de undo), **`Scheduler`**,
 **`TaskPool`**, **`PropertySystem`**.
@@ -214,7 +214,7 @@ paralelismo é **escolha nossa**: restringimos paralelismo a **leitura** (`TaskP
 ## 4. 📐 Contratos TypeScript (interfaces/assinaturas do NOSSO código)
 
 ```ts
-/** Ponto de entrada público: o "Buffer" do Arcane. */
+/** Ponto de entrada público: o "Buffer" do Scribe. */
 export interface Buffer {
   readonly handle: DocumentHandle;
   readonly revision: number;            // DEC-BUF-10 — validade de resultado assíncrono
@@ -283,7 +283,7 @@ interface TextStore {
 
 ## 5. 🔀 Divergências deliberadas (onde NÃO seguimos o alvo, e por quê)
 
-| # | Alvo `[OBSERVADO]` | Arcane | Por quê |
+| # | Alvo `[OBSERVADO]` | Scribe | Por quê |
 |---|---|---|---|
 | D1 | Herança múltipla: **2 vptrs**, `__vmi` com `SpellingListener` + base virtual (`BUF-E3`) | **Composição**: `SpellingService` e colaboradores injetados no `Buffer` | Sem vtable em TS; base #1 do alvo é `BUF-U5`. Herança não traz benefício arquitetural — só acoplamento. |
 | D2 | **11 pares `{begin,end}`** + array de registros `0x20` B (`BUF-E7`, `BUF-E5`) | **1** buffer `original` + **1** `add` + **1** tabela de spans | Semântica dos 11 vetores é `[DESCONHECIDO]` (`BUF-U1`); espelhar topologia inventada violaria o clean-room. |
@@ -321,7 +321,7 @@ Legenda: ✅ definida · 🟡 provisória (depende de incógnita/benchmark).
 
 ## 7. ⚠️ Incógnitas que afetam este módulo (refs `BUF-U*`)
 
-| ID | Incógnita | Impacto no Arcane | O que fecharia |
+| ID | Incógnita | Impacto no Scribe | O que fecharia |
 |---|---|---|---|
 | `BUF-U1` | Nome canônico/topologia da estrutura de texto; semântica dos 11 vetores e dos registros `0x20` B; UTF-8 vs UTF-32 no corpo | **Médio** — não afeta a API (`Buffer`/`TextDelta`), afeta o desempenho do `TextStore` | Struct do alvo (DWARF/símbolos) + benchmark de insert no meio de arquivo grande |
 | `BUF-U2` | Se o corpo do documento usa UTF-32/SSO ou UTF-8 | **Baixo** — DEC-BUF-9 já assume UTF-16 com ponte | Medir tipo no corpo (retorna a `BUF-E12`) |
@@ -333,5 +333,5 @@ Legenda: ✅ definida · 🟡 provisória (depende de incógnita/benchmark).
 (10 MB single-line, 10 MB multi-line, 1 M linhas) e só então decidir entre *cache de sentinela* e
 **índice de linhas incremental**. O contrato público (`Buffer`) não muda em nenhum dos casos.
 
-**Nota de estado.** No alvo os handles carregam **2 bits de subtipo** (`PY-E6`); no Arcane, a
+**Nota de estado.** No alvo os handles carregam **2 bits de subtipo** (`PY-E6`); no Scribe, a
 classificação (buffer/view/sheet) fica no `DocumentRegistry` + `PropertySystem`, **não** no id.
