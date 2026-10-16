@@ -87,6 +87,11 @@ Maps the §3.1–§3.4 targets onto delivered Phase 1 evidence. Labelling follow
   ([`analysis/api-python.md`](analysis/api-python.md), [`analysis/ipc-plugin-host.md`](analysis/ipc-plugin-host.md)):
   the Python host is a **separate process** (`posix_spawn`/`execvp` + POSIX shm + semaphores), **not** a
   thread. Opcodes/framing still open (**P1.3**).
+- **Phase 2 (P2.1) — abstract spec** — ✅ delivered in [`architecture/`](architecture/) (README + 6
+  docs, **61 `DEC-*` decisions**): every §3.1–§3.4 target is translated into an Electron/TypeScript
+  decision with the evidence IDs that support it, plus explicitly marked divergences. The transport is
+  now fully evidenced (framing `[uint32 len]` + numeric dispatch) in
+  [`analysis/ipc-protocol.md`](analysis/ipc-protocol.md).
 
 Living index → [`BACKLOG.md`](BACKLOG.md); session protocol → [`../AGENTS.md`](../AGENTS.md).
 

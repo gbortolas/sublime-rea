@@ -14,10 +14,10 @@
 > [`BACKLOG.md`](BACKLOG.md). Não peça contexto: ele está todo em `docs/`.
 
 **Estado em uma linha:** ambiente ✅ · binário-alvo **100% analisável** ✅ · Track A (API Python +
-IPC) ✅ · **P1.1 buffer** ✅ · **P1.2 concorrência** ✅ · **P1.3 IPC (framing + opcodes)** ✅ ·
-**P1.4 render** ✅ · **P1.5 ledger consolidado** ✅ · **P1.6 empacotamento** ✅ · **P0.6 (MCP)** ✅ ·
-**P3.9 (`JAVA_HOME` no `env.sh`)** ✅ · **FASE 1 FECHADA** — **falta** a Fase 2 (síntese) e a Fase 3
-(o editor em Electron/TS).
+IPC) ✅ · **FASE 1 FECHADA** (P1.1 buffer ✅ · P1.2 concorrência ✅ · P1.3 IPC ✅ · P1.4 render ✅ ·
+P1.5 ledger consolidado ✅ · P1.6 empacotamento ✅) · **FASE 2 FECHADA** (P2.1: `docs/architecture/`,
+6 docs + README, **61 decisões `DEC-*`**) · **falta** o codinome (**P2.3**) e a Fase 3 (o editor em
+Electron/TS, **P2.2**).
 
 **✅ Passo operacional resolvido (2026-10-16).** O `setup.py` foi rodado e o MCP `rea` foi relançado
 **já com `REA_GHIDRA_STARTUP_TIMEOUT_MS=900000`** (confirmado em `/proc/*/environ`) — **não** é mais
@@ -31,11 +31,12 @@ python3 setup/setup.py        # idempotente: reescreve setup/env.sh + environmen
 Sem o deadline maior, `open_binary`/`analyze` **via MCP** volta a estourar os 330 s (a análise leva
 ~355 s).
 
-**Próxima tarefa recomendada:** **P2.1 — Fase 2 (síntese)**: escrever `docs/architecture/*.md`
-traduzindo os padrões arquiteturais em **spec abstrata** (o "o quê", não o "como" do alvo), **sem**
-copiar código do binário. Insumo pronto: [`docs/analysis/evidence-index.md`](analysis/evidence-index.md)
-— **179 evidências** com tipo/limites e **48 incógnitas** consolidadas (cada incógnita já traz "o que
-fecharia"). A Fase 1 está **fechada**; a Fase 2 é de **redação/síntese**, não de análise nativa nova.
+**Próxima tarefa recomendada:** **P2.3 — decidir o codinome** (hoje *Arcane*, provisório) e então
+**P2.2 — Fase 3**: criar o scaffold `src/` (Electron + TypeScript) **seguindo a spec da Fase 2**
+([`docs/architecture/`](architecture/) — 6 docs, **61 decisões `DEC-*`** com rastreabilidade
+`conclusão (Evidence) → DEC → status`). A Fase 3 é **escrita de código do zero**, não análise — o
+insumo arquitetural está pronto nesta pasta. Ordem: P2.3 (decisão de 1 minuto, bloqueia o nome dos
+pacotes) → P2.2 (buffer/`TextStore` → workers → render → API de extensão).
 
 > ✅ **Pegadinha resolvida (2026-10-16, P3.9):** o `setup.py` agora **detecta** um JDK ≥ 21
 > compatível (`JAVA_HOME`, PATH, sdkman, `/usr/lib/jvm`) e escreve um **`export JAVA_HOME=…` ativo**
@@ -291,6 +292,20 @@ canais; **HOST-E9** revisada — enum numérico) e **48 incógnitas** consolidad
 `CON-U*` 6, `HOST-U*` 6, `IPC-U*` 6, `REN-U*` 6, `PKG-U*` 9), cada uma com "o que fecharia". É o
 **insumo direto da Fase 2**. Método: extração mecânica, **sem** análise nativa nova.
 
+### Fase 2 (P2.1) — spec abstrata
+
+[`docs/architecture/`](architecture/) — **6 docs + README**, **61 decisões `DEC-*`** (`BUF` 10 ·
+`CON` 12 · `IPC` 12 · `REN` 8 · `PKG` 12 · `TR` 7). Cada doc: *padrão observado (com Evidence IDs) →
+decisões de arquitetura (racional + evidência) → contratos TypeScript (do NOSSO código) →
+divergências deliberadas → rastreabilidade → incógnitas que o afetam*. Índice
+[`docs/architecture/README.md`](architecture/README.md): arquitetura em um olhar (**3 fronteiras** do
+alvo → mapeamento **Electron/TS**), **glossário canônico** de componentes (`Buffer`/`TextStore`/
+`DocumentHandle`/`CommandBus`/`Scheduler`/`TaskPool`/`ExtensionHost`/`ExtensionBridge`/`RenderPipeline`/
+`Viewport`/`PackageResolver`/`PropertySystem`) e rastreabilidade global Fase 1 → Fase 2. Docs: `01` buffer ·
+`02` concorrência · `03` extensão/IPC · `04` render · `05` empacotamento · `06` padrões transversais.
+**Clean-room**: nenhum bloco/assembly/pseudocódigo do alvo — só contratos e decisões nossas (marcadas).
+Codinome **Arcane** é provisório (**P2.3** pendente).
+
 ---
 
 ## ▶️ Como retomar
@@ -339,6 +354,7 @@ Material de apoio: skill `reverse-engineer-anything` (+ `references/native-and-a
 | `target/` | alvo extraído (gitignored) |
 | `setup/env.sh` | gerado; `source` obrigatório para o CLI |
 | `docs/analysis/` | evidências da Fase 1 (Track A + Track B) |
+| `docs/architecture/` | **spec abstrata da Fase 2** (padrões + decisões `DEC-*` do editor-alvo) |
 | `docs/HANDOFF.md` · `docs/BACKLOG.md` | este doc · backlog vivo |
 
 ---

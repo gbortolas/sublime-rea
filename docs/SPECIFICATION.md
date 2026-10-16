@@ -69,7 +69,8 @@ Este projeto de estudo e pesquisa acadêmica visa investigar a arquitetura inter
 | 1. Gerenciamento de buffer | [`analysis/buffer-structure.md`](analysis/buffer-structure.md) — ledger `E1–E14` | ✅ família piece-table/segmentado `[INFERIDO]`; sem Gap Buffer nem Rope nomeados |
 | 2. Multithread / concorrência | [`analysis/concurrency.md`](analysis/concurrency.md) — ledger `E1–E21` | ✅ main thread **GTK3/GLib** + fábrica POSIX (2 MiB, `prctl`) + pools de I/O |
 | 3. Extensibilidade / ponte IPC | [`analysis/api-python.md`](analysis/api-python.md) · [`analysis/ipc-plugin-host.md`](analysis/ipc-plugin-host.md) | 🟡 lado Python ✅ + transporte ✅ (shm+sem); **falta** opcodes/framing (P1.3) |
-| 4. Transição para Electron | — | ⬜ Fase 3 (não iniciada) |
+| 4. Transição para Electron — **síntese (Fase 2)** | [`architecture/README.md`](architecture/README.md) — 6 docs + índice, **61 decisões `DEC-*`** | ✅ padrões abstratos e mapeamento p/ Electron prontos (**P2.1**) |
+| 4. Transição para Electron — **implementação (Fase 3)** | — | ⬜ não iniciada (P2.2) |
 | (extra) Empacotamento de recursos | [`analysis/packaging.md`](analysis/packaging.md) — ledger `E1–E22` | ✅ `.sublime-package` = ZIP sem manifesto; precedência `User` > `Default` |
 
 > **Fila viva:** [`BACKLOG.md`](BACKLOG.md) · **Como retomar:** [`HANDOFF.md`](HANDOFF.md) · **Protocolo de sessão:** [`../AGENTS.md`](../AGENTS.md).

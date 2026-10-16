@@ -304,18 +304,30 @@ marcada como tal.
 
 ---
 
-### Passo 9 — FASE 2: sintetizar os padrões 📐
+### Passo 9 — FASE 2: sintetizar os padrões 📐 ✅
 
-**Objetivo:** escrever a **spec abstrata** do editor — a "receita" que a Fase 3 vai seguir.
-Um documento por componente, em `docs/architecture/` (ex.: `buffer.md`, `concurrency.md`,
-`ipc.md`, `render.md`), sintetizando as evidências da Fase 1 em **design patterns e contratos**
-(estrutura de dados, invariantes, complexidade esperada, interfaces).
+**Objetivo:** escrever a **spec abstrata** do editor — a "receita" que a Fase 3 segue.
+Um documento por componente em [`docs/architecture/`](docs/architecture/), sintetizando as
+evidências da Fase 1 em **design patterns e contratos** (estrutura de dados, invariantes,
+complexidade esperada, interfaces).
 
-Itens: **P2.1**. Regra da casa: **zero código do binário** — pseudocódigo próprio e diagramas, sim.
+Item: **P2.1** — ✅ **concluído**. Índice: [`docs/architecture/README.md`](docs/architecture/README.md).
 
-**Pronto quando:** existe `docs/architecture/*.md` cobrindo os 4 componentes-núcleo (buffer,
-concorrência, IPC/extensão, render) e cada afirmação aponta para a evidência que a sustenta
-(ou está marcada explicitamente como hipótese/decisão de projeto nossa).
+| Doc | Tema | Decisões |
+|---|---|---|
+| [`01-buffer-e-edicao.md`](docs/architecture/01-buffer-e-edicao.md) | Buffer & edição | `DEC-BUF-1…10` |
+| [`02-concorrencia-e-scheduling.md`](docs/architecture/02-concorrencia-e-scheduling.md) | Concorrência & scheduling | `DEC-CON-1…12` |
+| [`03-extensao-e-ipc.md`](docs/architecture/03-extensao-e-ipc.md) | Extensão & IPC | `DEC-IPC-1…12` |
+| [`04-render-e-ui.md`](docs/architecture/04-render-e-ui.md) | Render & UI | `DEC-REN-1…8` |
+| [`05-empacotamento-e-recursos.md`](docs/architecture/05-empacotamento-e-recursos.md) | Empacotamento & recursos | `DEC-PKG-1…12` |
+| [`06-padroes-transversais.md`](docs/architecture/06-padroes-transversais.md) | Padrões transversais | `DEC-TR-1…7` |
+
+Regra da casa: **zero código do binário** — pseudocódigo próprio e diagramas, sim.
+
+**Pronto quando:** existe `docs/architecture/*.md` cobrindo os componentes-núcleo (buffer,
+concorrência, IPC/extensão, render, empacotamento) e cada afirmação aponta para a evidência que a
+sustenta (ou está marcada explicitamente como hipótese/decisão de projeto nossa). ✅ — **61 decisões
+`DEC-*`**, todas com racional + Evidence IDs.
 
 ---
 
@@ -341,7 +353,7 @@ salvar, com as 7 caixas do topo desta página marcadas ✅). 🎉
 ## 📍 Onde estamos agora
 
 **Estado em uma linha:** ambiente ✅ · binário-alvo **100% analisável** ✅ ·
-Track A (API Python + IPC) ✅ · **Fase 1 FECHADA** (P1.1 ✅ · P1.2 ✅ · P1.3 ✅ · P1.4 ✅ · **P1.5 ✅** · P1.6 ✅).
+Track A (API Python + IPC) ✅ · **Fase 1 FECHADA** (P1.1–P1.6 ✅) · **Fase 2 ✅** (P2.1: 6 docs de arquitetura, 61 decisões).
 
 | Frente | Status |
 |---|---|
@@ -355,8 +367,9 @@ Track A (API Python + IPC) ✅ · **Fase 1 FECHADA** (P1.1 ✅ · P1.2 ✅ · P1
 | **P1.5** — ledger de evidências consolidado | ✅ (`docs/analysis/evidence-index.md`: 179 linhas + 48 incógnitas) |
 | **P0.6** — deadline do Ghidra no MCP | ✅ resolvido (setup rodado; MCP relançado com a var) |
 | **Fase 1** — buffer, concorrência, IPC/opcodes, render, empacotamento, ledger | ✅ **fechada** (P1.1 ✅ · P1.2 ✅ · P1.3 ✅ · P1.4 ✅ · P1.5 ✅ · P1.6 ✅) |
-| **Fase 2** — spec abstrata (`docs/architecture/`) | ⬜ não começou (**próximo**: P2.1) |
-| **Fase 3** — o editor em Electron/TS (`src/`) | ⬜ não começou |
+| **Fase 2** — spec abstrata (`docs/architecture/`) | ✅ **fechada** (P2.1 ✅: `01`–`06` + README; 61 decisões `DEC-*`) |
+| **P2.3** — codinome do projeto (hoje *Arcane*, provisório) | ⬜ pendente (decidir antes de virar código) |
+| **Fase 3** — o editor em Electron/TS (`src/`) | ⬜ não começou (**próximo**: P2.2) |
 
 > 🔄 **Fontes vivas:** [`docs/HANDOFF.md`](docs/HANDOFF.md) (como retomar, pegadinhas operacionais) e
 > [`docs/BACKLOG.md`](docs/BACKLOG.md) (fases P0/P1/P2/P3 e status de cada item). Este README é um
@@ -380,6 +393,8 @@ Track A (API Python + IPC) ✅ · **Fase 1 FECHADA** (P1.1 ✅ · P1.2 ✅ · P1
 | [`docs/analysis/concurrency.md`](docs/analysis/concurrency.md) | Evidência — **modelo de concorrência**: main thread GTK/GLib, fábrica de threads POSIX, pools (`io_worker`/`file_read_thread`), scheduler de retorno ao main thread, ledger `E1–E21` |
 | [`docs/analysis/render-pipeline.md`](docs/analysis/render-pipeline.md) | Evidência — **pipeline de render**: `px_render_context` (31 virtuais) + backends `gl_render_context` (OpenGL 4.1, 17 programas, instâncias em texture buffer `RGBA32F`) e `skia_render_context` (Skia raster sobre Cairo); atlas de glifos; `glScissor` por damage; ledger `E1–E27` |
 | [`docs/analysis/evidence-index.md`](docs/analysis/evidence-index.md) | **Índice consolidado de evidências (P1.5)**: as **179 linhas** dos 7 ledgers da Fase 1 num único namespace (`BUF-`/`CON-`/`PY-`/`HOST-`/`IPC-`/`REN-`/`PKG-`), com `conclusão → Evidence ID → tipo → limites`, duplicatas/supersessões e **48 incógnitas** consolidadas |
+| [`docs/architecture/README.md`](docs/architecture/README.md) | **Índice da Fase 2 (P2.1)**: arquitetura em um olhar (3 fronteiras do alvo → mapeamento Electron/TS), glossário canônico de componentes, registro de **61 decisões `DEC-*`** e rastreabilidade global Fase 1 → Fase 2 |
+| [`docs/architecture/01-buffer-e-edicao.md`](docs/architecture/01-buffer-e-edicao.md) · [`02-concorrencia-e-scheduling.md`](docs/architecture/02-concorrencia-e-scheduling.md) · [`03-extensao-e-ipc.md`](docs/architecture/03-extensao-e-ipc.md) · [`04-render-e-ui.md`](docs/architecture/04-render-e-ui.md) · [`05-empacotamento-e-recursos.md`](docs/architecture/05-empacotamento-e-recursos.md) · [`06-padroes-transversais.md`](docs/architecture/06-padroes-transversais.md) | **Spec abstrata (Fase 2)**: buffer · concorrência · extensão/IPC · render · empacotamento · padrões transversais — cada afirmação cita Evidence IDs; escolhas nossas marcadas |
 | [`bin/ghidra-preanalyze.sh`](bin/ghidra-preanalyze.sh) | Pré-análise headless em projeto persistente (sem deadline) — o "reprocessar sem reanalisar" |
 | [`setup/versions.env`](setup/versions.env) | Versões, URLs e SHA-256 **pinados** (fonte única de verdade do setup) |
 

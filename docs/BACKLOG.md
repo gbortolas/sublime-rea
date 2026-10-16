@@ -102,16 +102,24 @@ próximo trabalho é a **Fase 2** (P2.1).
 
 ## 📄 P2 — Fases 2 e 3 do projeto
 
-- [ ] **P2.1 — Fase 2:** escrever `docs/architecture/*.md` sintetizando os padrões (design patterns)
-      achados, **sem** copiar código do binário (princípio clean-room). ← **próximo** (insumo:
-      [`evidence-index.md`](analysis/evidence-index.md), 179 evidências + 48 incógnitas).
-- [ ] **P2.2 — Fase 3:** scaffold `src/` Electron + TypeScript:
+> **Fase 2 (P2.1) ✅ fechada** (2026-10-16) — spec abstrata em [`docs/architecture/`](architecture/)
+> (6 docs + README, **61 decisões `DEC-*`**). **Próximo:** P2.3 (codinome) → P2.2 (scaffold `src/`).
+
+- [x] **P2.1 — Fase 2** ✅ entregue: [`docs/architecture/`](architecture/) (README + `01`–`06`).
+      Síntese clean-room dos padrões em **6 docs** com **61 decisões `DEC-*`** (BUF 10 · CON 12 ·
+      IPC 12 · REN 8 · PKG 12 · TR 7), cada uma com racional + Evidence IDs e **tabela de
+      rastreabilidade** `conclusão (Evidence) → DEC → status`; glossário canônico de componentes e
+      mapa do alvo → Electron/TS. Cada doc marca as **divergências deliberadas** e as incógnitas
+      (`U*`) que o afetam.
+- [ ] **P2.2 — Fase 3:** scaffold `src/` Electron + TypeScript ← **próximo** (seguir a spec da
+      Fase 2 em [`docs/architecture/`](architecture/)):
       - [ ] `PieceTable`/`Rope` em TS (zero-copy/minimal-copy)
       - [ ] Worker Threads para operações de buffer e parsing pesado
       - [ ] Renderização por Canvas 2D / WebGPU com scroll virtualizado
       - [ ] API de extensão tipada + protocolo IPC
 - [ ] **P2.3 — Alinhar o nome do projeto:** `TECHNICAL_SPECIFICATION.md:4` chama de **"Arcane"**; a
-      outra spec não nomeia. Decidir o nome antes de virar código.
+      outra spec não nomeia. Decidir o nome antes de virar código (a spec da Fase 2 usa **"Arcane"**
+      como codinome provisório). **Bloqueia o P2.2** (pesquisa do usuário).
 
 ---
 
