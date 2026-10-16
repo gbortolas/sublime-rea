@@ -131,9 +131,9 @@ IDs). Cada item vira uma seção da spec técnica abstrata. **O binário está d
       idempotentemente pelo próprio script, com erro claro se o caminho já for um diretório real).
       Formalizar/documentar no `setup.py`.
 - [x] **P3.8 — `.serena/` untracked**: cache do LSP Serena; adicionado ao `.gitignore`.
-- [ ] **P3.9 — `JAVA_HOME` no `setup/env.sh`**: o `env.sh` gerado **não** exporta `JAVA_HOME` (só um
-      comentário), então o **CLI** `rea` fica `healthy: false` se o `JAVA_HOME` do shell for < 21
-      (o MCP `rea` tem o seu próprio). Melhorias: (a) o `setup.py` **detectar** um JDK ≥ 21 (ex.:
-      `~/.sdkman/candidates/java/23-zulu`) e **exportá-lo** no `env.sh`; ou (b) no mínimo, gerar o
-      `export` comentado **com o caminho detectado** em vez de `/caminho/do/jdk-21`. Pegadinha
-      registrada no HANDOFF (2026-10-16).
+- [x] **P3.9 — `JAVA_HOME` no `setup/env.sh`** (2026-10-16): resolvido pela opção **(a)** — o
+      `setup.py` detecta um JDK ≥ 21 compatível (`JAVA_HOME`, PATH, sdkman, `/usr/lib/jvm`) e escreve
+      um **`export JAVA_HOME=…` ativo** no `env.sh` gerado; se só existir JDK < mínimo, gera o
+      `export` comentado com o caminho detectado. Bônus: também propaga para
+      `mcp.servers.rea.environment`. Verificado: `python3 setup/setup.py` **sem** `JAVA_HOME` no
+      ambiente → etapa 10 `rea doctor` = **`healthy: true`**.

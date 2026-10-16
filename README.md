@@ -107,8 +107,10 @@ O ambiente é **reproduzível por script** — você não precisa instalar nada 
 | **Alvo** | `bin/sublime_text_build_4215_x64.tar.xz` — **já está versionado no repo** | **setup** (extrai) |
 | Rede / disco | acesso a `github.com`, registry npm e `pypi.org`; **~1,5 GiB** livres | você |
 
-> ⚠️ **O REA precisa do `JAVA_HOME`.** Se o Java não estiver exportado (ou for < 21), o
-> `rea doctor` responde `healthy: false` e a análise nunca começa.
+> ✅ **O REA precisa do `JAVA_HOME` (JDK ≥ 21)** — desde P3.9 o `setup.py` detecta um JDK
+> compatível (env, PATH, sdkman, `/usr/lib/jvm`) e escreve o `export JAVA_HOME=…` ativo no
+> `env.sh` gerado: **sem export manual**. Se só existir JDK antigo, o setup avisa com o caminho
+> detectado.
 > As versões ficam pinadas em [`setup/versions.env`](setup/versions.env) (fonte única de verdade).
 > Detalhes completos: [`setup/README.md`](setup/README.md).
 

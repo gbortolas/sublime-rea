@@ -15,7 +15,7 @@
 
 **Estado em uma linha:** ambiente ✅ · binário-alvo **100% analisável** ✅ · Track A (API Python +
 IPC) ✅ · **P1.1 buffer** ✅ · **P1.2 concorrência** ✅ · **P1.3 IPC (framing + opcodes)** ✅ ·
-**P1.4 render** ✅ · **P1.6 empacotamento** ✅ · **P0.6 (MCP)** ✅ ·
+**P1.4 render** ✅ · **P1.6 empacotamento** ✅ · **P0.6 (MCP)** ✅ · **P3.9 (`JAVA_HOME` no `env.sh`)** ✅ ·
 **falta** P1.5 (ledger consolidado), a Fase 2 (síntese) e a Fase 3 (o editor em Electron/TS).
 
 **✅ Passo operacional resolvido (2026-10-16).** O `setup.py` foi rodado e o MCP `rea` foi relançado
@@ -35,11 +35,12 @@ todos os `docs/analysis/*.md` já têm ledger `E<n>`; consolidar num índice ún
 `conclusão → Evidence ID → tipo → limites` **não depende de análise nova** (barato, só leitura de
 docs). Com o P1.5 fechado, a Fase 1 termina e começa a **Fase 2** (P2.1 — `docs/architecture/*.md`).
 
-> ⚠️ **Pegadinha nova (2026-10-16):** o `setup/env.sh` **não exporta `JAVA_HOME`** (só um comentário).
-> Sem `JAVA_HOME` ≥ 21 no ambiente, `rea doctor` responde **`healthy: false`** (`ghidra-java`
-> `config_drift`) e a análise falha. O MCP `rea` **já está** com `JAVA_HOME=…/23-zulu`; para o **CLI**,
-> exporte antes: `export JAVA_HOME="$HOME/.sdkman/candidates/java/23-zulu"`. Conferir com
-> `rea doctor --client opencode --provider ghidra --format json` → espera `healthy: true`.
+> ✅ **Pegadinha resolvida (2026-10-16, P3.9):** o `setup.py` agora **detecta** um JDK ≥ 21
+> compatível (`JAVA_HOME`, PATH, sdkman, `/usr/lib/jvm`) e escreve um **`export JAVA_HOME=…` ativo**
+> no `env.sh` gerado — **não** é mais preciso exportar manualmente. Basta rodar
+> `python3 setup/setup.py` (idempotente) e depois `set -a; . ./setup/env.sh; set +a`. Verificar com
+> `rea doctor --client opencode --provider ghidra --format json` → espera `healthy: true`
+> (verificado em 2026-10-16 sem nenhum export manual).
 
 **Ambiente do CLI (obrigatório):** `set -a; . ./setup/env.sh; set +a`.
 
@@ -116,6 +117,7 @@ Pins em [`setup/versions.env`](../setup/versions.env). Docs em [`setup/README.md
    set -a; . ./setup/env.sh; set +a     # senão: GHIDRA_INSTALL_DIR is not set
    ```
 3. **`rea doctor` exige `JAVA_HOME` de um JDK ≥ 21.** Sem ele o escopo fica `healthy: false`.
+    *(Desde P3.9, 2026-10-16, o `env.sh` gerado já exporta o `JAVA_HOME` detectado — verificado.)*
 4. **O `ProjectLocator` do Ghidra recusa path com componente iniciado por `.`** — por isso
    `$REA_TOOLS_DIR` (`~/.local/...`) é acessado via symlink `~/sr-tools` (ver P3.7 no BACKLOG).
 

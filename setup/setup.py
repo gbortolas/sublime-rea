@@ -680,6 +680,10 @@ class Ctx:
         self.target_bin = REPO_ROOT / self.sublime_target_bin
         self.target_dir = REPO_ROOT / "target"
 
+        # Preenchidos pela etapa 3 (step_java); consumidos pela etapa 7 (env.sh) e pelo MCP.
+        self.java_home = ""  # JDK compatível detectado → `export JAVA_HOME` ativo no env.sh
+        self.java_hint = ""  # melhor JDK detectado (< mínimo) → linha comentada no env.sh
+
     def pins(self) -> list[tuple[str, str]]:
         return [
             ("REA", f"{self.rea_package} {self.rea_version}"),
@@ -795,34 +799,95 @@ def _java_major(java_bin: str) -> tuple[str, str]:
     return major, version_line
 
 
+def _jdk_home_from_bin(java_bin: Path) -> Path | None:
+    """Deriva o home do JDK a partir de ``…/bin/java``, validando pelo arquivo ``release``.
+
+    Tenta primeiro sem resolver symlinks (preserva nomes estáveis, ex.:
+    ``~/.sdkman/candidates/java/23-zulu``) e só depois o caminho totalmente resolvido.
+    """
+    for base in (java_bin, java_bin.resolve()):
+        home = base.parent.parent
+        if (home / "release").is_file():
+            return home
+    return None
+
+
+def _java_candidate_homes() -> list[Path]:
+    """Candidatos a home de JDK, em ordem de preferência, sem duplicatas.
+
+    Fontes: ``JAVA_HOME`` do ambiente, ``java`` do PATH e os diretórios comuns
+    (sdkman e ``/usr/lib/jvm``). O setup NÃO instala nada — só procura.
+    """
+    homes: list[Path] = []
+    env_home = os.environ.get("JAVA_HOME", "")
+    if env_home and (Path(env_home) / "bin" / "java").is_file():
+        homes.append(Path(env_home))
+    java_on_path = shutil.which("java")
+    if java_on_path:
+        home = _jdk_home_from_bin(Path(java_on_path))
+        if home is not None:
+            homes.append(home)
+    for root in (Path("~/.sdkman/candidates/java").expanduser(), Path("/usr/lib/jvm")):
+        if not root.is_dir():
+            continue
+        for entry in sorted(root.iterdir()):
+            if (entry / "bin" / "java").is_file() and (entry / "release").is_file():
+                homes.append(entry)
+    seen: set[str] = set()
+    unique: list[Path] = []
+    for home in homes:
+        key = str(home.resolve())
+        if key not in seen:
+            seen.add(key)
+            unique.append(home)
+    return unique
+
+
+def _java_major_of(home: Path) -> tuple[int, str]:
+    """``(major, linha-de-versão)`` do JDK em ``home``; major -1 se não souber."""
+    major, version_line = _java_major(str(home / "bin" / "java"))
+    try:
+        return int(major), version_line
+    except ValueError:
+        return -1, version_line
+
+
 def step_java(ctx: Ctx, ui: UI) -> None:
     ui.step(3, f"Java (Ghidra {ctx.ghidra_version} exige JDK >= {ctx.ghidra_jdk_min})")
-    java_home = os.environ.get("JAVA_HOME", "")
-    java_bin = ""
-    if java_home and os.access(Path(java_home) / "bin" / "java", os.X_OK):
-        java_bin = str(Path(java_home) / "bin" / "java")
-    elif have("java"):
-        java_bin = shutil.which("java") or ""
+    candidates = _java_candidate_homes()
 
-    if not java_bin:
-        ui.warn("Java não encontrado no PATH nem em JAVA_HOME.")
+    if not candidates:
+        ctx.java_home = ""
+        ctx.java_hint = ""
+        ui.warn("Java não encontrado (JAVA_HOME, PATH, sdkman nem /usr/lib/jvm).")
         ui.warn(f"instale um JDK {ctx.ghidra_jdk_min}+ (Temurin/Corretto): {ctx.ghidra_jdk_url}")
         ui.warn("o setup NÃO instala JDK automaticamente.")
         ui.mark(3, "warn", "Java ausente")
         return
 
-    major, version_line = _java_major(java_bin)
-    try:
-        ok_java = bool(major) and int(major) >= int(ctx.ghidra_jdk_min)
-    except ValueError:
-        ok_java = False
-    if ok_java:
-        ui.ok(f"Java {major} em {java_bin} (>= {ctx.ghidra_jdk_min}, compatível)")
+    # Um único passeio: guarda o melhor candidato no geral e o melhor compatível.
+    best_any: tuple[int, Path, str] | None = None
+    best_compat: tuple[int, Path, str] | None = None
+    for home in candidates[:8]:  # teto de sondagens: `java -version` é um subprocess
+        major, version_line = _java_major_of(home)
+        if best_any is None or major > best_any[0]:
+            best_any = (major, home, version_line)
+        if major >= int(ctx.ghidra_jdk_min) and (best_compat is None or major > best_compat[0]):
+            best_compat = (major, home, version_line)
+
+    if best_compat is not None:
+        major, home, _ = best_compat
+        ctx.java_home = str(home)
+        ui.ok(f"Java {major} em {home / 'bin' / 'java'} (>= {ctx.ghidra_jdk_min}, compatível)")
         ui.mark(3, "ok", f"Java {major}")
     else:
-        ui.warn(f"Java detectado ({major or '?'}) < {ctx.ghidra_jdk_min}: {version_line}")
+        assert best_any is not None  # candidatos não vazios ⇒ best_any preenchido
+        major, home, version_line = best_any
+        ctx.java_hint = str(home)
+        ui.warn(f"Java detectado ({major if major > 0 else '?'}) < {ctx.ghidra_jdk_min}: "
+                f"{version_line} em {home}")
         ui.warn(f"instale um JDK {ctx.ghidra_jdk_min}+ (Temurin/Corretto): {ctx.ghidra_jdk_url}")
-        ui.mark(3, "warn", f"Java {major or '?'} < {ctx.ghidra_jdk_min}")
+        ui.mark(3, "warn", f"Java {major if major > 0 else '?'} < {ctx.ghidra_jdk_min}")
 
 
 # ---------------------------------------------------------------------------
@@ -1393,15 +1458,37 @@ def step_env(ctx: Ctx, ui: UI, write_rc: bool) -> None:
     os.environ["REA_TOOLS_DIR"] = str(ctx.rea_tools_dir)
     os.environ["REA_PWNTOOLS_PYTHON"] = str(ctx.pwntools_python)
     os.environ[GHIDRA_STARTUP_TIMEOUT_KEY] = startup_timeout_ms
+    if ctx.java_home:
+        # P3.9: o CLI `rea` herda JAVA_HOME do ambiente; sem ele o doctor fica
+        # `healthy: false` em shells não-interativos. A etapa 10 (doctor) roda como
+        # subprocess e herda este os.environ — por isso setamos aqui, antes dela.
+        os.environ["JAVA_HOME"] = ctx.java_home
     ui.info(f"GHIDRA_INSTALL_DIR={ctx.ghidra_install_dir}")
     ui.info(f"{OPENCODE_PWNTOOLS_KEY}={ctx.pwntools_python}")
     ui.info(f"{GHIDRA_STARTUP_TIMEOUT_KEY}={startup_timeout_ms} (deadline do provider Ghidra)")
+    if ctx.java_home:
+        ui.info(f"JAVA_HOME={ctx.java_home} (detectado na etapa 3; exportado no env.sh)")
 
     if ui.dry_run:
         ui.show(f"escrever {ENV_FILE} (atômico: temp + rename)")
     else:
         # `env.sh` é reescrito inteiro (temp + rename), então é idempotente por construção:
         # reexecutar não duplica linhas. O `~/.bashrc` usa o RC_MARKER abaixo pelo mesmo motivo.
+        if ctx.java_home:
+            java_line = (
+                f'export JAVA_HOME="{ctx.java_home}"  '
+                f"# detectado pelo setup.py (JDK >= {ctx.ghidra_jdk_min}); ajuste p/ forçar outro\n"
+            )
+        elif ctx.java_hint:
+            java_line = (
+                f'# export JAVA_HOME="{ctx.java_hint}"  '
+                f"# detectado, mas < JDK {ctx.ghidra_jdk_min}; troque por um compatível e descomente\n"
+            )
+        else:
+            java_line = (
+                f'# export JAVA_HOME="/caminho/do/jdk-{ctx.ghidra_jdk_min}"  '
+                "# descomente se precisar forçar um JDK\n"
+            )
         _write_atomic(
             ENV_FILE,
             "# Gerado por setup/setup.py — 'source' este arquivo para exportar o ambiente do sublime-rea.\n"
@@ -1410,8 +1497,7 @@ def step_env(ctx: Ctx, ui: UI, write_rc: bool) -> None:
             f'export {OPENCODE_PWNTOOLS_KEY}="{ctx.pwntools_python}"\n'
             f'export {GHIDRA_STARTUP_TIMEOUT_KEY}="{startup_timeout_ms}"  '
             f"# deadline (ms) do provider Ghidra; aumente p/ alvos com auto-análise longa\n"
-            f'# export JAVA_HOME="/caminho/do/jdk-{ctx.ghidra_jdk_min}"  '
-            "# descomente se precisar forçar um JDK\n",
+            + java_line,
         )
         ui.ok(f"escrito {ENV_FILE}")
 
@@ -1836,6 +1922,10 @@ _MCP_ENV_HINTS = {
         "o provider Ghidra usará o deadline default (330 s) e pode falhar em alvos com "
         "auto-análise longa até você adicioná-la ao mcp.servers.rea.environment"
     ),
+    "JAVA_HOME": (
+        "o provider Ghidra dependerá do JAVA_HOME herdado do shell; adicione um JDK >= 21 "
+        "ao mcp.servers.rea.environment para o MCP funcionar em qualquer ambiente"
+    ),
 }
 
 
@@ -1845,10 +1935,13 @@ def _mcp_env_entries(ctx: Ctx, ui: UI | None = None) -> list[tuple[str, str]]:
     ``ui`` é repassado para que um deadline inválido no ambiente seja avisado também
     aqui (o valor que vai ao MCP é sempre o validado/default).
     """
-    return [
+    entries = [
         (OPENCODE_PWNTOOLS_KEY, str(ctx.pwntools_python)),
         (GHIDRA_STARTUP_TIMEOUT_KEY, _ghidra_startup_timeout_ms(ui)),
     ]
+    if ctx.java_home:  # P3.9: só entra no registro se um JDK compatível foi detectado
+        entries.append(("JAVA_HOME", ctx.java_home))
+    return entries
 
 
 def step_mcp(ctx: Ctx, ui: UI, rea_cmd: list[str]) -> None:
