@@ -283,8 +283,8 @@ independente + um **ledger de Evidence IDs** (conclusão → evidence ID → tip
 |---|---|---|---|---|
 | 1 | **Como o buffer é estruturado?** Piece Table / Gap Buffer / Rope? Como faz insert/remove, undo/redo e indexação de linha? | P1.1 | ✅ concluído | [`docs/analysis/buffer-structure.md`](docs/analysis/buffer-structure.md) |
 | 2 | **Qual o modelo de concorrência?** O que roda na thread principal vs. nas de background (I/O, indexação, highlight, regex)? | P1.2 | ✅ concluído | [`docs/analysis/concurrency.md`](docs/analysis/concurrency.md) |
-| 3 | **Como funciona a ponte IPC C++↔Python?** | P1.3 | 🟡 lado Python ✅ + transporte ✅; falta mapear opcodes e framing | [`docs/analysis/api-python.md`](docs/analysis/api-python.md) · [`docs/analysis/ipc-plugin-host.md`](docs/analysis/ipc-plugin-host.md) |
-| 4 | **Como é o pipeline de render?** GPU/OpenGL/Skia? Como o viewport é virtualizado? | P1.4 | ⬜ aberto | *(hipótese "Qt" **refutada** no P1.2 — toolkit = GTK3/GLib)* |
+| 3 | **Como funciona a ponte IPC C++↔Python?** | P1.3 | ✅ concluído | [`docs/analysis/api-python.md`](docs/analysis/api-python.md) · [`docs/analysis/ipc-plugin-host.md`](docs/analysis/ipc-plugin-host.md) · [`docs/analysis/ipc-protocol.md`](docs/analysis/ipc-protocol.md) |
+| 4 | **Como é o pipeline de render?** GPU/OpenGL/Skia? Como o viewport é virtualizado? | P1.4 | ✅ concluído | [`docs/analysis/render-pipeline.md`](docs/analysis/render-pipeline.md) |
 | 5 | **Como o editor empacota e resolve recursos?** (`.sublime-package`, `.sublime-syntax`) | P1.6 | ✅ concluído | [`docs/analysis/packaging.md`](docs/analysis/packaging.md) |
 | 6 | **Consolidar o ledger de evidências** de tudo acima | P1.5 | ⬜ aberto | consolidar `docs/analysis/` |
 
@@ -294,10 +294,10 @@ com os **limites** da conclusão declarados. Conclusão sem evidência = hipóte
 marcada como tal.
 
 > 🧠 **Dica:** os itens **sem Ghidra** (baratos) já foram feitos — **P1.6** (empacotamento) e boa
-> parte do **P1.3** (Track A: API Python + IPC). Os que faltam (**P1.3** opcodes, **P1.4** render,
-> **P1.5** ledger) exigem a análise nativa, que é mais lenta (~355 s por sessão).
-> Para o prato principal, comece por **P1.3** (opcodes/framing), que reaproveita a sessão do binário
-> já aberta.
+> parte do **P1.3** (Track A: API Python + IPC). Da Fase 1 **falta apenas o P1.5** (consolidar o
+> ledger de evidências num índice único `conclusão → Evidence ID → tipo → limites`) — não exige
+> análise nativa nova. Depois disso, a Fase 1 está fechada e começa a **Fase 2** (síntese em
+> `docs/architecture/`).
 > Ferramenta de apoio: a skill `reverse-engineer-anything` (+ `references/native-and-artifacts.md`).
 
 ---
@@ -339,7 +339,7 @@ salvar, com as 7 caixas do topo desta página marcadas ✅). 🎉
 ## 📍 Onde estamos agora
 
 **Estado em uma linha:** ambiente ✅ · binário-alvo **100% analisável** ✅ ·
-Track A (API Python + IPC) ✅ · **Fase 1 em andamento**.
+Track A (API Python + IPC) ✅ · **Fase 1 quase fechada** (P1.1 ✅ · P1.2 ✅ · P1.3 ✅ · P1.4 ✅ · P1.6 ✅; falta P1.5).
 
 | Frente | Status |
 |---|---|
@@ -348,9 +348,10 @@ Track A (API Python + IPC) ✅ · **Fase 1 em andamento**.
 | **Track B** — o binário foi analisado **por inteiro** | ✅ (334 s de auto-análise; projeto persistente de 171 MB) |
 | **Track A** — análise **sem** Ghidra: API de plugins + ponte IPC | ✅ (`docs/analysis/api-python.md`, `ipc-plugin-host.md`) |
 | **P1.2** — modelo de concorrência (threads/pools, GTK/GLib, handoff main↔bg) | ✅ (`docs/analysis/concurrency.md`) |
+| **P1.4** — pipeline de render (GTK3 + GL 4.1 instanciado / Skia-Cairo, atlas de glifos, scissor por damage) | ✅ (`docs/analysis/render-pipeline.md`) |
 | **P1.6** — empacotamento de recursos | ✅ (`docs/analysis/packaging.md`) |
 | **P0.6** — deadline do Ghidra no MCP | ✅ resolvido (setup rodado; MCP relançado com a var) |
-| **Fase 1** — buffer, concorrência, opcodes do IPC, render | 🟡 em andamento (P1.1 ✅ buffer · P1.2 ✅ concorrência · P1.6 ✅ empacotamento) |
+| **Fase 1** — buffer, concorrência, IPC/opcodes, render | 🟡 quase fechada (P1.1 ✅ · P1.2 ✅ · P1.3 ✅ · P1.4 ✅ · P1.6 ✅; **falta P1.5** ledger consolidado) |
 | **Fases 2 e 3** — spec abstrata e o editor em si | ⬜ não começaram |
 
 > 🔄 **Fontes vivas:** [`docs/HANDOFF.md`](docs/HANDOFF.md) (como retomar, pegadinhas operacionais) e
@@ -373,6 +374,7 @@ Track A (API Python + IPC) ✅ · **Fase 1 em andamento**.
 | [`docs/analysis/ipc-plugin-host.md`](docs/analysis/ipc-plugin-host.md) | Evidência — **ponte C++↔Python**: shm POSIX nomeada + semáforos, canais `subl_send`/`subl_recv`/`subl_arecv` |
 | [`docs/analysis/packaging.md`](docs/analysis/packaging.md) | Evidência — **empacotamento de recursos**: `.sublime-package` (ZIP sem manifesto), resolução de caminho lógico |
 | [`docs/analysis/concurrency.md`](docs/analysis/concurrency.md) | Evidência — **modelo de concorrência**: main thread GTK/GLib, fábrica de threads POSIX, pools (`io_worker`/`file_read_thread`), scheduler de retorno ao main thread, ledger `E1–E21` |
+| [`docs/analysis/render-pipeline.md`](docs/analysis/render-pipeline.md) | Evidência — **pipeline de render**: `px_render_context` (31 virtuais) + backends `gl_render_context` (OpenGL 4.1, 17 programas, instâncias em texture buffer `RGBA32F`) e `skia_render_context` (Skia raster sobre Cairo); atlas de glifos; `glScissor` por damage; ledger `E1–E27` |
 | [`bin/ghidra-preanalyze.sh`](bin/ghidra-preanalyze.sh) | Pré-análise headless em projeto persistente (sem deadline) — o "reprocessar sem reanalisar" |
 | [`setup/versions.env`](setup/versions.env) | Versões, URLs e SHA-256 **pinados** (fonte única de verdade do setup) |
 
@@ -393,7 +395,7 @@ arquitetura de sistemas, não redistribuir nem derivar o produto analisado.
   no ledger de evidências (P1.5) os **limites** da conclusão. Exemplo vivo: a hipótese de que o alvo
   seria "C++ **com Qt**" foi **refutada** no P1.2 — o toolkit é **GTK3/GLib** (strings
   `gtk_main`/`g_idle_add`/`g_source_add_unix_fd`; `NEEDED` com `libglib-2.0`/`libGL`/`libX11`; e
-  **zero** referências a Qt), e o render **aparenta** ser Skia (P1.4 no backlog).
+  **zero** referências a Qt), e o render é **Skia (raster, CPU) + OpenGL 4.1** — confirmado no P1.4.
 
 > Fonte: seção *Diretrizes Éticas e Legais* de [`docs/SPECIFICATION.md`](docs/SPECIFICATION.md) e
 > §5 *Compliance & Clean-Room Boundaries* de [`docs/TECHNICAL_SPECIFICATION.md`](docs/TECHNICAL_SPECIFICATION.md).

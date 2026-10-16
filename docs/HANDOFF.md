@@ -15,9 +15,8 @@
 
 **Estado em uma linha:** ambiente ✅ · binário-alvo **100% analisável** ✅ · Track A (API Python +
 IPC) ✅ · **P1.1 buffer** ✅ · **P1.2 concorrência** ✅ · **P1.3 IPC (framing + opcodes)** ✅ ·
-**P1.6 empacotamento** ✅ · **P0.6 (MCP)** ✅ ·
-**falta** P1.4 (render), P1.5 (ledger consolidado), a Fase 2 (síntese) e a Fase 3 (o editor em
-Electron/TS).
+**P1.4 render** ✅ · **P1.6 empacotamento** ✅ · **P0.6 (MCP)** ✅ ·
+**falta** P1.5 (ledger consolidado), a Fase 2 (síntese) e a Fase 3 (o editor em Electron/TS).
 
 **✅ Passo operacional resolvido (2026-10-16).** O `setup.py` foi rodado e o MCP `rea` foi relançado
 **já com `REA_GHIDRA_STARTUP_TIMEOUT_MS=900000`** (confirmado em `/proc/*/environ`) — **não** é mais
@@ -31,12 +30,16 @@ python3 setup/setup.py        # idempotente: reescreve setup/env.sh + environmen
 Sem o deadline maior, `open_binary`/`analyze` **via MCP** volta a estourar os 330 s (a análise leva
 ~355 s).
 
-**Próxima tarefa recomendada:** **P1.4 — pipeline de render** (o P1.2 já confirmou toolkit
-**GTK3/GLib** e indícios de **Skia** via `libGL`/`libX11`; hipótese "Qt" refutada) — atacável pelo
-Ghidra/`objdump` sobre o alvo já analisável, sem desbloquear nada novo. Alternativa barata e já
-desbloqueada: **P1.5 — ledger de evidências consolidado** (todos os `docs/analysis/*.md` agora têm
-ledger `E<n>`; consolidar num único índice `conclusão → Evidence ID → tipo → limites` não depende de
-análise nova).
+**Próxima tarefa recomendada:** **P1.5 — ledger de evidências consolidado** (último item da Fase 1):
+todos os `docs/analysis/*.md` já têm ledger `E<n>`; consolidar num índice único
+`conclusão → Evidence ID → tipo → limites` **não depende de análise nova** (barato, só leitura de
+docs). Com o P1.5 fechado, a Fase 1 termina e começa a **Fase 2** (P2.1 — `docs/architecture/*.md`).
+
+> ⚠️ **Pegadinha nova (2026-10-16):** o `setup/env.sh` **não exporta `JAVA_HOME`** (só um comentário).
+> Sem `JAVA_HOME` ≥ 21 no ambiente, `rea doctor` responde **`healthy: false`** (`ghidra-java`
+> `config_drift`) e a análise falha. O MCP `rea` **já está** com `JAVA_HOME=…/23-zulu`; para o **CLI**,
+> exporte antes: `export JAVA_HOME="$HOME/.sdkman/candidates/java/23-zulu"`. Conferir com
+> `rea doctor --client opencode --provider ghidra --format json` → espera `healthy: true`.
 
 **Ambiente do CLI (obrigatório):** `set -a; . ./setup/env.sh; set +a`.
 
@@ -142,6 +145,10 @@ Obtidos com `rea inspect-binary-layout` (provider offline `pwntools-elf`):
 > **encaminha o P1.4** (render). A lista `libssl`/`libcrypto`/`libsqlite3`/`libpython3.14` citada
 > antes é a do `plugin_host`/API Python (outro contexto) e **não** conflita com isso. Não assuma
 > vtables/sinais de Qt antes de checar.
+>
+> ✅ **Confirmado no P1.4 (2026-10-16):** o render é **Skia raster (CPU) via Cairo** *e* um backend
+> **OpenGL 4.1** próprio (`px_render_context` com `skia_render_context`/`gl_render_context`; default
+> de fábrica = CPU). Ver [`docs/analysis/render-pipeline.md`](analysis/render-pipeline.md).
 
 ---
 
@@ -246,6 +253,26 @@ relativos ao núcleo) **[INFERIDO], confiança média** — registrado como revi
 afirmação antiga. Ficam `[DESCONHECIDO]`: padding do header do anel (`0x8..0x40`, `0x48..0x80`),
 uso de `subl_arecv` por thread não-main, `shm_channel+0x50`, modo síncrono vs assíncrono por id /
 geração do `req_id`, quais ids bloqueiam o app e sub-códigos de `data[0] == 0`.
+
+### P1.4 — pipeline de render (Fase 1, via Ghidra + recon offline)
+
+[`docs/analysis/render-pipeline.md`](analysis/render-pipeline.md) (ledger E1–E27): toolkit
+**GTK3/GLib** (em runtime, via `dlsym`), contexto de GPU pelo **`GdkGLContext`** e blit
+`gdk_cairo_draw_from_gl` **[INFERIDO]**. O desenho é a **base abstrata `px_render_context`
+(interface de 31 virtuais)** com **duas implementações**: **`gl_render_context`** (OpenGL ≥ 4.1,
+GLSL `#version 410`) e **`skia_render_context`** (**Skia raster estático** sobre
+`cairo_image_surface`) — escolhidas pelo setting **`hardware_acceleration`** (default **`"none"`** =
+CPU; modo `"opengl"`). O backend GL **compila 17 programas nomeados** (`filled_rect*`, `rect_rounded*`,
+`bezier_line*`, `glyph_*`) e desenha **instanciado**: as instâncias vão num **texture buffer
+`RGBA32F`** lido por `texelFetch` (`gl_InstanceID * N + k`, **N ∈ {2,3,4,5}**), com tetos
+**`MAX_GLYPH_INSTANCES=8192`** e **`MAX_STENCIL_QUAD_INSTANCES=128`**, AA por *feather* (`0.5`) e
+rounded por **8× supersample**. **Texto é moldado/rasterizado na CPU** (Pango/FreeType/Cairo) e sobe
+como **atlas de glifos `RGBA8` 1024/4096** (`glTexSubImage2D`, BGRA). Viewport = **portal**
+(`viewport_control`/`scroll_area_control`/`scroll_data_source` + observers + alvo animado) com
+**`glScissor` por região danificada**; render na **main/GTK thread** (sem thread de render).
+Falha ao iniciar GL = **diálogo modal**, não fallback silencioso. `[DESCONHECIDO]`: função exata do
+range de linhas visíveis, política de flush do batch, queda automática para software após falha de GL,
+formato de pixel/sRGB.
 
 ---
 

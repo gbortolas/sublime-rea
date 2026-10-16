@@ -50,8 +50,8 @@ máx 2^31−1). Fatos descobertos no `dist/` do `rea-agents@6.5.0` — detalhes 
 ## 📐 P1 — Fase 1 (conteúdo da análise) — **em curso**
 
 Dividir por pergunta (o skill recomenda decompor em escopos independentes, com ledger de Evidence
-IDs). Cada item vira uma seção da spec técnica abstrata. **O binário está destravado** — P1.4
-(render) e P1.5 (ledger consolidado) podem ser atacados direto.
+IDs). Cada item vira uma seção da spec técnica abstrata. **O binário está destravado** — só falta
+**P1.5** (ledger consolidado) para fechar a Fase 1.
 
 - [x] **P1.1 — Estrutura de buffer** ✅ entregue: [`docs/analysis/buffer-structure.md`](analysis/buffer-structure.md).
       Achado: classe **`TextBuffer`** (facade, RTTI) delega a um objeto interno **anônimo** com
@@ -77,12 +77,19 @@ IDs). Cada item vira uma seção da spec técnica abstrata. **O binário está d
       Anexo A com o mapa completo `id → api_*`) e **V** (núcleo→host, **71 ids**); 3.3 e 3.14 falam
       o **mesmo** protocolo. Ledger E1–E36 (consolida os dois relatórios). **Direção dos canais
       revisada** (`subl_send` = entrada do host) — `[INFERIDO]`, confiança média.
-- [ ] **P1.4 — Pipeline de render**: indícios de GPU/OpenGL/Skia; virtualização de viewport.
-      Hipótese "Qt" **já refutada** pelo P1.2 — toolkit confirmado **GTK3/GLib**, render provavelmente
-      **Skia** via `libGL`/`libX11`. ← **próximo**.
+- [x] **P1.4 — Pipeline de render** ✅ entregue:
+      [`docs/analysis/render-pipeline.md`](analysis/render-pipeline.md). Achado: toolkit **GTK3/GLib**
+      + contexto **`GdkGLContext`**; base abstrata **`px_render_context`** (**31 virtuais**) com dois
+      backends — **`gl_render_context`** (OpenGL ≥ 4.1, **17 programas** nomeados, instâncias em
+      **texture buffer `RGBA32F`**, `MAX_GLYPH_INSTANCES=8192`, 8× supersample) e
+      **`skia_render_context`** (**Skia raster estático** sobre Cairo, o **default**: setting
+      `hardware_acceleration="none"`). Texto moldado/rasterizado na **CPU** (Pango/FT/Cairo) →
+      **atlas `RGBA8` 1024/4096**; viewport = **data source + observers** com **`glScissor` por
+      região danificada**; render na **main thread**. Ledger E1–E27. **Hipótese "Qt" refutada** e
+      hipótese "Skia" **confirmada**.
 - [ ] **P1.5 — Ledger de evidências**: tabela `conclusão → Evidence ID → tipo → limites`
       (consolidando os ledgers parciais já existentes em `docs/analysis/` — **todos** os docs da
-      Fase 1 têm ledger `E<n>`; alternativa barata ao P1.4, não depende de análise nova).
+      Fase 1 têm ledger `E<n>`; **último item da Fase 1**; não depende de análise nova). ← **próximo**.
 - [x] **P1.6 — Modelo de empacotamento** ✅ entregue: [`docs/analysis/packaging.md`](analysis/packaging.md).
       Achado: namespace lógico **plano** — cada `<Nome>.sublime-package` é um **ZIP sem manifesto**
       exposto como `Packages/<Nome>/…`; a **extensão** define o papel; precedência **`User` >
@@ -124,3 +131,9 @@ IDs). Cada item vira uma seção da spec técnica abstrata. **O binário está d
       idempotentemente pelo próprio script, com erro claro se o caminho já for um diretório real).
       Formalizar/documentar no `setup.py`.
 - [x] **P3.8 — `.serena/` untracked**: cache do LSP Serena; adicionado ao `.gitignore`.
+- [ ] **P3.9 — `JAVA_HOME` no `setup/env.sh`**: o `env.sh` gerado **não** exporta `JAVA_HOME` (só um
+      comentário), então o **CLI** `rea` fica `healthy: false` se o `JAVA_HOME` do shell for < 21
+      (o MCP `rea` tem o seu próprio). Melhorias: (a) o `setup.py` **detectar** um JDK ≥ 21 (ex.:
+      `~/.sdkman/candidates/java/23-zulu`) e **exportá-lo** no `env.sh`; ou (b) no mínimo, gerar o
+      `export` comentado **com o caminho detectado** em vez de `/caminho/do/jdk-21`. Pegadinha
+      registrada no HANDOFF (2026-10-16).
