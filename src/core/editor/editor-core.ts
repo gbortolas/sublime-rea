@@ -42,6 +42,7 @@ import type {
   SearchDocumentResult,
   SearchQuery,
   SearchResult,
+  Selection,
   SyntaxGrammar,
   TaskPool,
 } from "../../shared";
@@ -53,6 +54,7 @@ import {
   RENDER_BACKEND_PROPERTY,
   SEARCH_MAX_TEXT_LENGTH,
   SearchInputError,
+  SelectionOps,
   parseResourceUri,
 } from "../../shared";
 import { availableParallelism as osAvailableParallelism } from "node:os";
@@ -198,6 +200,7 @@ interface CoreState {
   activeHandle: DocumentHandle | undefined;
   pendingHandle: DocumentHandle | undefined;
   caret: number;
+  selection: Selection;
 }
 
 /** Cache de destaque por documento: linhas, estados de entrada e spans, tudo por revisão. */
@@ -253,6 +256,7 @@ interface InsertArgs {
   readonly handle: DocumentHandle;
   readonly at: number;
   readonly text: string;
+  readonly remove?: string;
 }
 
 function parseInsertArgs(args: unknown): InsertArgs {
@@ -263,6 +267,7 @@ function parseInsertArgs(args: unknown): InsertArgs {
   const handle = record["handle"];
   const at = record["at"];
   const text = record["text"];
+  const remove = record["remove"];
   if (typeof handle !== "number" || !Number.isInteger(handle)) {
     throw new EditorArgumentError("invalid-args", "buffer.insert: 'handle' deve ser inteiro");
   }
@@ -272,7 +277,10 @@ function parseInsertArgs(args: unknown): InsertArgs {
   if (typeof text !== "string") {
     throw new EditorArgumentError("invalid-args", "buffer.insert: 'text' deve ser string");
   }
-  return { handle: handle as DocumentHandle, at, text };
+  if (remove !== undefined && typeof remove !== "string") {
+    throw new EditorArgumentError("invalid-args", "buffer.insert: 'remove' deve ser string");
+  }
+  return { handle: handle as DocumentHandle, at, text, ...(remove !== undefined ? { remove } : {}) } as InsertArgs;
 }
 
 interface ReplaceArgs {
@@ -355,7 +363,7 @@ export function createEditorCore(options: EditorCoreOptions = {}): EditorCore {
   const highlightCache = new Map<DocumentHandle, HighlightCacheEntry>();
   const syntaxReady: Promise<void> = packagesReady.then(() => loadGrammars(packages, grammars));
 
-  const state: CoreState = { activeHandle: undefined, pendingHandle: undefined, caret: 0 };
+  const state: CoreState = { activeHandle: undefined, pendingHandle: undefined, caret: 0, selection: SelectionOps.collapsed(0) };
   const emitter = new Emitter<DocumentChangedEvent>();
   const opened = new Set<DocumentHandle>();
   const subscriptions = new Map<DocumentHandle, Disposable>();
@@ -379,6 +387,12 @@ export function createEditorCore(options: EditorCoreOptions = {}): EditorCore {
       setCaret(n: number): void {
         state.caret = n;
       },
+      selection(): Selection {
+        return state.selection;
+      },
+      setSelection(s: Selection): void {
+        state.selection = s;
+      },
     };
   }
 
@@ -389,7 +403,7 @@ export function createEditorCore(options: EditorCoreOptions = {}): EditorCore {
   });
   commands.register(INSERT_COMMAND_ID, "Insert text", (args) => {
     const parsed = parseInsertArgs(args);
-    const edits: readonly Edit[] = [{ at: parsed.at, remove: "", insert: parsed.text }];
+    const edits: readonly Edit[] = [{ at: parsed.at, remove: parsed.remove ?? "", insert: parsed.text }];
     return edits;
   });
   // Substituição de uma ocorrência: o handler devolve o delta (o bus aplica — escritor único) e
@@ -588,10 +602,18 @@ export function createEditorCore(options: EditorCoreOptions = {}): EditorCore {
     assertNotDisposed();
     const buffer = resolveBuffer(handle);
     state.pendingHandle = handle;
+    let actualAt = at;
+    let removeText: string | undefined;
     try {
+      // Se há seleção não colapsada, substitui o texto selecionado
+      if (!SelectionOps.isCollapsed(state.selection)) {
+        const { start, end } = SelectionOps.normalized(state.selection);
+        actualAt = start;
+        removeText = buffer.text().slice(start, end);
+      }
       const result = await commands.run(
         INSERT_COMMAND_ID,
-        { handle, at, text },
+        { handle, at: actualAt, text, ...(removeText !== undefined ? { remove: removeText } : {}) },
         { origin, group: `type:${handle}` },
       );
       if (!result.handled) {
@@ -604,7 +626,8 @@ export function createEditorCore(options: EditorCoreOptions = {}): EditorCore {
       state.pendingHandle = undefined;
     }
     state.activeHandle = handle;
-    state.caret = at + text.length;
+    state.caret = actualAt + text.length;
+    state.selection = SelectionOps.collapsed(state.caret);
     // BLOCKER-1 (P2.5 review): toda edição de usuário suja o documento.
     registry.setDirty(handle, true);
     return buffer.revision;
@@ -622,6 +645,7 @@ export function createEditorCore(options: EditorCoreOptions = {}): EditorCore {
       canRedo: stack.redoDepth > 0,
       revision: buffer.revision,
       caret: state.caret,
+      selection: state.selection,
     };
   }
 
@@ -796,6 +820,7 @@ export function createEditorCore(options: EditorCoreOptions = {}): EditorCore {
           }
           state.activeHandle = handle;
           state.caret = Math.min(state.caret, buffer.text().length);
+          state.selection = SelectionOps.collapsed(state.caret);
           // Blocker-1 (P2.5 review): replaceAll também suja o documento.
           registry.setDirty(handle, true);
           return { replaced: edits.length, revision: buffer.revision };

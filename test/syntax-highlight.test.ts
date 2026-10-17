@@ -134,7 +134,18 @@ describe("realce de sintaxe de ponta a ponta (PackageResolver → gramática →
 
       const lines = ["const total = 1;", "// fim"];
       const scene = buildInstances(
-        { lineCount: (): number => lines.length, line: (index: number): string => lines[index] ?? "" },
+        {
+          lineCount: (): number => lines.length,
+          line: (index: number): string => lines[index] ?? "",
+          positionAt(offset: number): { line: number; column: number } {
+            let remaining = offset;
+            for (let i = 0; ; i++) {
+              const len = this.line(i).length;
+              if (remaining <= len) return { line: i, column: remaining };
+              remaining -= len + 1;
+            }
+          },
+        },
         layout(),
         new GlyphAtlas(),
         { family: "mono", sizePx: 16, weight: 400, italic: false },

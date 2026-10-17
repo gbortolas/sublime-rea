@@ -25,7 +25,7 @@
  * O alvo é um **port mínimo** definido aqui (`UndoTarget`) — **não** importamos o `TextStore` do
  * módulo de buffer (costura só via `src/shared`).
  */
-import type { Edit, EditOrigin } from "../../shared";
+import type { Edit, EditOrigin, Selection } from "../../shared";
 
 /**
  * Alvo mínimo que a pilha sabe dirigir. Definido **localmente** de propósito: a pilha não conhece
@@ -38,6 +38,10 @@ export interface UndoTarget {
   /** Posição do cursor (code units UTF-16). */
   caret(): number;
   setCaret(n: number): void;
+  /** Estado de seleção atual. */
+  selection(): Selection;
+  /** Substitui o estado de seleção. */
+  setSelection(s: Selection): void;
 }
 
 export interface UndoRecordOptions {
@@ -46,6 +50,8 @@ export interface UndoRecordOptions {
   readonly origin?: EditOrigin;
   readonly caretBefore?: number;
   readonly caretAfter?: number;
+  readonly selectionBefore?: Selection;
+  readonly selectionAfter?: Selection;
 }
 
 export interface UndoStackOptions {
@@ -67,6 +73,8 @@ interface Step {
   inverse: Edit[];
   caretBefore: number;
   caretAfter: number;
+  selectionBefore: Selection;
+  selectionAfter: Selection;
   marked: boolean;
 }
 
@@ -129,6 +137,8 @@ export class UndoStack {
     const origin: EditOrigin = opts.origin ?? "user";
     const caretBefore = opts.caretBefore ?? 0;
     const caretAfter = opts.caretAfter ?? caretBefore;
+    const selectionBefore = opts.selectionBefore ?? { anchor: 0, active: 0 };
+    const selectionAfter = opts.selectionAfter ?? selectionBefore;
 
     const top = this.undoSteps[this.undoSteps.length - 1];
     const canMerge =
@@ -142,6 +152,7 @@ export class UndoStack {
       top.inverse = invert(top.edits);
       top.label = label;
       top.caretAfter = caretAfter;
+      top.selectionAfter = selectionAfter;
       this.softIntentFlag = undefined;
       return;
     }
@@ -155,6 +166,8 @@ export class UndoStack {
       inverse: invert(edits),
       caretBefore,
       caretAfter,
+      selectionBefore,
+      selectionAfter,
       marked: false,
     });
     if (this.undoSteps.length > this.maxDepth) {
@@ -192,6 +205,7 @@ export class UndoStack {
         prev.edits.push(...step.edits);
         prev.inverse = invert(prev.edits);
         prev.caretAfter = step.caretAfter;
+        prev.selectionAfter = step.selectionAfter;
         prev.label = step.label;
         prev.groupId = undefined;
         prev.marked = false;
@@ -210,6 +224,7 @@ export class UndoStack {
     if (step === undefined) return false;
     target.applyEdits(step.inverse, "undo");
     target.setCaret(step.caretBefore);
+    target.setSelection(step.selectionBefore);
     this.redoSteps.push(step);
     this.softIntentFlag = undefined;
     return true;
@@ -221,6 +236,7 @@ export class UndoStack {
     if (step === undefined) return false;
     target.applyEdits(step.edits, step.origin);
     target.setCaret(step.caretAfter);
+    target.setSelection(step.selectionAfter);
     this.undoSteps.push(step);
     this.softIntentFlag = undefined;
     return true;
@@ -254,7 +270,10 @@ export class UndoStack {
     if (edits.length === 0) return;
     target.applyEdits(edits, "external");
     const last = this.undoSteps[this.undoSteps.length - 1];
-    if (last !== undefined) target.setCaret(last.caretAfter);
+    if (last !== undefined) {
+      target.setCaret(last.caretAfter);
+      target.setSelection(last.selectionAfter);
+    }
   }
 
   /** Limpa undo+redo. Recusa (via `CommandBus`) quando há escopo aberto — DEC-BUF-4/D4. */

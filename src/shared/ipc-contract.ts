@@ -24,6 +24,7 @@ import type { DocumentHandle } from "./handles";
 import type { DocumentHighlight } from "./syntax-contract";
 import type { MainThreadBusy } from "./concurrency-contract";
 import type { ReplaceAllResult, SearchDocumentResult, SearchQuery } from "./search-contract";
+import type { Selection } from "./selection-contract";
 
 /** Versão do contrato do canal — `"<major>.<minor>"` (DEC-IPC-11: handshake negocia). */
 export type IpcVersion = `${number}.${number}`;
@@ -54,13 +55,15 @@ export interface DocumentChangedEvent {
 /**
  * Estado observável de undo/redo de um documento — é o payload que o renderer usa para atualizar
  * a status bar (DEC-TR-3). `revision` é a revisão do buffer após a operação; `caret` é a posição
- * que o `UndoStack` restaurou (o cursor do documento, em code units UTF-16).
+ * que o `UndoStack` restaurou (o cursor do documento, em code units UTF-16); `selection` é o
+ * estado de seleção (colapsado = só cursor) que o `UndoStack` restaurou (P1#1).
  */
 export interface DocumentUndoState {
   readonly canUndo: boolean;
   readonly canRedo: boolean;
   readonly revision: number;
   readonly caret: number;
+  readonly selection: Selection;
 }
 
 /**

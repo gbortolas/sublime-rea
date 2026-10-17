@@ -24,12 +24,12 @@ O que o Scribe já tem funcionando:
 Features que qualquer editor de texto minimamente decente tem que ter.
 Dependência: o core já existe, estas camadas são puramente de UI/UX no renderer.
 
-| # | Feature | Esforço | Depende de | Descrição |
-|---|---------|---------|------------|-----------|
-| 1 | **Seleção de texto** (Shift+seta, click+drag) | M | caret existente | Estado de seleção (âncora + ativo), highlight visual das faixas selecionadas no canvas, operações com seleção (delete, substituir) |
-| 2 | **Gutter com números de linha** | P | layout existente | Faixa à esquerda do canvas com número das linhas, highlight da linha atual, fundo do gutter separado |
-| 3 | **Scrollbar proporcional** | P | viewport existente | Barra de rolagem à direita com thumb proporcional ao documento, drag do thumb |
-| 4 | **Find & Replace UI visual** (regex/case/whole word toggle) | P | find bar existe | Botões de toggle na find bar (Aa, .*, \b), visual state, atalhos de teclado pra alternar |
+| # | Feature | Esforço | Depende de | Descrição | Status |
+|---|---------|---------|------------|-----------|--------|
+| 1 | **Seleção de texto** (Shift+seta, click+drag) | M | caret existente | Estado de seleção (âncora + ativo), highlight visual das faixas selecionadas no canvas, operações com seleção (delete, substituir) | ✅ |
+| 2 | **Gutter com números de linha** | P | layout existente | Faixa à esquerda do canvas com número das linhas, highlight da linha atual, fundo do gutter separado | ⬜ |
+| 3 | **Scrollbar proporcional** | P | viewport existente | Barra de rolagem à direita com thumb proporcional ao documento, drag do thumb | ⬜ |
+| 4 | **Find & Replace UI visual** (regex/case/whole word toggle) | P | find bar existe | Botões de toggle na find bar (Aa, .*, \b), visual state, atalhos de teclado pra alternar | ⬜ |
 
 ## 🥈 P2 — Produtividade (o que faz o editor ser "usável no dia a dia")
 

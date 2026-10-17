@@ -1,7 +1,7 @@
 # HANDOFF — sublime-rea
 
 > **Documento de handoff entre sessões** (leia antes de retomar). Atualizado em **2026-10-17**.
-> Status: P3.11 concluído, próxima tarefa: P3.10.
+> Status: P1#1 (Seleção de texto) concluído. Próxima tarefa: P1#2 — Gutter com números de linha.
 
 ---
 
@@ -13,15 +13,9 @@
 > [`BACKLOG.md`](BACKLOG.md). Não peça contexto: ele está todo em `docs/`.
 
 **Estado em uma linha:** ambiente ✅ · binário-alvo **100% analisável** ✅ · Track A (API Python +
-IPC) ✅ · **FASE 1 FECHADA** (P1.1 buffer ✅ · P1.2 concorrência ✅ · P1.3 IPC ✅ · P1.4 render ✅ ·
-P1.5 ledger consolidado ✅ · P1.6 empacotamento ✅) · **FASE 2 FECHADA** (P2.1: `docs/architecture/`,
-6 docs + README, **61 decisões `DEC-*`**) · **FASE 3 FECHADA** (P2.2: scaffold `src/` do **Scribe** em
-Electron/TS — 6 módulos de core + costura main↔core↔renderer + build, `docs/scaffold/`) — codinome
-decidido: **Scribe** (**P2.3** ✅) · **P2.4 FECHADO** (fatia vertical end-to-end, 2026-10-17) — ✅ **Slices
-A/B/C** (`04096ae`: abrir arquivo CLI+`dialog` · undo/redo visível · cancelamento e2e) · ✅ **Slice D**
-(`2a169be`: realce de sintaxe e2e) · ✅ **P2.4b** (achados de revisão do realce corrigidos, mais um bug
-**alto** extra) · ✅ **P2.4c** (busca/substituição na lane `background` — **primeiro uso real** do
-`TaskPool`/`Scheduler`; **423 testes / 43 arquivos**) · ✅ **P2.5** (salvar arquivo `Ctrl/Cmd+S` + dirty tracking — lane `io` finalmente usada; escrita atômica tmp+rename; guarda dirty para evitar I/O fútil) · ✅ **P3.11** (pintar ocorrências da busca no canvas) · ✅ **P3.10** (bundlar o worker do TaskPool) · ✅ **P3.12** (ciclo de vida das assinaturas) · ✅ **P3.7** (symlink `~/sr-tools` formalizado no `setup.py`) · ⏳ **todos os P3s de dívida técnica do editor fechados; residual opcional: P3.5 Rizin, P3.6 snapshot**
+IPC) ✅ · **FASE 1 FECHADA** · **FASE 2 FECHADA** · **FASE 3 FECHADA** · P2.4/Slices A-D ✅ ·
+P2.4b/c ✅ · P2.5 (salvar) ✅ · P3.10/11/12 (dívidas) ✅ · **P1#1 — Seleção de texto ✅** ·
+**próximo: P1#2 — Gutter com números de linha**
 
 **✅ Passo operacional resolvido (2026-10-16).** O `setup.py` foi rodado e o MCP `rea` foi relançado
 **já com `REA_GHIDRA_STARTUP_TIMEOUT_MS=900000`** (confirmado em `/proc/*/environ`) — **não** é mais
@@ -35,7 +29,7 @@ python3 setup/setup.py        # idempotente: reescreve setup/env.sh + environmen
 Sem o deadline maior, `open_binary`/`analyze` **via MCP** volta a estourar os 330 s (a análise leva
 ~355 s).
 
-**Próxima tarefa recomendada:** **P1#1 — Seleção de texto** ([`docs/ROADMAP.md`](ROADMAP.md)). É a feature mais sentida (sem seleção não dá pra copiar/recortar/deletar um bloco) e mexe só no renderer/caret — sem tocar em IPC. Depois dela: gutter, scrollbar e find bar visual (todos independentes, paralelizáveis). O `docs/ROADMAP.md` foi criado nesta sessão com **20 features organizadas em 4 quadrantes** (P1–P4) — consulte-o para visão geral.
+**Próxima tarefa recomendada:** **P1#2 — Gutter com números de linha** ([`docs/ROADMAP.md`](ROADMAP.md)). Faixa à esquerda do canvas com número das linhas, highlight da linha atual, fundo do gutter separado. Esforço **P** (pequeno) — mexe só no `buildInstances`/layout do `LineLayout` + CSS do `index.html`. Depois dela: scrollbar proporcional (P1#3) e find bar visual (P1#4) — todos independentes, paralelizáveis.
 
 > ✅ **Pegadinha resolvida (2026-10-16, P3.9):** o `setup.py` agora **detecta** um JDK ≥ 21
 > compatível (`JAVA_HOME`, PATH, sdkman, `/usr/lib/jvm`) e escreve um **`export JAVA_HOME=…` ativo**

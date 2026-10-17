@@ -13,6 +13,7 @@
 
 import type { GlyphInstance, LineInstance, Rect, RectInstance, RGBA, SearchMatch, TextStyle } from "../../shared";
 import type { HighlightSpan, Scope, ThemeResolver } from "../../shared";
+import { SelectionOps, type Selection } from "../../shared";
 import type { GlyphAtlas } from "./atlas";
 import type { LineRange } from "./viewport";
 
@@ -20,6 +21,8 @@ import type { LineRange } from "./viewport";
 export interface LineSource {
   lineCount(): number;
   line(index: number): string;
+  /** Offset (code units UTF-16) → linha/coluna (0-based). */
+  positionAt(offset: number): { line: number; column: number };
 }
 
 /**
@@ -72,6 +75,9 @@ export const SEARCH_MATCH_COLOR: RGBA = 0xffff0044;
 /** @internal exported only for tests. */
 export const SEARCH_CURRENT_COLOR: RGBA = 0xff880088;
 
+/** Cor de fundo da seleção (azul semi-transparente, como editores de texto). */
+export const SELECTION_COLOR: RGBA = 0x264f78ff;
+
 /** Instâncias de um frame — entradas diretas do `RenderPipeline`. */
 export interface SceneInstances {
   readonly rects: RectInstance[];
@@ -81,8 +87,8 @@ export interface SceneInstances {
 
 /**
  * Monta as instâncias do **range visível**. Determinístico e puro (não toca no pipeline): o mesmo
- * `(source, layout, atlas, style, range, caret, highlight, searchHighlight)` produz sempre as
- * mesmas instâncias.
+ * `(source, layout, atlas, style, range, caret, highlight, searchHighlight, selection)` produz
+ * sempre as mesmas instâncias.
  *
  * `highlight` é **opcional** (retrocompatível): quando presente, cada glifo é colorido pela cor do
  * escopo que cobre o seu offset na linha (via `ThemeResolver`); sem span/tema, cai em
@@ -91,6 +97,9 @@ export interface SceneInstances {
  * `searchHighlight` é **opcional**: quando presente, pinta retângulos de fundo nas posições das
  * ocorrências da busca — o match "atual" (`currentIndex`) ganha a cor `SEARCH_CURRENT_COLOR`;
  * os demais, `SEARCH_MATCH_COLOR`.
+ *
+ * `selection` é **opcional** (P1#1): quando presente e não colapsado, pinta retângulos de fundo
+ * entre `anchor` e `active` — azul semi-transparente, como editores de texto convencionais.
  */
 export function buildInstances(
   source: LineSource,
@@ -101,6 +110,7 @@ export function buildInstances(
   caret?: CaretPosition,
   highlight?: SceneHighlight,
   searchHighlight?: SearchHighlight,
+  selection?: Selection,
 ): SceneInstances {
   const rects: RectInstance[] = [
     { rect: layout.viewport, color: layout.background },
@@ -196,6 +206,62 @@ export function buildInstances(
           h: layout.lineHeight,
         },
         color: isCurrent ? SEARCH_CURRENT_COLOR : SEARCH_MATCH_COLOR,
+      });
+    }
+  }
+
+  // Seleção: pinta retângulos de fundo entre anchor e active.
+  if (selection && !SelectionOps.isCollapsed(selection)) {
+    const { start, end } = SelectionOps.normalized(selection);
+    const startPos = source.positionAt(start);
+    const endPos = source.positionAt(Math.max(0, end - 1));
+    // Linhas afetadas pela seleção (dentro do range visível).
+    const selFirst = Math.max(first, startPos.line);
+    const selLast = Math.min(endPos.line, end - 1, source.lineCount() - 1);
+    for (let line = selFirst; line <= selLast; line++) {
+      const text = source.line(line);
+      // Coluna inicial na linha: se a seleção começa nesta linha, usa a coluna de início;
+      // senão, começa do início da linha (col 0).
+      const lineStartCol = line === startPos.line ? startPos.column : 0;
+      // Coluna final na linha: se a seleção termina nesta linha, usa a coluna de fim;
+      // senão, vai até o fim da linha (text.length).
+      const lineEndCol = line === endPos.line ? endPos.column : text.length;
+      if (lineStartCol >= lineEndCol) continue;
+      // Caminha pelo texto para achar o x do início e do fim na linha.
+      let sx = layout.paddingLeft;
+      let scol = 0;
+      let soff = 0;
+      let selStartX = sx;
+      let selEndX = sx;
+      const targetOff = Math.min(lineEndCol, text.length);
+      while (soff < targetOff) {
+        if (soff === lineStartCol) selStartX = sx;
+        const code = text.codePointAt(soff);
+        if (code === undefined) break;
+        const rune = String.fromCodePoint(code);
+        const size = rune.length;
+        if (rune === "\t") {
+          const stop = layout.tabWidth - (scol % layout.tabWidth);
+          sx += spaceAdvance * stop;
+          scol += stop;
+          soff += size;
+          continue;
+        }
+        const placed = atlas.resolveGlyph(rune, style);
+        sx += placed.advance;
+        scol += 1;
+        soff += size;
+      }
+      selEndX = sx;
+      if (selEndX - selStartX <= 0) continue;
+      rects.push({
+        rect: {
+          x: selStartX,
+          y: layout.paddingTop + line * layout.lineHeight - layout.scrollOffsetPx,
+          w: Math.max(selEndX - selStartX, 0),
+          h: layout.lineHeight,
+        },
+        color: SELECTION_COLOR,
       });
     }
   }

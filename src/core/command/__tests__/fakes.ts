@@ -20,6 +20,7 @@ import type {
   SchedulerTarget,
 } from "../../../shared";
 import type { UndoTarget } from "../undo-stack";
+import type { Selection } from "../../../shared";
 
 /** `DocumentRegistry` fake: lookup vazio, sem I/O. */
 export class FakeRegistry implements DocumentRegistry {
@@ -87,6 +88,7 @@ export class FakeScheduler implements Scheduler {
 export class FakeTarget implements UndoTarget {
   text = "";
   private cursor = 0;
+  private sel: Selection = { anchor: 0, active: 0 };
 
   applyEdits(edits: readonly Edit[], _origin: EditOrigin): void {
     for (const e of edits) {
@@ -101,6 +103,14 @@ export class FakeTarget implements UndoTarget {
 
   setCaret(n: number): void {
     this.cursor = n;
+  }
+
+  selection(): Selection {
+    return this.sel;
+  }
+
+  setSelection(s: Selection): void {
+    this.sel = s;
   }
 }
 

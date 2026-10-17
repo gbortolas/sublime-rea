@@ -15,6 +15,7 @@
 import {
   DEFAULT_RENDER_BACKEND,
   RENDER_BACKEND_PROPERTY,
+  SelectionOps,
   toDisposable,
 } from "../shared";
 import type {
@@ -28,6 +29,7 @@ import type {
   SearchDocumentResult,
   SearchMatch,
   SearchQuery,
+  Selection,
   TextStyle,
 } from "../shared";
 import {
@@ -278,6 +280,7 @@ interface DocumentSession {
   readonly handle: number;
   readonly source: DocumentLineSource;
   caret: number;
+  selection: Selection;
   dispose(): void;
 }
 
@@ -642,6 +645,11 @@ class DocumentController {
       void this.bridge.text(handle).then((next) => {
         this.source.setText(next, event.revision);
         this.viewport.setMetrics({ lineCount: this.source.lineCount() });
+        if (this.session) {
+          this.session.caret = Math.min(this.session.caret, next.length);
+          this.session.selection = SelectionOps.collapsed(this.session.caret);
+          this.renderer.setSelection(this.session.selection);
+        }
         setDirtyStatus(true);
         this.renderer.start();
       });
@@ -651,8 +659,10 @@ class DocumentController {
       handle,
       source: this.source,
       caret: 0,
+      selection: SelectionOps.collapsed(0),
       dispose: unsubscribe,
     };
+    this.renderer.setSelection(this.session.selection);
     setDocStatus(path);
     updateCaretStatus(this.source, 0);
     await this.refreshUndoStatus();
@@ -696,8 +706,12 @@ class DocumentController {
     const session = this.session;
     if (session === undefined) return;
     try {
-      const revision = await session.bridge.insert(session.handle, session.caret, text, "user");
-      session.caret += text.length;
+      const s = session.selection;
+      const insertAt = SelectionOps.isCollapsed(s) ? session.caret : SelectionOps.normalized(s).start;
+      const revision = await session.bridge.insert(session.handle, insertAt, text, "user");
+      session.caret = insertAt + text.length;
+      session.selection = SelectionOps.collapsed(session.caret);
+      this.renderer.setSelection(session.selection);
       const next = await session.bridge.text(session.handle);
       session.source.setText(next, revision);
       this.viewport.setMetrics({ lineCount: session.source.lineCount() });
@@ -720,6 +734,8 @@ class DocumentController {
       const next = await session.bridge.text(session.handle);
       session.source.setText(next, state.revision);
       session.caret = Math.min(state.caret, next.length);
+      session.selection = SelectionOps.collapsed(session.caret);
+      this.renderer.setSelection(session.selection);
       this.viewport.setMetrics({ lineCount: session.source.lineCount() });
       updateCaretStatus(session.source, session.caret);
       setUndoStatus(state.canUndo, state.canRedo);
@@ -786,6 +802,7 @@ class ScribeRenderer {
   private highlighter: SceneHighlight | undefined;
   private requestHighlight: ((first: number, count: number) => void) | undefined;
   private searchHighlightValue: SearchHighlight | undefined;
+  private currentSelection: Selection | undefined;
 
   constructor(
     private readonly canvas: HTMLCanvasElement,
@@ -807,6 +824,11 @@ class ScribeRenderer {
   /** Define as ocorrências de busca a destacar no canvas (P3.11). */
   setSearchMatches(highlight: SearchHighlight | undefined): void {
     this.searchHighlightValue = highlight;
+  }
+
+  /** Atualiza a seleção ativa para pintura no próximo frame. */
+  setSelection(selection: Selection | undefined): void {
+    this.currentSelection = selection;
   }
 
   attachSource(source: LineSource): void {
@@ -871,6 +893,7 @@ class ScribeRenderer {
       },
       this.highlighter,
       this.searchHighlightValue,
+      this.currentSelection,
     );
     this.requestHighlight?.(range.first, range.count);
 
@@ -1263,6 +1286,62 @@ function attachInputListeners(
     { passive: false },
   );
 
+  let mouseDragAnchor: number | undefined;
+
+  surface.addEventListener("mousedown", (event: MouseEvent) => {
+    const session = controller?.current;
+    if (session === undefined) return;
+    const rect = surface.getBoundingClientRect();
+    const x = event.clientX - rect.left;
+    const y = event.clientY - rect.top;
+    const line = Math.floor((y + viewport.scrollOffsetPx() - TEXT_STYLE.sizePx * 0.7) / lineHeight);
+    if (line < 0 || line >= session.source.lineCount()) return;
+    const text = session.source.line(line);
+    const approxCharW = TEXT_STYLE.sizePx * 0.6;
+    let col = Math.round((x - 12) / approxCharW);
+    col = Math.max(0, Math.min(col, text.length));
+    const offset = session.source.offsetOf(line, col);
+    mouseDragAnchor = offset;
+    if (event.shiftKey) {
+      session.selection = { anchor: session.selection.anchor, active: offset };
+    } else {
+      session.selection = SelectionOps.collapsed(offset);
+    }
+    session.caret = offset;
+    renderer.setSelection(session.selection);
+    updateCaretStatus(session.source, offset);
+    renderer.start();
+  });
+
+  surface.addEventListener("mousemove", (event: MouseEvent) => {
+    if (mouseDragAnchor === undefined || (event.buttons & 1) === 0) {
+      mouseDragAnchor = undefined;
+      return;
+    }
+    const session = controller?.current;
+    if (session === undefined) return;
+    const rect = surface.getBoundingClientRect();
+    const x = event.clientX - rect.left;
+    const y = event.clientY - rect.top;
+    const line = Math.floor((y + viewport.scrollOffsetPx() - TEXT_STYLE.sizePx * 0.7) / lineHeight);
+    if (line < 0) { mouseDragAnchor = undefined; return; }
+    const clampedLine = Math.min(line, session.source.lineCount() - 1);
+    const text = session.source.line(clampedLine);
+    const approxCharW = TEXT_STYLE.sizePx * 0.6;
+    let col = Math.round((x - 12) / approxCharW);
+    col = Math.max(0, Math.min(col, text.length));
+    const offset = session.source.offsetOf(clampedLine, col);
+    session.selection = { anchor: mouseDragAnchor, active: offset };
+    session.caret = offset;
+    renderer.setSelection(session.selection);
+    updateCaretStatus(session.source, offset);
+    renderer.start();
+  });
+
+  surface.addEventListener("mouseup", () => {
+    mouseDragAnchor = undefined;
+  });
+
   surface.addEventListener("keydown", (event: KeyboardEvent) => {
     const primary = event.ctrlKey || event.metaKey;
 
@@ -1310,6 +1389,75 @@ function attachInputListeners(
 
     const page = Math.max(1, Math.floor(surface.clientHeight / lineHeight) - 1);
     const line = viewport.visibleLineRange();
+
+    // Backspace/Delete com seleção (P1#1)
+    if ((event.key === "Backspace" || event.key === "Delete") && controller?.current) {
+      event.preventDefault();
+      const session = controller.current;
+      const s = session.selection;
+      if (!SelectionOps.isCollapsed(s)) {
+        const { start } = SelectionOps.normalized(s);
+        session.caret = start;
+        session.selection = SelectionOps.collapsed(start);
+        renderer.setSelection(session.selection);
+        void controller.insertText(""); // insert vazio no start = delete o texto selecionado
+        renderer.start();
+      }
+      return;
+    }
+
+    // Navegação por setas e seleção (Shift+seta, P1#1)
+    if (event.key === "ArrowLeft" || event.key === "ArrowRight" || event.key === "ArrowUp" || event.key === "ArrowDown") {
+      event.preventDefault();
+      const session = controller?.current;
+      if (session === undefined) {
+        // Sem sessão: scroll
+        const delta = event.key === "ArrowDown" ? 1 : event.key === "ArrowUp" ? -1 : 0;
+        if (delta !== 0) viewport.scrollTo(currentLine() + delta);
+        return;
+      }
+      const source = session.source;
+      const currentOffset = session.caret;
+      let newOffset = currentOffset;
+      const text = source.text;
+      const totalLen = text.length;
+
+      if (event.key === "ArrowLeft") {
+        newOffset = Math.max(0, currentOffset - 1);
+      } else if (event.key === "ArrowRight") {
+        newOffset = Math.min(totalLen, currentOffset + 1);
+      } else if (event.key === "ArrowUp") {
+        const pos = source.positionAt(currentOffset);
+        if (pos.line > 0) {
+          newOffset = source.offsetOf(pos.line - 1, pos.column);
+        }
+      } else if (event.key === "ArrowDown") {
+        const pos = source.positionAt(currentOffset);
+        if (pos.line < source.lineCount() - 1) {
+          newOffset = source.offsetOf(pos.line + 1, pos.column);
+        }
+      }
+
+      if (event.shiftKey) {
+        // Shift+seta: estende a seleção
+        session.selection = { anchor: session.selection.anchor, active: newOffset };
+      } else {
+        // Seta sem Shift: colapsa a seleção
+        session.selection = SelectionOps.collapsed(newOffset);
+      }
+      session.caret = newOffset;
+      renderer.setSelection(session.selection);
+      updateCaretStatus(source, newOffset);
+      // Scroll para a linha do cursor
+      const caretLine = source.positionAt(newOffset).line;
+      const visible = viewport.visibleLineRange();
+      if (caretLine < visible.first || caretLine >= visible.first + visible.count) {
+        viewport.scrollTo(caretLine);
+      }
+      renderer.start();
+      return;
+    }
+
     if (event.key === "PageDown") viewport.scrollTo(currentLine() + page, { animate: true });
     else if (event.key === "PageUp") viewport.scrollTo(currentLine() - page, { animate: true });
     else if (event.key === "Home") viewport.scrollTo(0, { animate: true });

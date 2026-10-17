@@ -240,7 +240,15 @@ IDs). Cada item vira uma seção da spec técnica abstrata. **Fase 1 FECHADA** �
       - **Atalho**: `Ctrl/Cmd+S` no listener de teclado do canvas
       - Gates: typecheck/lint/build exit 0 · **423 testes / 43 arquivos** (baseline 423)
 
----
+### 🎯 P1 da ROADMAP — Seleção de texto (P1#1)
+
+- [x] **P1#1 — Seleção de texto** ✅ **fechado** (2026-10-17). Nova feature: estado de seleção (anchor + active), highlight visual no canvas (rects azuis), operações com seleção (delete/substituir ao digitar), navegação com setas (com/sem Shift para estender/colapsar), clique e drag do mouse, Shift+click. Implementação:
+  - **shared** — `src/shared/selection-contract.ts`: tipo `Selection` + `SelectionOps.collapsed/isCollapsed/normalized`; `DocumentUndoState` ganha `selection`
+  - **core** — `src/core/editor/editor-core.ts`: `CoreState.selection`, `UndoTarget.selection/setSelection`, `runInsert` substitui seleção não-colapsada, `undoStateOf` expõe selection
+  - **undo** — `src/core/command/undo-stack.ts`: guarda/restaura `selectionBefore/selectionAfter` em cada step
+  - **scene** — `src/core/render/scene.ts`: `buildInstances` aceita `selection` e pinta rects `SELECTION_COLOR` (0x264f78) entre anchor e active; `LineSource.positionAt` adicionado
+  - **renderer** — `src/renderer/main.ts`: `DocumentSession.selection`, eventos mouse (click/drag/Shift+click), setas com/sem Shift, Backspace/Delete com seleção (insere vazio no start = deleta), `ScribeRenderer.setSelection` → `buildInstances`
+  - Gates: typecheck/lint/build exit 0 · **430 testes / 43 arquivos** (baseline 430)
 
 ## 🧹 P3 — Housekeeping / dívidas
 

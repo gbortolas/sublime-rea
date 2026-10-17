@@ -24,6 +24,14 @@ function sourceOf(lines: readonly string[]): LineSource {
   return {
     lineCount: (): number => lines.length,
     line: (index: number): string => lines[index] ?? "",
+    positionAt(offset: number): { line: number; column: number } {
+      let remaining = offset;
+      for (let i = 0; ; i++) {
+        const len = this.line(i).length;
+        if (remaining <= len) return { line: i, column: remaining };
+        remaining -= len + 1;
+      }
+    },
   };
 }
 
