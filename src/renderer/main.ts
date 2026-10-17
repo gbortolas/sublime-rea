@@ -1392,10 +1392,52 @@ export async function bootRenderer(): Promise<boolean> {
 
   const handleMenuAction = (action: string): void => {
     switch (action) {
+      case "file.open":
+        if (controller !== undefined) void controller.openDialog();
+        break;
+      case "file.save":
+        void controller?.save();
+        break;
+      case "edit.undo":
+        void controller?.undo();
+        break;
+      case "edit.redo":
+        void controller?.redo();
+        break;
+      case "edit.selectAll": {
+        // Seleciona todo o texto do documento ativo
+        const session = controller?.current;
+        if (session !== undefined) {
+          const end = session.source.offsetOf(session.source.lineCount() - 1, session.source.line(session.source.lineCount() - 1).length);
+          session.selection = { anchor: 0, active: end };
+          session.selections = SelectionSetOps.singular(end);
+          session.caret = end;
+          renderer.setSelection(session.selection);
+          renderer.setSelections(session.selections);
+          updateCaretStatus(session.source, end);
+          renderer.start();
+        }
+        break;
+      }
+      case "edit.cut":
+      case "edit.copy":
+        // Canvas editor — clipboard é tratado pelo handler de keydown do canvas.
+        // Disparar document.execCommand aqui não funciona pra canvas.
+        // Por enquanto, no-op (o atalho de teclado Ctrl+C/X no canvas funciona).
+        break;
+      case "edit.paste":
+        // Idem cut/copy — no-op; o handler de teclado do canvas faz o paste.
+        break;
       case "find.open":
         if (findBar !== undefined && !findBar.model.isOpen) {
           findBar.model.open();
         }
+        break;
+      case "find.next":
+        findBar?.model.next();
+        break;
+      case "find.prev":
+        findBar?.model.previous();
         break;
       case "view.toggleTheme":
         document.getElementById("status-theme")?.click();

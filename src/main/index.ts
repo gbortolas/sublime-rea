@@ -520,6 +520,8 @@ export async function startMainProcess(): Promise<void> {
         sandbox: true,
       },
     });
+    // Menu in-window (rápido no Linux, sem D-Bus lag)
+    window.setMenu(createAppMenu(window));
     loadRenderer(window, documentPath);
     window.once("ready-to-show", () => window.show());
     return window;
@@ -569,52 +571,53 @@ export async function startMainProcess(): Promise<void> {
 
   app.on("will-quit", shutdown);
 
-  const menuTemplate: Electron.MenuItemConstructorOptions[] = [
-    {
-      label: "File",
-      submenu: [
-        { label: "Open", accelerator: "CmdOrCtrl+O", click: () => sendMenuAction(mainWindow, "file.open") },
-        { label: "Save", accelerator: "CmdOrCtrl+S", click: () => sendMenuAction(mainWindow, "file.save") },
-        { type: "separator" },
-        { label: "Quit", accelerator: "CmdOrCtrl+Q", click: () => app.quit() },
-      ],
-    },
-    {
-      label: "Edit",
-      submenu: [
-        { label: "Undo", accelerator: "CmdOrCtrl+Z", click: () => sendMenuAction(mainWindow, "edit.undo") },
-        { label: "Redo", accelerator: "CmdOrCtrl+Shift+Z", click: () => sendMenuAction(mainWindow, "edit.redo") },
-        { type: "separator" },
-        { label: "Cut", accelerator: "CmdOrCtrl+X", click: () => sendMenuAction(mainWindow, "edit.cut") },
-        { label: "Copy", accelerator: "CmdOrCtrl+C", click: () => sendMenuAction(mainWindow, "edit.copy") },
-        { label: "Paste", accelerator: "CmdOrCtrl+V", click: () => sendMenuAction(mainWindow, "edit.paste") },
-        { label: "Select All", accelerator: "CmdOrCtrl+A", click: () => sendMenuAction(mainWindow, "edit.selectAll") },
-      ],
-    },
-    {
-      label: "Selection",
-      submenu: [
-        { label: "Select All", accelerator: "CmdOrCtrl+A", click: () => sendMenuAction(mainWindow, "edit.selectAll") },
-      ],
-    },
-    {
-      label: "Find",
-      submenu: [
-        { label: "Find", accelerator: "CmdOrCtrl+F", click: () => sendMenuAction(mainWindow, "find.open") },
-        { label: "Find Next", accelerator: "F3", click: () => sendMenuAction(mainWindow, "find.next") },
-        { label: "Find Previous", accelerator: "Shift+F3", click: () => sendMenuAction(mainWindow, "find.prev") },
-      ],
-    },
-    {
-      label: "View",
-      submenu: [
-        { label: "Toggle Theme", accelerator: "CmdOrCtrl+Shift+T", click: () => sendMenuAction(mainWindow, "view.toggleTheme") },
-      ],
-    },
-  ];
-
-  const menu = Menu.buildFromTemplate(menuTemplate);
-  Menu.setApplicationMenu(menu);
+  /** Constrói o menu nativo para uma janela específica (in-window, sem D-Bus). */
+  const createAppMenu = (win: ElectronBrowserWindow): Electron.Menu => {
+    const template: Electron.MenuItemConstructorOptions[] = [
+      {
+        label: "File",
+        submenu: [
+          { label: "Open", accelerator: "CmdOrCtrl+O", click: () => sendMenuAction(win, "file.open") },
+          { label: "Save", accelerator: "CmdOrCtrl+S", click: () => sendMenuAction(win, "file.save") },
+          { type: "separator" },
+          { label: "Quit", accelerator: "CmdOrCtrl+Q", click: () => app.quit() },
+        ],
+      },
+      {
+        label: "Edit",
+        submenu: [
+          { label: "Undo", accelerator: "CmdOrCtrl+Z", click: () => sendMenuAction(win, "edit.undo") },
+          { label: "Redo", accelerator: "CmdOrCtrl+Shift+Z", click: () => sendMenuAction(win, "edit.redo") },
+          { type: "separator" },
+          { label: "Cut", accelerator: "CmdOrCtrl+X", click: () => sendMenuAction(win, "edit.cut") },
+          { label: "Copy", accelerator: "CmdOrCtrl+C", click: () => sendMenuAction(win, "edit.copy") },
+          { label: "Paste", accelerator: "CmdOrCtrl+V", click: () => sendMenuAction(win, "edit.paste") },
+          { label: "Select All", accelerator: "CmdOrCtrl+A", click: () => sendMenuAction(win, "edit.selectAll") },
+        ],
+      },
+      {
+        label: "Selection",
+        submenu: [
+          { label: "Select All", accelerator: "CmdOrCtrl+A", click: () => sendMenuAction(win, "edit.selectAll") },
+        ],
+      },
+      {
+        label: "Find",
+        submenu: [
+          { label: "Find", accelerator: "CmdOrCtrl+F", click: () => sendMenuAction(win, "find.open") },
+          { label: "Find Next", accelerator: "F3", click: () => sendMenuAction(win, "find.next") },
+          { label: "Find Previous", accelerator: "Shift+F3", click: () => sendMenuAction(win, "find.prev") },
+        ],
+      },
+      {
+        label: "View",
+        submenu: [
+          { label: "Toggle Theme", accelerator: "CmdOrCtrl+Shift+T", click: () => sendMenuAction(win, "view.toggleTheme") },
+        ],
+      },
+    ];
+    return Menu.buildFromTemplate(template);
+  };
 
   await app.whenReady();
 
