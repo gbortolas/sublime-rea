@@ -33,7 +33,7 @@ body {
 #editor-surface {
   display: block;
   width: 100%;
-  height: 100%;
+  height: calc(100% - 32px); /* tab bar height */
   outline: none;
 }
 
@@ -54,6 +54,8 @@ body {
   background: var(--scribe-status-bg);
   font-size: 0.8rem;
   font-variant-numeric: tabular-nums;
+  position: relative;
+  z-index: 15;
 }
 
 /* Indicadores de undo/redo: apagados quando indisponíveis (o renderer alterna .disabled). */
@@ -251,7 +253,10 @@ body {
 #welcome-screen {
   pointer-events: auto;
   position: absolute;
-  inset: 0;
+  top: 32px;  /* abaixo da tab bar */
+  left: 0;
+  right: 0;
+  bottom: 0;
   display: flex;
   align-items: center;
   justify-content: center;

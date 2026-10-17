@@ -26,7 +26,8 @@ export interface MinimapDeps {
   source: MinimapSource;
   viewport: Viewport & { scrollOffsetPx(): number };
   lineHeight: number;
-  viewportHeight: number;
+  /** Função que retorna a altura atual da viewport em px (pode mudar com resize). */
+  getViewportHeight: () => number;
 }
 
 /** Resultado do `attachMinimap`: para desligar. */
@@ -59,7 +60,8 @@ export function attachMinimap(deps: MinimapDeps): MinimapBinding {
     canvas.height = Math.ceil(h * dpr);
     ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
 
-    const { source, viewport, lineHeight, viewportHeight } = deps;
+    const { source, viewport, lineHeight, getViewportHeight } = deps;
+    const viewportHeight = getViewportHeight();
     const lineCount = source.lineCount();
 
     // Fundo

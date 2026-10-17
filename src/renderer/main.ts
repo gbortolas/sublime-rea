@@ -1001,7 +1001,8 @@ class ScribeRenderer {
   private readonly style = TEXT_STYLE;
   private readonly dpr: number;
   private viewportWidth = 1;
-  private viewportHeight = 1;
+  /** Altura lógica da viewport (px), atualizada no resize. */
+  viewportHeight = 1;
   private rafHandle = 0;
   private running = false;
   private highlighter: SceneHighlight | undefined;
@@ -1054,9 +1055,10 @@ class ScribeRenderer {
   }
 
   resize(cssWidth: number, cssHeight: number): void {
-    const tabBarHeight = 32;
+    // cssWidth/cssHeight vêm do clientWidth/clientHeight do canvas, que já é
+    // calc(100% - 32px) no CSS — não precisa subtrair tab bar aqui.
     this.viewportWidth = Math.max(1, Math.floor(cssWidth));
-    this.viewportHeight = Math.max(1, Math.floor(cssHeight - tabBarHeight));
+    this.viewportHeight = Math.max(1, Math.floor(cssHeight));
     this.canvas.width = Math.floor(this.viewportWidth * this.dpr);
     this.canvas.height = Math.floor(this.viewportHeight * this.dpr);
     if (this.pipeline instanceof Canvas2DBackend) {
@@ -1252,8 +1254,6 @@ export async function bootRenderer(): Promise<boolean> {
   const surface = document.getElementById("editor-surface");
   if (!(surface instanceof HTMLCanvasElement)) return false;
 
-  const viewportHeight = Math.max(100, window.innerHeight - 32); // menos tab bar
-
   const requested = resolveBackendKind();
   const { surface: atlasSurface, canvas: atlasCanvas } = createAtlasSurface(1024);
   const atlas = new GlyphAtlas({
@@ -1291,7 +1291,7 @@ export async function bootRenderer(): Promise<boolean> {
   const viewport = new ViewportImpl({
     lineCount: source.lineCount(),
     lineHeight: Math.ceil(TEXT_STYLE.sizePx * 1.4),
-    viewportHeight: Math.max(1, (surface.clientHeight || 1) - 32), // 32px da tab bar
+    viewportHeight: Math.max(1, surface.clientHeight || 1),
     viewportWidth: surface.clientWidth || 1,
     overscan: 2,
     now: (): number => performance.now(),
@@ -1488,7 +1488,7 @@ export async function bootRenderer(): Promise<boolean> {
     },
     viewport,
     lineHeight: Math.ceil(TEXT_STYLE.sizePx * 1.4),
-    viewportHeight,
+    getViewportHeight: () => renderer.viewportHeight,
   });
   renderer.attachMinimap(minimap);
 
