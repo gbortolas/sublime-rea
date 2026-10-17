@@ -62,6 +62,18 @@ async function main() {
     logLevel: "info",
   });
 
+  // 3.5) worker: bundle CJS que resolve imports do shared (sem external — tudo inline).
+  await esbuild({
+    entryPoints: [resolve(root, "src/core/concurrency/worker-entry.ts")],
+    outfile: resolve(dist, "core/concurrency/worker-entry.js"),
+    bundle: true,
+    format: "cjs",
+    platform: "node",
+    target: "node20",
+    sourcemap: true,
+    logLevel: "info",
+  });
+
   // 4) assets do renderer.
   await cp(resolve(root, "src/renderer/index.html"), resolve(dist, "renderer/index.html"));
   await cp(resolve(root, "src/renderer/index.css"), resolve(dist, "renderer/index.css"));

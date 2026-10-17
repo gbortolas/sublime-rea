@@ -18,11 +18,11 @@
  * `fileRead`); o pool guarda o último texto registrado por doc para reenviar a workers novos.
  */
 
-import { existsSync, readFileSync } from "node:fs";
+import { existsSync } from "node:fs";
 import { availableParallelism as osAvailableParallelism } from "node:os";
 import path from "node:path";
 import { Worker } from "node:worker_threads";
-import type * as TypeScript from "typescript";
+import { buildSync } from "esbuild";
 import { CancellationError, Deferred, TaskError, toError } from "../../shared";
 import type {
   DocumentHandle,
@@ -161,16 +161,6 @@ function describeReason(reason: unknown): string {
   if (typeof reason === "string") return reason;
   if (reason instanceof Error) return reason.message;
   return String(reason);
-}
-
-let cachedTypeScript: typeof TypeScript | undefined;
-
-function loadTypeScript(): typeof TypeScript {
-  if (!cachedTypeScript) {
-    // eslint-disable-next-line @typescript-eslint/no-require-imports
-    cachedTypeScript = require("typescript") as typeof TypeScript;
-  }
-  return cachedTypeScript;
 }
 
 class PoolTaskHandle<T> implements TaskHandle<T> {
@@ -616,16 +606,16 @@ export class TaskPoolImpl implements TaskPool {
     if (existsSync(jsEntry)) return (this.launch = { kind: "file", file: jsEntry });
 
     const tsEntry = path.join(__dirname, "worker-entry.ts");
-    const source = readFileSync(tsEntry, "utf8");
-    const ts = loadTypeScript();
-    const code = ts.transpileModule(source, {
-      compilerOptions: {
-        module: ts.ModuleKind.CommonJS,
-        target: ts.ScriptTarget.ES2022,
-        esModuleInterop: true,
-        isolatedModules: true,
-      },
-    }).outputText;
+    const result = buildSync({
+      entryPoints: [tsEntry],
+      bundle: true,
+      format: "cjs",
+      platform: "node",
+      target: "node20",
+      write: false,
+    });
+    const code = result.outputFiles[0]?.text ?? "";
+    if (!code) throw new Error("pool: esbuild não produziu output para o worker");
     return (this.launch = { kind: "eval", code });
   }
 }

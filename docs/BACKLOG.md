@@ -244,12 +244,19 @@ IDs). Cada item vira uma seção da spec técnica abstrata. **Fase 1 FECHADA** �
 
 ## 🧹 P3 — Housekeeping / dívidas
 
-- [ ] **P3.10 — Bundlar o worker de `TaskPool` no build (matar a duplicação do scanner de busca)**: o
-      `worker-entry.ts` roda por `path.join(__dirname, "worker-entry.js")` e o **`eval` do vitest não
-      resolve `../../shared`**, então a varredura de busca foi **replicada** dentro dele (paridade
-      travada por teste, ver §P2.4c). O build já usa `esbuild` para renderer/preload — fazer o mesmo com
-      o worker permitiria `import { scanText } from "../../shared"` sem duplicação. Ver o comentário em
-      `src/core/concurrency/worker-entry.ts` (~`:227`).
+- [x] **P3.10 — Bundlar o worker de `TaskPool` no build (matar a duplicação do scanner de busca)** ✅
+      **fechado** (2026-10-17): a duplicata de `scanText`/`normalizeSearchQuery` no worker-entry.ts
+      **morreu**. Agora o worker importa direto de `../../shared/search-contract` e o bundler
+      (esbuild) resolve tudo numa saída CJS. Implementação:
+      - `worker-entry.ts` — removeu 237 linhas de código duplicado (`LocalSearchInputError`,
+        `escapeRegExpLocal`, `normalizeSearchQueryLocal`, `scanTextLocal`, `searchDocument`);
+        `import { normalizeSearchQuery, scanText }` do shared; case `"search"` inline
+      - `scripts/build.mjs` — etapa 3.5 adicionada: esbuild bundle do worker (CJS, node20,
+        sem external) → `dist/core/concurrency/worker-entry.js` (9,5 kB)
+      - `pool.ts` — fallback eval trocou `ts.transpileModule` por `esbuild.buildSync` com
+        `bundle:true`, que resolve imports de verdade; `loadTypeScript()` removida
+      - Gates: typecheck/lint/build exit 0 · **430 testes / 43 arquivos** (baseline 430)
+      - Paridade worker↔shared mantida: 25 casos + 2 de erro no `pool.test.ts`
 - [x] **P3.11 — Pintar as ocorrências da busca no canvas** ✅ **fechado** (2026-10-17): agora o
       canvas destaca visualmente as ocorrências (rects de fundo amarelo) e o match "atual" ganha cor
       magenta. Implementação:
