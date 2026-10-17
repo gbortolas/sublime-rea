@@ -272,10 +272,13 @@ IDs). Cada item vira uma seção da spec técnica abstrata. **Fase 1 FECHADA** �
       - Decisões de design: overlay de rects em vez de modificar a cor de glifos (retrocompatível com
         sintaxe highlight); posicionamento exato (não aproximado por coluna) para lidar com tabs;
         cores exportadas para testes
-- [ ] **P3.12 — Ciclo de vida das assinaturas do renderer**: a assinatura `bridge.onDocumentChanged`
-      fiada pelo find bar (`src/renderer/find-bar.ts`) não é amarrada a `dispose()` do modelo (o boot
-      atual não tem teardown, então não há efeito prático hoje). Amarrar quando o renderer ganhar
-      desmontagem/reload.
+- [x] **P3.12 — Ciclo de vida das assinaturas do renderer** ✅ **fechado** (2026-10-17): a
+      assinatura `bridge.onDocumentChanged` fiada pelo find bar (`src/renderer/find-bar.ts`)
+      agora é amarrada a `dispose()`:
+      - `FindBarBinding` ganhou método `dispose()` que chama `model.dispose()` + o unsubscribe
+        retornado por `onDocumentChanged`
+      - `attachFindBar` guarda o unsubscribe e o invoca em `dispose()`
+      - Gates: typecheck/lint/build exit 0 · **430 testes / 43 arquivos** (baseline 430)
 
 - [x] **P3.1 — `bin/` versionado** ✅ **resolvido** (2026-10-17) — o `.deb` (redundante) já tinha sido
       removido; o **`.tar.xz` do alvo (22 MB) saiu do git** (`git rm --cached`, arquivo preservado no

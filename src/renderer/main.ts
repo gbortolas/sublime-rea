@@ -1083,6 +1083,11 @@ export interface FindBarBinding {
   readonly model: FindBarModel;
   /** Re-sincroniza documento/revisão ativos (após abrir arquivo e antes de buscar). */
   syncDocument(): void;
+  /**
+   * Desfaz a ligação: cancela o debounce pendente, remove a assinatura de
+   * `onDocumentChanged` e descarta o modelo. Chamado no teardown do renderer.
+   */
+  dispose(): void;
 }
 
 interface FindBarDeps {
@@ -1220,7 +1225,7 @@ export function attachFindBar(deps: FindBarDeps): FindBarBinding | undefined {
     }
   });
   // Edição muda a revisão: o modelo descarta a resposta de revisão superada e refaz a contagem.
-  deps.bridge.onDocumentChanged((event) => {
+  const unsubscribeOnDocChanged = deps.bridge.onDocumentChanged((event) => {
     const session = deps.controller.current;
     if (session === undefined || event.handle !== session.handle) return;
     currentDocKey = documentHighlightKey(session.handle);
@@ -1229,7 +1234,14 @@ export function attachFindBar(deps: FindBarDeps): FindBarBinding | undefined {
 
   syncDocument();
   renderState(model.state());
-  return { model, syncDocument };
+  return {
+    model,
+    syncDocument,
+    dispose: (): void => {
+      model.dispose();
+      unsubscribeOnDocChanged();
+    },
+  };
 }
 
 function attachInputListeners(
