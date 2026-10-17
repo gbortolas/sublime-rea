@@ -45,6 +45,8 @@ import {
 import type { FindBarApi, FindBarState } from "./find-bar";
 import { attachCommandPalette } from "./command-palette";
 import type { CommandPaletteApi, CommandPaletteBinding } from "./command-palette";
+import { attachMinimap } from "./minimap";
+import type { MinimapBinding } from "./minimap";
 import {
   Canvas2DBackend,
   GlyphAtlas,
@@ -1006,6 +1008,8 @@ class ScribeRenderer {
   private searchHighlightValue: SearchHighlight | undefined;
   private currentSelection: Selection | undefined;
   private currentSelections: SelectionSet | undefined; // P2#5
+  /** Minimap binding ativo (opcional). */
+  private minimapBinding: MinimapBinding | undefined;
 
   constructor(
     private readonly canvas: HTMLCanvasElement,
@@ -1179,10 +1183,23 @@ class ScribeRenderer {
       this.pipeline.flush();
     }
     this.pipeline.present(damage);
+    // Atualiza minimap a cada frame
+    this.minimapBinding?.update();
   }
 
   private lineHeight(): number {
     return Math.ceil(this.style.sizePx * 1.4);
+  }
+
+  /** Conecta o minimap ao renderer. */
+  attachMinimap(binding: MinimapBinding): void {
+    this.minimapBinding = binding;
+  }
+
+  /** Desconecta o minimap. */
+  detachMinimap(): void {
+    this.minimapBinding?.dispose();
+    this.minimapBinding = undefined;
   }
 }
 
@@ -1232,6 +1249,8 @@ export async function bootRenderer(): Promise<boolean> {
   if (typeof document === "undefined" || typeof HTMLCanvasElement === "undefined") return false;
   const surface = document.getElementById("editor-surface");
   if (!(surface instanceof HTMLCanvasElement)) return false;
+
+  const viewportHeight = Math.max(100, window.innerHeight - 32); // menos tab bar
 
   const requested = resolveBackendKind();
   const { surface: atlasSurface, canvas: atlasCanvas } = createAtlasSurface(1024);
@@ -1416,6 +1435,18 @@ export async function bootRenderer(): Promise<boolean> {
   }
 
   attachInputListeners(surface, viewport, renderer, controller, findBar, palette);
+
+  // Minimap (P2#9)
+  const minimap = attachMinimap({
+    source: {
+      lineCount: () => controller?.current?.source.lineCount() ?? source.lineCount(),
+      line: (i: number) => controller?.current?.source.line(i) ?? source.line(i),
+    },
+    viewport,
+    lineHeight: Math.ceil(TEXT_STYLE.sizePx * 1.4),
+    viewportHeight,
+  });
+  renderer.attachMinimap(minimap);
 
   // Toggle tema (Ctrl+Shift+T)
   const themeBtn = document.getElementById("status-theme");

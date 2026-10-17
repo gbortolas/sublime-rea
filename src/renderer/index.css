@@ -391,3 +391,23 @@ body {
   font-size: 0.7rem;
   margin-left: 0.5rem;
 }
+
+/* ── Minimap ─────────────────────────────────────────── */
+#minimap {
+  position: absolute;
+  top: 32px;           /* tab bar height */
+  right: 0;
+  width: 72px;
+  bottom: 0;
+  background: #1a1a1e;
+  border-left: 1px solid #2a2a2e;
+  z-index: 10;
+  pointer-events: auto;
+  overflow: hidden;
+}
+
+#minimap-surface {
+  width: 100%;
+  height: 100%;
+  display: block;
+}
