@@ -1,7 +1,7 @@
 # HANDOFF — sublime-rea
 
 > **Documento de handoff entre sessões** (leia antes de retomar). Atualizado em **2026-10-17**.
-> Status: P2#8 (Temas) concluído. Próximo: P3#5 — Rizin (opcional) ou P3#6 — Snapshot.
+> Status: P3#12 (Go to line) + P3#13 (Auto-pair) + P3#14 (Bracket matching) + PyCharm run configs concluídos. Sessão encerrada.
 
 ---
 
@@ -17,7 +17,8 @@ IPC) ✅ · **FASE 1 FECHADA** · **FASE 2 FECHADA** · **FASE 3 FECHADA** · P2
 P2.4b/c ✅ · P2.5 (salvar) ✅ · P3.10/11/12 (dívidas) ✅ · P1#1 (seleção) ✅ · P1#2 (gutter) ✅ ·
 **P1#3 (scrollbar) ✅ · P1#4 (find bar toggles) ✅ · P2#5 (múltiplos cursores) ✅** ·
 **P2#7 (drag & drop) ✅ · Infra (GitHub repo + CI/Release) ✅ · P2#6 (abas) ✅ · P2#8 (temas) ✅** ·
-**próximo: P3#5 — Rizin (opcional) ou P3#6 — Snapshot**
+**P3#12 (go to line) ✅ · P3#13 (auto-pair) ✅ · P3#14 (bracket matching) ✅ · PyCharm ✅** ·
+**sessão encerrada**
 
 **✅ Passo operacional resolvido (2026-10-16).** O `setup.py` foi rodado e o MCP `rea` foi relançado
 **já com `REA_GHIDRA_STARTUP_TIMEOUT_MS=900000`** (confirmado em `/proc/*/environ`) — **não** é mais

@@ -281,6 +281,19 @@ IDs). Cada item vira uma seção da spec técnica abstrata. **Fase 1 FECHADA** �
   - **index.html+CSS** — botão `#status-theme` (🌙/☀️) com estilo `.clickable`
   - Gates: typecheck/lint/build exit 0 · **430 testes / 43 arquivos** (baseline 430)
 
+- [x] **P3#12 — Go to line** ✅ **fechado** (2026-10-17). Ctrl+G → prompt → navega caret e scroll para a linha digitada.
+- Gates: typecheck/lint/build exit 0 · **430 testes / 43 arquivos** (baseline 430)
+
+- [x] **P3#13 — Auto-pair** ✅ **fechado** (2026-10-17). Auto-fechamento de `()`, `[]`, `{}`, `""`, `''`, `` `` ``; skip de fechamento existente; backspace inteligente deleta par vazio.
+- Gates: typecheck/lint/build exit 0 · **430 testes / 43 arquivos** (baseline 430)
+
+- [x] **P3#14 — Bracket matching** ✅ **fechado** (2026-10-17). Quando cursor está num bracket, destaca o par correspondente com underline amarelo no canvas. Scan bidirecional com contagem de profundidade.
+- Gates: typecheck/lint/build exit 0 · **430 testes / 43 arquivos** (baseline 430)
+
+- [x] **Infra — GitHub repo + CI/Release** ✅ **fechado** (2026-10-17). Repositório `gbortolas/sublime-rea` criado e público; workflows CI (typecheck+test+build) e Release (Linux AppImage + Windows nsis); electron-builder configurado; ícone placeholder 256x256.
+
+- [x] **Infra — PyCharm run configurations** ✅ **fechado** (2026-10-17). 6 Node.js run configs em `.idea/runConfigurations/`: typecheck, test, build, start, dist, lint.
+
 ## 🧹 P3 — Housekeeping / dívidas
 
 - [x] **P3.10 — Bundlar o worker de `TaskPool` no build (matar a duplicação do scanner de busca)** ✅
