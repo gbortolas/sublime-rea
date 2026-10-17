@@ -22,7 +22,6 @@ import { existsSync } from "node:fs";
 import { availableParallelism as osAvailableParallelism } from "node:os";
 import path from "node:path";
 import { Worker } from "node:worker_threads";
-import { buildSync } from "esbuild";
 import { CancellationError, Deferred, TaskError, toError } from "../../shared";
 import type {
   DocumentHandle,
@@ -605,7 +604,11 @@ export class TaskPoolImpl implements TaskPool {
     const jsEntry = path.join(__dirname, "worker-entry.js");
     if (existsSync(jsEntry)) return (this.launch = { kind: "file", file: jsEntry });
 
+    // Fallback: compila o worker de .ts com esbuild (apenas em dev/test).
+    // Import dinâmico porque esbuild é devDependency — não disponível em produção.
     const tsEntry = path.join(__dirname, "worker-entry.ts");
+    // eslint-disable-next-line @typescript-eslint/no-require-imports, @typescript-eslint/no-var-requires
+    const { buildSync } = require("esbuild") as typeof import("esbuild");
     const result = buildSync({
       entryPoints: [tsEntry],
       bundle: true,
