@@ -38,6 +38,7 @@ export interface DrawBatch {
   readonly rects: readonly RectInstance[];
   readonly lines: readonly LineInstance[];
   readonly glyphs: readonly GlyphInstance[];
+  readonly indentGuides?: readonly { readonly x: number; readonly top: number; readonly bottom: number }[];
 }
 
 function sameRect(a: Rect | null, b: Rect | null): boolean {
@@ -62,6 +63,7 @@ export abstract class BaseRenderPipeline implements RenderPipeline {
   private rects: RectInstance[] = [];
   private lines: LineInstance[] = [];
   private glyphs: GlyphInstance[] = [];
+  private indentGuides: readonly { readonly x: number; readonly top: number; readonly bottom: number }[] | undefined;
   private pendingDamage: Rect[] = [];
 
   protected constructor(atlas: GlyphAtlas) {
@@ -135,10 +137,12 @@ export abstract class BaseRenderPipeline implements RenderPipeline {
       rects: this.rects,
       lines: this.lines,
       glyphs: this.glyphs,
+      ...(this.indentGuides !== undefined ? { indentGuides: this.indentGuides } : {}),
     };
     this.rects = [];
     this.lines = [];
     this.glyphs = [];
+    this.indentGuides = undefined;
     this.dirty = false;
     this.draw(batch);
   }
@@ -152,6 +156,13 @@ export abstract class BaseRenderPipeline implements RenderPipeline {
   measure(text: string, style: TextStyleKey): GlyphMetrics {
     this.assertAlive();
     return this.atlas.measure(text, style);
+  }
+
+  setIndentGuides(
+    guides: readonly { readonly x: number; readonly top: number; readonly bottom: number }[] | undefined,
+  ): void {
+    this.assertAlive();
+    this.indentGuides = guides;
   }
 
   present(damage: DamageRects): void {
@@ -169,6 +180,7 @@ export abstract class BaseRenderPipeline implements RenderPipeline {
     this.rects = [];
     this.lines = [];
     this.glyphs = [];
+    this.indentGuides = undefined;
     this.pendingDamage = [];
     this.onDispose();
   }

@@ -1176,6 +1176,7 @@ class ScribeRenderer {
     const damage = this.viewport.takeDamage();
     this.pipeline.invalidate(damage);
     this.pipeline.beginFrame(viewportRect);
+    this.pipeline.setIndentGuides(scene.indentGuides);
     this.pipeline.pushRects(scene.rects);
     this.pipeline.pushLines(scene.lines);
     for (let i = 0; i < scene.glyphs.length; i += GLYPH_CHUNK) {

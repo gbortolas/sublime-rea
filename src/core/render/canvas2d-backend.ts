@@ -103,6 +103,16 @@ export class Canvas2DBackend extends BaseRenderPipeline {
       ctx.clip();
     }
     for (const rect of batch.rects) this.drawRect(rect);
+    if (batch.indentGuides !== undefined) {
+      for (const g of batch.indentGuides) {
+        ctx.strokeStyle = "rgba(200,200,200,0.15)";
+        ctx.lineWidth = 1;
+        ctx.beginPath();
+        ctx.moveTo(g.x, g.top);
+        ctx.lineTo(g.x, g.bottom);
+        ctx.stroke();
+      }
+    }
     for (const line of batch.lines) this.drawLine(line);
     for (const glyph of batch.glyphs) this.drawGlyph(glyph);
     ctx.restore();

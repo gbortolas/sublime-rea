@@ -96,6 +96,13 @@ export interface SearchHighlight {
   readonly currentIndex: number;
 }
 
+/** Guia de indentação — linha vertical semi-transparente. */
+export interface IndentGuide {
+  readonly x: number;       // posição X em px
+  readonly top: number;     // Y inicial
+  readonly bottom: number;  // Y final
+}
+
 /** @internal exported only for tests. */
 
 /** Instâncias de um frame — entradas diretas do `RenderPipeline`. */
@@ -103,6 +110,7 @@ export interface SceneInstances {
   readonly rects: RectInstance[];
   readonly glyphs: GlyphInstance[];
   readonly lines: LineInstance[];
+  readonly indentGuides?: IndentGuide[];
 }
 
 /**
@@ -486,13 +494,82 @@ export function buildInstances(
     }
   }
 
-  return { rects, glyphs, lines };
+  // Indentation guides (P3.15)
+  const indentGuides = calcIndentGuides(source, layout, range);
+
+  return { rects, glyphs, lines, ...(indentGuides !== undefined ? { indentGuides } : {}) };
 }
 
 function caretAdvance(atlas: GlyphAtlas, style: TextStyle, column: number, spaceAdvance: number): number {
   if (column <= 0) return 0;
   const metrics = atlas.measure(" ".repeat(column), atlas.registerStyle(style));
   return metrics.advance === 0 ? column * spaceAdvance : metrics.advance;
+}
+
+/**
+ * Calcula as guias de indentação (linhas verticais semi-transparentes) para o range visível.
+ * Cada nível de indentação ganha uma linha vertical contínua enquanto o código permanece
+ * naquele nível. V1 usa espaçamento monospace fixo (~8px por nível).
+ */
+function calcIndentGuides(
+  source: LineSource,
+  layout: LineLayout,
+  range: { first: number; count: number },
+): IndentGuide[] | undefined {
+  if (range.count <= 0) return undefined;
+
+  const guides: IndentGuide[] = [];
+  const visited = new Map<number, number>(); // indentLevel -> startLine
+  const tabSize = layout.tabWidth;
+  const { paddingLeft, lineHeight, paddingTop, scrollOffsetPx } = layout;
+
+  for (let i = range.first; i < range.first + range.count && i < source.lineCount(); i++) {
+    const text = source.line(i);
+    const indent = leadingSpaces(text) / tabSize; // indent level
+    const trimmed = text.trim();
+
+    // Linha vazia? continua guias existentes (não fecha nem abre)
+    if (trimmed.length === 0) continue;
+
+    // Guarda o nível de indentação atual e quando começou
+    for (let level = 1; level <= indent; level++) {
+      if (!visited.has(level)) {
+        visited.set(level, i);
+      }
+    }
+
+    // Fecha guias que não se estendem até esta linha
+    for (const [level, startLine] of visited) {
+      if (level > indent) {
+        const x = paddingLeft + level * tabSize * 8; // ~8px por indent (monospace)
+        guides.push({
+          x,
+          top: paddingTop + (startLine - range.first) * lineHeight - scrollOffsetPx,
+          bottom: paddingTop + (i - range.first) * lineHeight - scrollOffsetPx - 2,
+        });
+        visited.delete(level);
+      }
+    }
+  }
+
+  // Fecha guias pendentes no fim do range
+  for (const [level, startLine] of visited) {
+    const x = paddingLeft + level * tabSize * 8;
+    guides.push({
+      x,
+      top: paddingTop + (startLine - range.first) * lineHeight - scrollOffsetPx,
+      bottom: paddingTop + range.count * lineHeight - scrollOffsetPx - 2,
+    });
+  }
+
+  return guides.length > 0 ? guides : undefined;
+}
+
+/** Conta espaços iniciais (não tabs). */
+function leadingSpaces(s: string): number {
+  let i = 0;
+  while (i < s.length && s[i] === " ") i++;
+  return i;
 }
 
 /**

@@ -101,6 +101,10 @@ export interface RenderPipeline {
   flush(): void;
   present(damage: DamageRects): void;
   dispose(): void;
+  /** Guias de indentação a desenhar no próximo lote (v1). */
+  setIndentGuides(
+    guides: readonly { readonly x: number; readonly top: number; readonly bottom: number }[] | undefined,
+  ): void;
 }
 
 /** Nome alternativo usado em `06` — mesmo contrato. */
