@@ -992,6 +992,9 @@ void demoText;
 function showWelcome(show: boolean): void {
   const el = document.getElementById("welcome-screen");
   if (el) el.hidden = !show;
+  // Esconde o minimap junto com a welcome screen (ambos têm z-index 10)
+  const mm = document.getElementById("minimap");
+  if (mm) mm.hidden = show;
 }
 
 // ---- app ------------------------------------------------------------------------------------------
