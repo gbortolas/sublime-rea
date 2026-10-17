@@ -1,0 +1,57 @@
+/*
+ * Scribe — estilos mínimos da casca (shell).
+ *
+ * A superfície do documento é o <canvas>; nada aqui influencia o desenho do texto
+ * (isso é responsabilidade do RenderPipeline). Regra de arquitetura: `ui` só cerca
+ * conteúdo, nunca estiliza o conteúdo — ver docs/architecture/04-render-e-ui.md.
+ */
+
+:root {
+  color-scheme: dark;
+  --scribe-bg: #1e1f22;
+  --scribe-fg: #d4d4d4;
+  --scribe-status-bg: #2b2d30;
+}
+
+html,
+body {
+  margin: 0;
+  padding: 0;
+  height: 100%;
+  background: var(--scribe-bg);
+  color: var(--scribe-fg);
+  font-family: system-ui, sans-serif;
+  overflow: hidden;
+}
+
+#app {
+  position: relative;
+  width: 100vw;
+  height: 100vh;
+}
+
+#editor-surface {
+  display: block;
+  width: 100%;
+  height: 100%;
+  outline: none;
+}
+
+#ui-overlay {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  display: flex;
+  flex-direction: column;
+  justify-content: flex-end;
+}
+
+#status-bar {
+  pointer-events: auto;
+  display: flex;
+  gap: 1.5rem;
+  padding: 0.35rem 0.75rem;
+  background: var(--scribe-status-bg);
+  font-size: 0.8rem;
+  font-variant-numeric: tabular-nums;
+}

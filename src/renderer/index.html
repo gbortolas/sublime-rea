@@ -1,0 +1,33 @@
+<!doctype html>
+<html lang="pt-BR">
+  <head>
+    <meta charset="utf-8" />
+    <meta
+      http-equiv="Content-Security-Policy"
+      content="default-src 'none'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:;"
+    />
+    <title>Scribe</title>
+    <link rel="stylesheet" href="./index.css" />
+  </head>
+  <body>
+    <!--
+      Superfície do renderer: um único canvas "editor" + overlay de UI.
+
+      O canvas é o alvo do RenderPipeline (backend Canvas2D ou WebGPU — ver
+      docs/architecture/04-render-e-ui.md). O overlay fica FORA do canvas para que a
+      pipeline só desenhe conteúdo de documento (damage rects).
+    -->
+    <div id="app" role="application" aria-label="Scribe">
+      <canvas id="editor-surface" tabindex="0"></canvas>
+      <div id="ui-overlay" aria-hidden="false">
+        <div id="status-bar" role="status">
+          <span id="status-doc">sem documento</span>
+          <span id="status-backend">backend: ?</span>
+          <span id="status-caret">1:1</span>
+        </div>
+        <!-- Menu/panels (find, palette, tabs) entram aqui na Fase 3.2+. -->
+      </div>
+    </div>
+    <script src="./main.js"></script>
+  </body>
+</html>

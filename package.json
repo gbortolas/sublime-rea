@@ -1,0 +1,27 @@
+{
+  "name": "scribe",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Scribe — núcleo de editor de texto Electron/TypeScript (Fase 3 / P2.2; clean-room, ver docs/architecture/)",
+  "license": "UNLICENSED",
+  "main": "dist/main/index.js",
+  "scripts": {
+    "build": "node scripts/build.mjs",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "lint": "eslint .",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "start": "npm run build && electron .",
+    "start:headless": "npm run build && xvfb-run -a electron ."
+  },
+  "devDependencies": {
+    "@eslint/js": "^9.0.0",
+    "@types/node": "^24.0.0",
+    "electron": "^38.0.0",
+    "esbuild": "^0.25.0",
+    "eslint": "^9.0.0",
+    "typescript": "^5.6.0",
+    "typescript-eslint": "^8.0.0",
+    "vitest": "^3.0.0"
+  }
+}

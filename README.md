@@ -99,7 +99,7 @@ O ambiente é **reproduzível por script** — você não precisa instalar nada 
 |---|---|---|
 | **SO** | Linux **x86_64** (validado em pop 22.04) | você |
 | **Java (JDK)** | **≥ 21**. O Ghidra 12.1.x exige **no mínimo JDK 21** (o JDK 25 só passou a ser exigido no Ghidra 12.2). O setup **detecta e instrui**, nunca instala | você ([Temurin 21](https://adoptium.net/temurin/releases/?version=21)) |
-| **Node / npm** | `node >= 20` + npm | você |
+| **Node / npm** | `node >= 20` + npm — **obrigatório para o scaffold (Fase 3)**: `npm install` na raiz traz Electron/TS/vitest/eslint/esbuild | você |
 | **Python** | 3.10+ (o `rich` é opcional, o script se vira) | você |
 | **REA** | `rea-agents@6.5.0` (global via npm, ou `npx` efêmero) | **setup** |
 | **Ghidra** | **12.1.4** headless + native decompiler (~543 MiB de download) | **setup** |
@@ -331,29 +331,42 @@ sustenta (ou está marcada explicitamente como hipótese/decisão de projeto nos
 
 ---
 
-### Passo 10 — FASE 3: scaffold `src/` (Electron + TypeScript) 🏗️
+### Passo 10 — FASE 3: scaffold `src/` (Electron + TypeScript) 🏗️ ✅
 
-**Objetivo:** começar o editor de verdade em `src/`, seguindo a spec da Fase 2. Item **P2.2**.
+**Objetivo:** começar o editor de verdade em `src/`, seguindo a spec da Fase 2. Item **P2.2** —
+**entregue em 2026-10-16** ([`docs/scaffold/P2.2-scaffold.md`](docs/scaffold/P2.2-scaffold.md)).
 
-- [ ] **`PieceTable` / `Rope` em TS** — estrutura de buffer com mutação mínima (qual das duas só
-      depois da Fase 2; hoje é hipótese aberta em P1.1)
-- [ ] **Worker Threads** (`worker_threads`) — operações de buffer e parsing pesado **fora** da main thread
-- [ ] **Render Canvas 2D / WebGPU** — com **scroll virtualizado** (linhas `K` a `K+N`, nada de DOM por linha)
-- [ ] **API de extensão tipada + protocolo IPC** — contratos em TypeScript, isolamento dos plugins
+- [x] **`PieceTable` em TS** — `src/core/buffer/piece-table.ts` (segmentada, minimal-copy) + índice de
+      linhas incremental (`line-index.ts`), delta UTF-16 com **inversão** para undo (`delta.ts`)
+- [x] **Worker Threads** (`worker_threads`) — `src/core/concurrency/` (`scheduler.ts` com lanes e
+      `Atomics.waitAsync`, `pool.ts` com lanes `io`/`index`/`fileRead`, `worker-entry.ts`)
+- [x] **Render Canvas 2D / WebGPU** — `src/core/render/` (`pipeline.ts`, `canvas2d-backend.ts`,
+      `webgpu-backend.ts`, `atlas.ts`, `viewport.ts` com damage coalescido) — **default CPU/Canvas2D**,
+      scroll virtualizado, nada de DOM por linha
+- [x] **API de extensão tipada + protocolo IPC** — `src/core/extension/` (`ops.ts` com tabela densa +
+      `OPS_HASH`, `bridge.ts`, `host.ts` com `utilityProcess` + handshake) e `src/shared/ipc-contract.ts`
 
-Estrutura alvo dos processos (de [`TECHNICAL_SPECIFICATION.md`](docs/TECHNICAL_SPECIFICATION.md) §3.2):
-main process (Node: ciclo de vida, menus, FS) · renderer (Chromium: apresentação) ·
-workers (tokenização, diffing, recálculo do buffer).
+Estrutura dos processos (de [`TECHNICAL_SPECIFICATION.md`](docs/TECHNICAL_SPECIFICATION.md) §3.2):
+main process (Node: ciclo de vida, FS, IPC) · renderer (Chromium: apresentação) ·
+workers (`worker_threads`: varredura de linhas, indexação, I/O).
 
-**Pronto quando:** `src/` compila e roda um editor que satisfaz o **Core do MVP** (abrir → editar →
-salvar, com as 7 caixas do topo desta página marcadas ✅). 🎉
+```bash
+npm install                  # Electron 38 + TS + vitest + eslint + esbuild
+npm run typecheck && npm test && npm run lint
+npm run start                # ou start:headless, sem display
+```
+
+**Estado:** o scaffold **compila, testa e sobe** (`electron .` boota e loga
+`Scribe: MainThreadBusy {...}`). O **Core do MVP** ainda **não** está satisfeito — falta a fatia
+vertical (abrir arquivo real → editar → salvar); é o item **P2.4** no
+[`docs/BACKLOG.md`](docs/BACKLOG.md).
 
 ---
 
 ## 📍 Onde estamos agora
 
 **Estado em uma linha:** ambiente ✅ · binário-alvo **100% analisável** ✅ ·
-Track A (API Python + IPC) ✅ · **Fase 1 FECHADA** (P1.1–P1.6 ✅) · **Fase 2 ✅** (P2.1: 6 docs de arquitetura, 61 decisões).
+Track A (API Python + IPC) ✅ · **Fase 1 FECHADA** (P1.1–P1.6 ✅) · **Fase 2 ✅** (P2.1: 6 docs de arquitetura, 61 decisões) · **Fase 3 ✅** (P2.2: scaffold `src/` do **Scribe** — compila, testa e sobe) · **próximo: P2.4**.
 
 | Frente | Status |
 |---|---|
@@ -369,7 +382,7 @@ Track A (API Python + IPC) ✅ · **Fase 1 FECHADA** (P1.1–P1.6 ✅) · **Fase
 | **Fase 1** — buffer, concorrência, IPC/opcodes, render, empacotamento, ledger | ✅ **fechada** (P1.1 ✅ · P1.2 ✅ · P1.3 ✅ · P1.4 ✅ · P1.5 ✅ · P1.6 ✅) |
 | **Fase 2** — spec abstrata (`docs/architecture/`) | ✅ **fechada** (P2.1 ✅: `01`–`06` + README; 61 decisões `DEC-*`) |
 | **P2.3** — nome do projeto **Scribe** | ✅ decidido (aplicado nas specs e em `docs/architecture/`) |
-| **Fase 3** — o editor em Electron/TS (`src/`) | ⬜ não começou (**próximo**: P2.2) |
+| **Fase 3** — o editor em Electron/TS (`src/`) | ✅ **scaffold entregue** (P2.2 ✅: 6 módulos de core + costura main↔core↔renderer + build; `npm test` 250 testes · `electron .` sobe) — **próximo**: P2.4 (fatia vertical: abrir → editar → salvar) |
 
 > 🔄 **Fontes vivas:** [`docs/HANDOFF.md`](docs/HANDOFF.md) (como retomar, pegadinhas operacionais) e
 > [`docs/BACKLOG.md`](docs/BACKLOG.md) (fases P0/P1/P2/P3 e status de cada item). Este README é um
@@ -395,6 +408,7 @@ Track A (API Python + IPC) ✅ · **Fase 1 FECHADA** (P1.1–P1.6 ✅) · **Fase
 | [`docs/analysis/evidence-index.md`](docs/analysis/evidence-index.md) | **Índice consolidado de evidências (P1.5)**: as **179 linhas** dos 7 ledgers da Fase 1 num único namespace (`BUF-`/`CON-`/`PY-`/`HOST-`/`IPC-`/`REN-`/`PKG-`), com `conclusão → Evidence ID → tipo → limites`, duplicatas/supersessões e **48 incógnitas** consolidadas |
 | [`docs/architecture/README.md`](docs/architecture/README.md) | **Índice da Fase 2 (P2.1)**: arquitetura em um olhar (3 fronteiras do alvo → mapeamento Electron/TS), glossário canônico de componentes, registro de **61 decisões `DEC-*`** e rastreabilidade global Fase 1 → Fase 2 |
 | [`docs/architecture/01-buffer-e-edicao.md`](docs/architecture/01-buffer-e-edicao.md) · [`02-concorrencia-e-scheduling.md`](docs/architecture/02-concorrencia-e-scheduling.md) · [`03-extensao-e-ipc.md`](docs/architecture/03-extensao-e-ipc.md) · [`04-render-e-ui.md`](docs/architecture/04-render-e-ui.md) · [`05-empacotamento-e-recursos.md`](docs/architecture/05-empacotamento-e-recursos.md) · [`06-padroes-transversais.md`](docs/architecture/06-padroes-transversais.md) | **Spec abstrata (Fase 2)**: buffer · concorrência · extensão/IPC · render · empacotamento · padrões transversais — cada afirmação cita Evidence IDs; escolhas nossas marcadas |
+| [`docs/scaffold/`](docs/scaffold/) | **Scaffold `src/` (Fase 3 / P2.2)**: convenções, donos e costuras congeladas ([`00-convencoes-e-costuras.md`](docs/scaffold/00-convencoes-e-costuras.md)) + doc do entregável ([`P2.2-scaffold.md`](docs/scaffold/P2.2-scaffold.md)) — estrutura, rastreabilidade `DEC-*` → código e gates medidos |
 | [`bin/ghidra-preanalyze.sh`](bin/ghidra-preanalyze.sh) | Pré-análise headless em projeto persistente (sem deadline) — o "reprocessar sem reanalisar" |
 | [`setup/versions.env`](setup/versions.env) | Versões, URLs e SHA-256 **pinados** (fonte única de verdade do setup) |
 

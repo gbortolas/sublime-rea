@@ -103,7 +103,11 @@ próximo trabalho é a **Fase 2** (P2.1).
 ## 📄 P2 — Fases 2 e 3 do projeto
 
 > **Fase 2 (P2.1) ✅ fechada** (2026-10-16) — spec abstrata em [`docs/architecture/`](architecture/)
-> (6 docs + README, **61 decisões `DEC-*`**). **Próximo:** P2.2 (scaffold `src/`).
+> (6 docs + README, **61 decisões `DEC-*`**). **Fase 3 (P2.2) ✅ fechada** (2026-10-16) — o scaffold
+> `src/` do **Scribe** está de pé, com as costuras congeladas em `src/shared/**` e os 6 módulos de
+> `src/core/**` implementados e testados
+> ([`docs/scaffold/P2.2-scaffold.md`](scaffold/P2.2-scaffold.md)). **Próximo:** **P2.4** (fatia
+> vertical end-to-end).
 
 - [x] **P2.1 — Fase 2** ✅ entregue: [`docs/architecture/`](architecture/) (README + `01`–`06`).
       Síntese clean-room dos padrões em **6 docs** com **61 decisões `DEC-*`** (BUF 10 · CON 12 ·
@@ -111,16 +115,48 @@ próximo trabalho é a **Fase 2** (P2.1).
       rastreabilidade** `conclusão (Evidence) → DEC → status`; glossário canônico de componentes e
       mapa do alvo → Electron/TS. Cada doc marca as **divergências deliberadas** e as incógnitas
       (`U*`) que o afetam.
-- [ ] **P2.2 — Fase 3:** scaffold `src/` Electron + TypeScript ← **próximo** (seguir a spec da
-      Fase 2 em [`docs/architecture/`](architecture/)):
-      - [ ] `PieceTable`/`Rope` em TS (zero-copy/minimal-copy)
-      - [ ] Worker Threads para operações de buffer e parsing pesado
-      - [ ] Renderização por Canvas 2D / WebGPU com scroll virtualizado
-      - [ ] API de extensão tipada + protocolo IPC
+- [x] **P2.2 — Fase 3: scaffold `src/`** ✅ entregue (2026-10-16) — doc do entregável:
+      [`docs/scaffold/P2.2-scaffold.md`](scaffold/P2.2-scaffold.md) · convenções e costuras:
+      [`docs/scaffold/00-convencoes-e-costuras.md`](scaffold/00-convencoes-e-costuras.md).
+      Os 6 módulos de `src/core/**` foram escritos **cada um contra o seu doc da Fase 2**, com as
+      costuras congeladas em `src/shared/**` (resolvendo as divergências de contrato entre docs) e a
+      costura final em `src/core/editor/**` + `src/main/**`/`src/preload/**`/`src/renderer/**`:
+      - [x] **`PieceTable`/`Rope` em TS (minimal-copy)** ✅ — `src/core/buffer/piece-table.ts`
+            (segmentado: `original` + buffer `add` + lista de spans; `flushChunk`; coalescing de spans
+            adjacentes) + `line-index.ts` (índice de linhas incremental) + `delta.ts` (delta
+            UTF-16 + **inversão** para undo) + `store.ts`/`buffer.ts`/`registry.ts` (handles com
+            geração anti-ABA). **Undo por delta inverso** em `src/core/command/` (`undo-stack.ts`,
+            grupos/glue, soft undo).
+      - [x] **Worker Threads para buffer e parsing pesado** ✅ — `src/core/concurrency/`
+            (`scheduler.ts` com lanes `input|edit|layout|background` e `Atomics.waitAsync`,
+            `pool.ts` sobre `worker_threads` com lanes `io|index|fileRead` e teto
+            `min(setting, cpus − 1)`, `worker-entry.ts`, `counters.ts`). O texto atravessa por
+            `text.register` e o resultado carrega a **`generation`** (obsoleto é descartado).
+      - [x] **Canvas 2D / WebGPU com scroll virtualizado** ✅ — `src/core/render/`
+            (`pipeline.ts` com as invariantes de frame e os tetos 8192/128, `canvas2d-backend.ts`,
+            `webgpu-backend.ts` + WGSL, `atlas.ts` RGBA8 1024/4096, `viewport.ts` com damage
+            coalescido) e `src/renderer/main.ts` (IIFE, degrada para demo sem ponte). Default de
+            fábrica continua **CPU/Canvas2D**.
+      - [x] **API de extensão tipada + protocolo IPC** ✅ — `src/core/extension/`
+            (`ops.ts` com tabela densa + `OPS_HASH`, `bridge.ts` com request/response por `id` e
+            cancelamento, `host.ts` com `utilityProcess` + handshake/FSM, `api-facade.ts`),
+            `src/shared/extension-contract.ts` e `src/shared/ipc-contract.ts` (contrato
+            main ↔ renderer **versionado**, `IPC_VERSION`).
 - [x] **P2.3 — Nome do projeto** ✅ **decidido: `Scribe`** (2026-10-16). O editor-alvo chama-se
       **Scribe**; aplicado em `TECHNICAL_SPECIFICATION.md` ("Scribe / High-Performance Electron Text
       Editor Core"), em [`docs/architecture/`](architecture/) e no `README.md`. O repositório segue
       **`sublime-rea`** (nome do repo, não do produto).
+- [ ] **P2.4 — Fase 3.2: primeira fatia vertical end-to-end** ← **próximo**. O scaffold está de pé e
+      o smoke do `electron .` sobe (main loga `Scribe: MainThreadBusy`); falta o app **fazer** algo
+      útil de ponta a ponta:
+      - [ ] **Abrir arquivo real** sem `?file=`: argumento de linha de comando + `dialog` (hoje o
+            renderer só recebe documento com `?file=` no contrato mínimo)
+      - [ ] **Fiar o cancelamento**: o contrato já modela `AbortSignal`/`IpcCancel` mas nenhuma
+            operação longa usa (nada a cancelar ainda)
+      - [ ] **Realce de sintaxe** ponta a ponta: `PackageResolver` → gramática → tokens → `RenderPipeline`
+            (o scaffold tem o consumidor de tokens, não o produtor)
+      - [ ] **Undo/redo visível** (teclas + status bar) sobre o `UndoStack` já testado
+      - [ ] **Busca/substituição** na lane `background` (primeiro uso real de lane não-`input`)
 
 ---
 
@@ -129,8 +165,9 @@ próximo trabalho é a **Fase 2** (P2.1).
 - [~] **P3.1 — `bin/` versionado**: o `.deb` (redundante) **já foi removido e commitado**. Falta
       decidir o `.tar.xz` (22 MB, é a fonte do alvo): `git rm --cached` + download sob demanda com
       SHA pinado no `setup.py`, ou Git LFS.
-- [ ] **P3.2 — Documentar em destaque** que o `rea` CLI exige `source setup/env.sh` em shells
-      não-interativos (não há README na raiz).
+- [x] **P3.2 — Documentar em destaque** que o `rea` CLI exige `source setup/env.sh` em shells
+      não-interativos ✅ **resolvido**: o `README.md` da raiz existe (10 passos, do zero ao MVP) e
+      cobre isso em três lugares (pré-requisitos, Passo 3 e pegadinhas).
 - [ ] **P3.3 — `setup/setup.sh` (bash) legacy**: decidir entre remover ou congelar; está com 9
       etapas (desatualizado em relação ao `setup.py` de 10). Risco de divergência.
 - [ ] **P3.4 — `main.py`**: boilerplate do PyCharm na raiz; remover ou repurpor.

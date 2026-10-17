@@ -16,8 +16,9 @@
 **Estado em uma linha:** ambiente ✅ · binário-alvo **100% analisável** ✅ · Track A (API Python +
 IPC) ✅ · **FASE 1 FECHADA** (P1.1 buffer ✅ · P1.2 concorrência ✅ · P1.3 IPC ✅ · P1.4 render ✅ ·
 P1.5 ledger consolidado ✅ · P1.6 empacotamento ✅) · **FASE 2 FECHADA** (P2.1: `docs/architecture/`,
-6 docs + README, **61 decisões `DEC-*`**) · **falta** só a Fase 3 (o editor em Electron/TS, **P2.2**) —
-codinome decidido: **Scribe** (**P2.3** ✅).
+6 docs + README, **61 decisões `DEC-*`**) · **FASE 3 FECHADA** (P2.2: scaffold `src/` do **Scribe** em
+Electron/TS — 6 módulos de core + costura main↔core↔renderer + build, `docs/scaffold/`) — codinome
+decidido: **Scribe** (**P2.3** ✅) · **próximo: P2.4** (fatia vertical end-to-end).
 
 **✅ Passo operacional resolvido (2026-10-16).** O `setup.py` foi rodado e o MCP `rea` foi relançado
 **já com `REA_GHIDRA_STARTUP_TIMEOUT_MS=900000`** (confirmado em `/proc/*/environ`) — **não** é mais
@@ -31,12 +32,14 @@ python3 setup/setup.py        # idempotente: reescreve setup/env.sh + environmen
 Sem o deadline maior, `open_binary`/`analyze` **via MCP** volta a estourar os 330 s (a análise leva
 ~355 s).
 
-**Próxima tarefa recomendada:** **P2.2 — Fase 3**: criar o scaffold `src/` (Electron + TypeScript)
-**seguindo a spec da Fase 2** ([`docs/architecture/`](architecture/) — 6 docs, **61 decisões `DEC-*`**
-com rastreabilidade `conclusão (Evidence) → DEC → status`). O codinome está decidido — **Scribe**
-(P2.3 ✅). A Fase 3 é **escrita de código do zero**, não análise: o insumo arquitetural está pronto
-nesta pasta. Ordem sugerida: `Buffer`/`TextStore` → `Scheduler`/`TaskPool` → `RenderPipeline`/`Viewport`
-→ `ExtensionBridge`/`ExtensionAPI`.
+**Próxima tarefa recomendada:** **P2.4 — primeira fatia vertical end-to-end** (ver
+[`BACKLOG.md`](BACKLOG.md) §P2): o scaffold está de pé e o smoke do `electron .` sobe (o main loga
+`Scribe: MainThreadBusy`), mas falta o app **fazer** algo útil de ponta a ponta. Ordem sugerida:
+**abrir arquivo real** (CLI/`dialog`; hoje o renderer só recebe documento com `?file=`) → **realce de
+sintaxe** (`PackageResolver` → gramática → tokens → `RenderPipeline`) → **undo/redo visível** (teclas)
+→ **busca** na lane `background`. O código está em `src/`; as convenções e as costuras congeladas estão
+em [`docs/scaffold/00-convencoes-e-costuras.md`](scaffold/00-convencoes-e-costuras.md) — **leia esse
+doc antes de mexer em `src/`**.
 
 > ✅ **Pegadinha resolvida (2026-10-16, P3.9):** o `setup.py` agora **detecta** um JDK ≥ 21
 > compatível (`JAVA_HOME`, PATH, sdkman, `/usr/lib/jvm`) e escreve um **`export JAVA_HOME=…` ativo**
@@ -123,6 +126,9 @@ Pins em [`setup/versions.env`](../setup/versions.env). Docs em [`setup/README.md
     *(Desde P3.9, 2026-10-16, o `env.sh` gerado já exporta o `JAVA_HOME` detectado — verificado.)*
 4. **O `ProjectLocator` do Ghidra recusa path com componente iniciado por `.`** — por isso
    `$REA_TOOLS_DIR` (`~/.local/...`) é acessado via symlink `~/sr-tools` (ver P3.7 no BACKLOG).
+5. **O scaffold (`src/`) exige Node ≥ 20 + npm** — o `setup.py` cuida só do lado Python/Ghidra. Rode
+   `npm install` uma vez; depois `npm run typecheck | test | lint | build | start`. Sem display, use
+   `npm run start:headless` (`xvfb-run`).
 
 ---
 
@@ -306,6 +312,48 @@ alvo → mapeamento **Electron/TS**), **glossário canônico** de componentes (`
 **Clean-room**: nenhum bloco/assembly/pseudocódigo do alvo — só contratos e decisões nossas (marcadas).
 Codinome **Scribe** (decidido em **P2.3** ✅).
 
+### Fase 3 (P2.2) — scaffold `src/` do **Scribe** (Electron + TypeScript)
+
+Doc do entregável: [`docs/scaffold/P2.2-scaffold.md`](scaffold/P2.2-scaffold.md) · regras e costuras:
+[`docs/scaffold/00-convencoes-e-costuras.md`](scaffold/00-convencoes-e-costuras.md).
+
+**Escrita de código do zero** (não é análise). Cada módulo de `src/core/**` foi escrito **contra o seu
+doc da Fase 2**, importando **apenas** `src/shared/**` — a costura entre módulos foi feita **depois**,
+de propósito:
+
+| Diretório | Papel | Doc dono |
+|---|---|---|
+| `src/shared/**` | **costuras congeladas** (handles, descarte, eventos, async + os 7 contratos) | `DEC-TR-*` |
+| `src/core/buffer/**` | `PieceTable` segmentada (minimal-copy), índice de linhas incremental, delta + inversão, `Buffer`, `DocumentRegistry` (handles com geração) | `DEC-BUF-*` |
+| `src/core/command/**` | `CommandBus`, `EditScope` aninhável, undo/redo por **delta inverso** com grupos/glue/soft | `DEC-BUF-*` |
+| `src/core/concurrency/**` | `Scheduler` (lanes + `Atomics.waitAsync`), `TaskPool` sobre `worker_threads`, `worker-entry`, contadores SAB | `DEC-CON-*` |
+| `src/core/render/**` | `RenderPipeline` + `Canvas2DBackend`/`WebGPUBackend` (WGSL), atlas RGBA8, `Viewport` virtualizada com damage | `DEC-REN-*` |
+| `src/core/packages/**` | `PackageResolver` (namespace plano, camadas `user>app>os`, ZIP mínimo, glob) | `DEC-PKG-*` |
+| `src/core/properties/**` | `PropertySystem` + `defineProperty` + merge por camada, JSONC | `DEC-PKG-*`/`DEC-TR-*` |
+| `src/core/extension/**` | `OPS` denso + `OPS_HASH`, `ExtensionBridge` (request por `id`, cancel), `ExtensionHost` (`utilityProcess` + handshake/FSM), `ExtensionAPI` | `DEC-IPC-*` |
+| `src/core/editor/**` | **costura**: `EditorCore` monta registry + bus (fila de escrita única) + scheduler/pool dimensionados pelo `PropertySystem` + resolver | `DEC-TR-*` |
+| `src/main` · `src/preload` · `src/renderer` | processo Node (IPC versionado), ponte `contextBridge` mínima (`sandbox: true`), boot do render (default **CPU/Canvas2D**) | `DEC-IPC-*`/`DEC-REN-*` |
+
+**Decisões de contrato que o digest da Fase 2 deixou em aberto** (shapes conflitantes entre docs) foram
+resolvidas no código e estão tabeladas em
+[`docs/scaffold/00-convencoes-e-costuras.md`](scaffold/00-convencoes-e-costuras.md) §3 — ex.:
+`TextStore` síncrono (`01`) × assíncrono (`02`) → fronteira assíncrona + `PieceTable` interna; camadas
+`platform/installed/packages/user` (`06`) × `os/app/user` (`05`) → **`os`/`app`/`user`**.
+
+**Build** (`scripts/build.mjs`, não é só `tsc`): o `tsc` preserva a árvore em `dist/` porque o
+`TaskPool` resolve o worker por `path.join(__dirname, "worker-entry.js")`; o **renderer** vai por
+esbuild em **IIFE** (CommonJS não roda em `<script>`) e o **preload** em bundle **self-contained**
+(sandbox não deixa `require` de arquivo irmão); HTML/CSS por cópia explícita.
+
+**Gates medidos (2026-10-16):** `npm run lint` exit 0 · `tsc -p tsconfig.json --noEmit` exit 0 ·
+**250 testes / 31 arquivos** verdes · `npm run build` ok · smoke `electron .` **sobe** (main loga
+`Scribe: MainThreadBusy {...}` e o processo permanece vivo; encerrado por timeout). Auditoria
+independente das regras do scaffold (10 itens: imports cruzados, `any`, `catch` mudo, `Atomics.wait`,
+polling, validação de handle, clean-room) → **aderente**, sem bloqueadores.
+
+**Pré-requisito novo de ambiente:** **Node ≥ 20 + npm** (o scaffold usa Node 24) — o `setup.py` **não**
+instala Node. `npm install` traz `electron@38`, `typescript`, `vitest`, `eslint` e `esbuild`.
+
 ---
 
 ## ▶️ Como retomar
@@ -335,10 +383,13 @@ Material de apoio: skill `reverse-engineer-anything` (+ `references/native-and-a
 ## 🗂️ Estado do repositório
 
 - Repo **git** inicializado (não era antes). Working tree limpo (`git log --oneline` para o histórico).
-- `.gitignore` cobre `target/`, `tools/`, `setup/env.sh`, artefatos Ghidra, venvs, etc.
+- `.gitignore` cobre `target/`, `tools/`, `setup/env.sh`, artefatos Ghidra, venvs, `dist/`,
+  `node_modules/`, caches de IDE e `.serena/`.
+- **Stack do scaffold (Fase 3):** `package.json` + `package-lock.json` versionados; `dist/` e
+  `node_modules/` **não**; `npm install` reconstrói o ambiente Node. Scripts: `typecheck`, `test`,
+  `lint`, `build`, `start` (+ `start:headless`).
 - ⚠️ `bin/sublime_text_build_4215_x64.tar.xz` (22 MB) **está versionado** (o `.deb` já foi removido).
   Avaliar `git rm --cached` + download sob demanda com SHA pinado (ver P3.1 no BACKLOG).
-- ⚠️ `.serena/` aparece como untracked (cache do LSP Serena) — falta cobrir no `.gitignore` (P3.8).
 
 ---
 
@@ -355,6 +406,13 @@ Material de apoio: skill `reverse-engineer-anything` (+ `references/native-and-a
 | `setup/env.sh` | gerado; `source` obrigatório para o CLI |
 | `docs/analysis/` | evidências da Fase 1 (Track A + Track B) |
 | `docs/architecture/` | **spec abstrata da Fase 2** (padrões + decisões `DEC-*` do editor-alvo) |
+| `docs/scaffold/` | **Fase 3**: convenções/costuras (`00-…`) + doc do entregável P2.2 |
+| `src/shared/` | costuras congeladas (handles, descarte, eventos, async, contratos) |
+| `src/core/` | módulos do Scribe (buffer, command, concurrency, render, packages, properties, extension, editor) |
+| `src/main`, `src/preload`, `src/renderer` | processo Node (IPC), ponte `contextBridge`, boot do render |
+| `test/` | testes de integração da costura |
+| `scripts/build.mjs` | pipeline de build (tsc + esbuild + assets) |
+| `dist/` | artefato de build (gitignored) |
 | `docs/HANDOFF.md` · `docs/BACKLOG.md` | este doc · backlog vivo |
 
 ---
