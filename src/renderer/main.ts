@@ -2142,37 +2142,36 @@ function attachInputListeners(
     else if (event.key === "End") viewport.scrollTo(line.first + 1_000_000, { animate: true });
     else if (controller !== undefined && controller.current !== undefined && isPrintable(event)) {
       event.preventDefault();
-      void (async () => {
-        const session = controller.current!;
-        const key = event.key;
-        const close = AUTO_PAIRS[key];
+      const session = controller.current;
+      const key = event.key;
+      const close = AUTO_PAIRS[key];
 
-        if (close !== undefined) {
-          // Auto-pair: insere par + volta pro meio
-          await session.bridge.insert(session.handle, session.caret, key + close, "user");
-          session.caret += 1; // fica entre os pares
+      if (close !== undefined) {
+        // Auto-pair: insere par e reposiciona cursor no meio
+        const at = session.caret;
+        void controller.insertText(key + close).then(() => {
+          session.caret = at + 1;
           session.selection = SelectionOps.collapsed(session.caret);
           session.selections = SelectionSetOps.singular(session.caret);
-        } else if (CLOSING.has(key)) {
-          // Se o próximo caractere é o fechamento, só pula (não insere duplicado)
-          const text = session.source.text;
-          if (session.caret < text.length && text[session.caret] === key) {
-            session.caret += 1;
-            session.selection = SelectionOps.collapsed(session.caret);
-            session.selections = SelectionSetOps.singular(session.caret);
-          } else {
-            await session.bridge.insert(session.handle, session.caret, key, "user");
-          }
+          updateCaretStatus(session.source, session.caret);
+          renderer.start();
+        });
+      } else if (CLOSING.has(key)) {
+        // Se o próximo caractere é o fechamento, só pula (não insere duplicado)
+        const text = session.source.text;
+        if (session.caret < text.length && text[session.caret] === key) {
+          session.caret += 1;
+          session.selection = SelectionOps.collapsed(session.caret);
+          session.selections = SelectionSetOps.singular(session.caret);
+          updateCaretStatus(session.source, session.caret);
+          renderer.start();
         } else {
-          // Caractere normal
-          await session.bridge.insert(session.handle, session.caret, key, "user");
-          session.caret += key.length;
-          session.selection = SelectionOps.collapsed(session.caret);
-          session.selections = SelectionSetOps.singular(session.caret);
+          void controller.insertText(key);
         }
-        updateCaretStatus(session.source, session.caret);
-        renderer.start();
-      })();
+      } else {
+        // Caractere normal — controller.insertText já atualiza source + viewport
+        void controller.insertText(key);
+      }
       return;
     } else return;
     event.preventDefault();
