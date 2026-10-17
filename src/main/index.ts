@@ -11,13 +11,22 @@
  * **dinâmico**, dentro de `startMainProcess()`, que só roda quando o processo é o Electron
  * (`process.versions.electron`) — por isso este módulo é importável em `node`/vitest.
  */
-import { join } from "node:path";
+import { statSync } from "node:fs";
+import { join, resolve } from "node:path";
 import type { BrowserWindow as ElectronBrowserWindow } from "electron";
 
 import { createNodeFileSystem } from "../core/buffer";
 import { createEditorCore as composeEditorCore } from "../core/editor";
 import type { EditorCore, EditorCoreOptions } from "../core/editor";
-import { IPC_CHANNEL, IPC_VERSION, IpcProtocolError, parseIpcRequest, toDisposable } from "../shared";
+import {
+  IPC_CHANNEL,
+  IPC_VERSION,
+  IpcProtocolError,
+  isAbortError,
+  parseIpcCancel,
+  parseIpcRequest,
+  toDisposable,
+} from "../shared";
 import type {
   Disposable,
   DocumentHandle,
@@ -58,6 +67,107 @@ export interface IpcEventBroadcaster {
 }
 
 /**
+ * Mapa `signalId → AbortController` do main (DEC-IPC-9). O renderer manda um `signalId` junto do
+ * request; um envelope `IpcCancel` com o mesmo `signalId` aborta a operação em voo. Um controller
+ * por `signalId`, liberado ao terminar (ou no cancel).
+ */
+export interface IpcSignalRegistry {
+  /** Cria/renova o controller do `signalId` e devolve o `AbortSignal` da operação. */
+  create(signalId: number): AbortSignal;
+  /** Aborta a operação do `signalId` (no-op se já terminou/abortou). */
+  abort(signalId: number): void;
+  /** Libera o controller do `signalId` (chamado no `finally` do request). */
+  release(signalId: number): void;
+  /** Quantos controllers continuam em voo (observabilidade/teste). */
+  readonly pending: number;
+}
+
+export function createIpcSignalRegistry(): IpcSignalRegistry {
+  const controllers = new Map<number, AbortController>();
+  return {
+    create(signalId: number): AbortSignal {
+      const existing = controllers.get(signalId);
+      if (existing !== undefined && !existing.signal.aborted) existing.abort("substituído");
+      const controller = new AbortController();
+      controllers.set(signalId, controller);
+      return controller.signal;
+    },
+    abort(signalId: number): void {
+      const controller = controllers.get(signalId);
+      if (controller !== undefined && !controller.signal.aborted) {
+        controller.abort("cancelado pelo renderer");
+      }
+    },
+    release(signalId: number): void {
+      controllers.delete(signalId);
+    },
+    get pending(): number {
+      return controllers.size;
+    },
+  };
+}
+
+/** Port mínimo de diálogo de arquivo do main (produção = `dialog.showOpenDialog` do Electron). */
+export interface FileDialogPort {
+  showOpenDialog(): Promise<string | null>;
+}
+
+/** Dependências injetadas no despacho de IPC (tudo opcional — os testes passam o que precisam). */
+export interface IpcHandlerDeps {
+  readonly signals?: IpcSignalRegistry;
+  readonly dialog?: FileDialogPort;
+}
+
+/** `true` quando o envelope é um `IpcCancel` (push de cancelamento, não um request). */
+export function isCancelEnvelope(value: unknown): boolean {
+  return (
+    typeof value === "object" &&
+    value !== null &&
+    (value as { kind?: unknown }).kind === "cancel"
+  );
+}
+
+/** Predicado de arquivo existente para o filtro de argv (injetável em teste). */
+export type FileProbe = (path: string) => boolean;
+
+/** Predicado de produção: existe e é arquivo comum (nunca lança). */
+export const isExistingFile: FileProbe = (path: string): boolean => {
+  try {
+    return statSync(path).isFile();
+  } catch {
+    return false;
+  }
+};
+
+/**
+ * Extrai o caminho de documento dos argumentos do processo (CLI/`open-file`).
+ *
+ * Heurística (escolha nossa): o **último** argumento que **não** começa com `-`, não é um dos
+ * `ignore` (em dev o Electron injeta `.`, o diretório do app e o binário) e **aponta para um
+ * arquivo existente**. Sem nenhum candidato, devolve `undefined`.
+ */
+export function extractDocumentPath(
+  argv: readonly string[],
+  isFile: FileProbe,
+  ignore: readonly string[] = [],
+): string | undefined {
+  let found: string | undefined;
+  for (const arg of argv) {
+    if (arg.length === 0) continue;
+    if (arg.startsWith("-")) continue;
+    if (ignore.includes(arg)) continue;
+    if (!isFile(arg)) continue;
+    found = arg;
+  }
+  return found;
+}
+
+/** Normaliza um candidato de argv para caminho absoluto (ou `undefined`). */
+function toAbsoluteDocumentPath(path: string | undefined): string | undefined {
+  return path === undefined ? undefined : resolve(path);
+}
+
+/**
  * Cria o `EditorCore` do processo principal, injetando o `FileSystem` de produção
  * (`node:fs/promises`). Continua utilizável sem Electron (o `FileSystem` é a única I/O).
  */
@@ -75,7 +185,12 @@ export function registerIpcHandlers(
   core: EditorCore,
   ipc: MainIpcHost,
   events: IpcEventBroadcaster,
+  deps: IpcHandlerDeps = {},
 ): Disposable {
+  const signals = deps.signals ?? createIpcSignalRegistry();
+  const handlerDeps: IpcHandlerDeps =
+    deps.dialog !== undefined ? { signals, dialog: deps.dialog } : { signals };
+
   const subscription = core.onDocumentChanged((event) => {
     const envelope: IpcEventEnvelope<"document.changed"> = {
       v: IPC_VERSION,
@@ -84,7 +199,19 @@ export function registerIpcHandlers(
     };
     events.broadcast(IPC_CHANNEL.event, envelope);
   });
-  ipc.handle(IPC_CHANNEL.request, (_event, raw) => handleIpcRequest(core, raw));
+  ipc.handle(IPC_CHANNEL.request, (_event, raw) => {
+    // O cancelamento chega no mesmo canal, mas é um push sem resposta (DEC-IPC-9).
+    if (isCancelEnvelope(raw)) {
+      try {
+        signals.abort(parseIpcCancel(raw).signalId);
+      } catch (error) {
+        // Envelope malformado num push: não há resposta; registra e segue (DEC-TR-5).
+        console.error("Scribe: cancelamento IPC inválido", messageOf(error));
+      }
+      return undefined;
+    }
+    return handleIpcRequest(core, raw, handlerDeps);
+  });
   return toDisposable(() => {
     subscription.dispose();
     ipc.removeHandler(IPC_CHANNEL.request);
@@ -96,7 +223,11 @@ export function registerIpcHandlers(
  * envelope inválido ou um método desconhecido produzem `ok: false` com `code` estável — **nunca**
  * silencioso (DEC-TR-5). Exportada para teste (não toca Electron).
  */
-export async function handleIpcRequest(core: EditorCore, raw: unknown): Promise<IpcResponse> {
+export async function handleIpcRequest(
+  core: EditorCore,
+  raw: unknown,
+  deps: IpcHandlerDeps = {},
+): Promise<IpcResponse> {
   let request: IpcRequest;
   try {
     request = parseIpcRequest(raw);
@@ -108,23 +239,51 @@ export async function handleIpcRequest(core: EditorCore, raw: unknown): Promise<
       error: { code: errorCode(error, "invalid-envelope"), message: messageOf(error) },
     };
   }
+
+  const signalId = request.signalId;
+  const signal = signalId !== undefined ? deps.signals?.create(signalId) : undefined;
   try {
-    const value = await dispatchIpc(core, request);
+    const value = await dispatchIpc(core, request, deps, signal);
     return { v: IPC_VERSION, id: request.id, ok: true, value };
   } catch (error) {
+    if (signal?.aborted === true || isAbortError(error)) {
+      // Cancelamento é resultado previsível: código estável, sem vazar stack (DEC-TR-5).
+      return {
+        v: IPC_VERSION,
+        id: request.id,
+        ok: false,
+        error: { code: "cancelled", message: "operação cancelada" },
+      };
+    }
     return {
       v: IPC_VERSION,
       id: request.id,
       ok: false,
       error: { code: errorCode(error, "dispatch-failed"), message: messageOf(error) },
     };
+  } finally {
+    if (signalId !== undefined) deps.signals?.release(signalId);
   }
 }
 
-async function dispatchIpc(core: EditorCore, request: IpcRequest): Promise<unknown> {
+async function dispatchIpc(
+  core: EditorCore,
+  request: IpcRequest,
+  deps: IpcHandlerDeps,
+  signal: AbortSignal | undefined,
+): Promise<unknown> {
   switch (request.method) {
     case "document.open":
-      return core.openDocument(requireString(request.args[0], "document.open", "path"));
+      return core.openDocument(requireString(request.args[0], "document.open", "path"), signal);
+    case "document.openDialog": {
+      if (deps.dialog === undefined) {
+        throw new IpcProtocolError(
+          "dialog-unavailable",
+          "document.openDialog: nenhum diálogo foi injetado",
+        );
+      }
+      return deps.dialog.showOpenDialog();
+    }
     case "document.text":
       return core.documentText(requireHandle(request.args[0], "document.text"));
     case "document.revision":
@@ -136,6 +295,12 @@ async function dispatchIpc(core: EditorCore, request: IpcRequest): Promise<unkno
       const origin = request.args[3] === "plugin" ? "plugin" : "user";
       return core.insertText(handle, at, text, origin);
     }
+    case "editor.undo":
+      return core.undoDocument(requireHandle(request.args[0], "editor.undo"));
+    case "editor.redo":
+      return core.redoDocument(requireHandle(request.args[0], "editor.redo"));
+    case "editor.undoState":
+      return core.undoStateOf(requireHandle(request.args[0], "editor.undoState"));
     case "editor.snapshot":
       return core.snapshot();
     default:
@@ -202,7 +367,7 @@ function packageRoots(appPath: string, userData: string): Partial<Record<Resourc
  */
 export async function startMainProcess(): Promise<void> {
   const electron = await import("electron");
-  const { app, BrowserWindow, ipcMain } = electron;
+  const { app, BrowserWindow, dialog, ipcMain } = electron;
 
   if (!app.requestSingleInstanceLock()) {
     app.quit();
@@ -215,6 +380,14 @@ export async function startMainProcess(): Promise<void> {
   let metricsTimer: NodeJS.Timeout | null = null;
   let shuttingDown = false;
 
+  // Documento vindo da CLI (ex.: `electron . notas.txt`). `open-file` (macOS) pode chegar antes da
+  // janela existir; guardamos o último e o consumimos na criação. Em dev, o Electron injeta `.`,
+  // o diretório do app e o binário — descartamos os três.
+  const ignoredArgv = [".", app.getAppPath(), process.execPath];
+  let pendingDocumentPath: string | undefined = toAbsoluteDocumentPath(
+    extractDocumentPath(process.argv, isExistingFile, ignoredArgv),
+  );
+
   const events: IpcEventBroadcaster = {
     broadcast: (channel, payload) => {
       for (const window of BrowserWindow.getAllWindows()) {
@@ -223,7 +396,29 @@ export async function startMainProcess(): Promise<void> {
     },
   };
 
-  const createWindow = (): ElectronBrowserWindow => {
+  const signals = createIpcSignalRegistry();
+  const fileDialog: FileDialogPort = {
+    async showOpenDialog(): Promise<string | null> {
+      const result =
+        mainWindow === null || mainWindow.isDestroyed()
+          ? await dialog.showOpenDialog({ properties: ["openFile"] })
+          : await dialog.showOpenDialog(mainWindow, { properties: ["openFile"] });
+      const chosen = result.filePaths[0];
+      return result.canceled || chosen === undefined ? null : chosen;
+    },
+  };
+
+  /** Carrega o `index.html` da casca, injetando o documento como query `file` quando houver. */
+  const loadRenderer = (window: ElectronBrowserWindow, documentPath?: string): void => {
+    const indexHtml = join(__dirname, "../renderer/index.html");
+    if (documentPath === undefined) {
+      void window.loadFile(indexHtml);
+    } else {
+      void window.loadFile(indexHtml, { query: { file: documentPath } });
+    }
+  };
+
+  const createWindow = (documentPath?: string): ElectronBrowserWindow => {
     const window = new BrowserWindow({
       width: 1024,
       height: 768,
@@ -234,7 +429,7 @@ export async function startMainProcess(): Promise<void> {
         sandbox: true,
       },
     });
-    void window.loadFile(join(__dirname, "../renderer/index.html"));
+    loadRenderer(window, documentPath);
     return window;
   };
 
@@ -254,6 +449,17 @@ export async function startMainProcess(): Promise<void> {
   // Liveness legada do host de extensões (a preload continua consumindo `scribe:host:ping`).
   ipcMain.handle(IPC_CHANNELS.ping, () => "pong");
 
+  // macOS: abrir arquivo pelo Finder/`open` com o app já rodando. Guarda o caminho e, se houver
+  // janela, recarrega a casca com a query `file` (o renderer abre o documento no boot).
+  app.on("open-file", (event, path) => {
+    event.preventDefault();
+    const target = resolve(path);
+    pendingDocumentPath = target;
+    if (mainWindow !== null && !mainWindow.isDestroyed()) {
+      loadRenderer(mainWindow, target);
+    }
+  });
+
   app.on("second-instance", () => {
     if (mainWindow === null) return;
     if (mainWindow.isMinimized()) mainWindow.restore();
@@ -266,7 +472,7 @@ export async function startMainProcess(): Promise<void> {
 
   app.on("activate", () => {
     if (BrowserWindow.getAllWindows().length > 0) return;
-    mainWindow = createWindow();
+    mainWindow = createWindow(pendingDocumentPath);
   });
 
   app.on("will-quit", shutdown);
@@ -276,8 +482,11 @@ export async function startMainProcess(): Promise<void> {
   core = await createEditorCore({
     packageRoots: packageRoots(app.getAppPath(), app.getPath("userData")),
   });
-  ipcRegistration = registerIpcHandlers(core, ipcMain, events);
-  mainWindow = createWindow();
+  ipcRegistration = registerIpcHandlers(core, ipcMain, events, {
+    signals,
+    dialog: fileDialog,
+  });
+  mainWindow = createWindow(pendingDocumentPath);
 
   const activeCore = core;
   void activeCore.packagesReady.catch((error: unknown) => {

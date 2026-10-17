@@ -201,12 +201,26 @@ export class DocumentLineSource implements LineSource {
   }
 }
 
+/** Estado de undo/redo que a ponte devolve (espelha `DocumentUndoState` do contrato). */
+interface UndoStateDto {
+  readonly canUndo: boolean;
+  readonly canRedo: boolean;
+  readonly revision: number;
+  readonly caret: number;
+}
+
 /** Superfície do preload consumida pelo renderer (subconjunto de `window.scribe`). */
 interface ScribeBridge {
-  open(path: string): Promise<number>;
+  open(path: string, signalId?: number): Promise<number>;
+  openDialog(): Promise<string | null>;
   text(handle: number): Promise<string>;
   revision(handle: number): Promise<number>;
   insert(handle: number, at: number, text: string, origin?: "plugin" | "user"): Promise<number>;
+  undo(handle: number): Promise<UndoStateDto>;
+  redo(handle: number): Promise<UndoStateDto>;
+  undoState(handle: number): Promise<UndoStateDto>;
+  cancel(signalId: number): void;
+  nextSignalId(): number;
   snapshot(): Promise<unknown>;
   onDocumentChanged(callback: (event: { handle: number; revision: number }) => void): () => void;
 }
@@ -218,6 +232,9 @@ function readBridge(): ScribeBridge | undefined {
     typeof candidate.open === "function" &&
     typeof candidate.text === "function" &&
     typeof candidate.insert === "function" &&
+    typeof candidate.undo === "function" &&
+    typeof candidate.redo === "function" &&
+    typeof candidate.openDialog === "function" &&
     typeof candidate.onDocumentChanged === "function";
   return ready ? (candidate as ScribeBridge) : undefined;
 }
@@ -235,58 +252,156 @@ function documentPath(): string | undefined {
   return fromQuery !== null && fromQuery.length > 0 ? fromQuery : undefined;
 }
 
-async function connectDocument(
-  bridge: ScribeBridge,
-  source: DocumentLineSource,
-  viewport: ViewportImpl,
-  renderer: ScribeRenderer,
-): Promise<DocumentSession | undefined> {
-  const path = documentPath();
-  if (path === undefined) {
-    console.info("Scribe: ponte do preload presente, mas sem ?file= — renderer em modo demo");
-    return undefined;
+/**
+ * Controlador do documento no renderer: mantém a sessão ativa, abre arquivos (boot por `?file=`,
+ * diálogo nativo) e faz undo/redo e digitação — sempre relendo o texto inteiro do documento (o
+ * seam mínimo do slice). A abertura é **cancelável** por `signalId` (DEC-IPC-9): trocar de arquivo
+ * (ou Esc) aborta a abertura anterior.
+ */
+class DocumentController {
+  private session: DocumentSession | undefined;
+  private opening: { readonly signalId: number; readonly path: string } | undefined;
+
+  constructor(
+    private readonly bridge: ScribeBridge,
+    private readonly source: DocumentLineSource,
+    private readonly viewport: ViewportImpl,
+    private readonly renderer: ScribeRenderer,
+  ) {}
+
+  get current(): DocumentSession | undefined {
+    return this.session;
   }
-  try {
-    const handle = await bridge.open(path);
-    const revision = await bridge.revision(handle);
-    source.setText(await bridge.text(handle), revision);
-    viewport.setMetrics({ lineCount: source.lineCount() });
-    const unsubscribe = bridge.onDocumentChanged((event) => {
+
+  /** Aborta a abertura em curso (se houver). `true` = havia uma para cancelar. */
+  cancelOpening(): boolean {
+    const opening = this.opening;
+    if (opening === undefined) return false;
+    this.opening = undefined;
+    this.bridge.cancel(opening.signalId);
+    setDocStatus(`abertura cancelada: ${opening.path}`);
+    return true;
+  }
+
+  /** Abre `path`, cancelando qualquer abertura anterior. `true` = documento ligado. */
+  async open(path: string): Promise<boolean> {
+    this.cancelOpening();
+    const signalId = this.bridge.nextSignalId();
+    this.opening = { signalId, path };
+    setDocStatus(`abrindo: ${path}…`);
+
+    let handle: number;
+    try {
+      handle = await this.bridge.open(path, signalId);
+    } catch (error) {
+      if (this.opening?.signalId === signalId) {
+        this.opening = undefined;
+        setDocStatus(`falha ao abrir: ${path}`);
+        console.warn(`Scribe: falha ao abrir "${path}"`, error);
+      }
+      return false;
+    }
+    if (this.opening?.signalId !== signalId) return false; // cancelado ou substituído
+
+    this.opening = undefined;
+    this.detachSession();
+    const revision = await this.bridge.revision(handle);
+    this.source.setText(await this.bridge.text(handle), revision);
+    this.viewport.setMetrics({ lineCount: this.source.lineCount() });
+    const unsubscribe = this.bridge.onDocumentChanged((event) => {
       if (event.handle !== handle) return;
-      void bridge.text(handle).then((next) => {
-        source.setText(next, event.revision);
-        viewport.setMetrics({ lineCount: source.lineCount() });
-        renderer.start();
+      void this.bridge.text(handle).then((next) => {
+        this.source.setText(next, event.revision);
+        this.viewport.setMetrics({ lineCount: this.source.lineCount() });
+        this.renderer.start();
       });
     });
+    this.session = {
+      bridge: this.bridge,
+      handle,
+      source: this.source,
+      caret: 0,
+      dispose: unsubscribe,
+    };
     setDocStatus(path);
+    updateCaretStatus(this.source, 0);
+    await this.refreshUndoStatus();
+    this.renderer.start();
     console.info(`Scribe: documento ligado via preload "${path}" (handle ${handle})`);
-    return { bridge, handle, source, caret: 0, dispose: unsubscribe };
-  } catch (error) {
-    console.warn("Scribe: falha ao abrir o documento via preload; usando a demo", error);
-    return undefined;
+    return true;
   }
-}
 
-function insertIntoSession(
-  session: DocumentSession,
-  renderer: ScribeRenderer,
-  viewport: ViewportImpl,
-  text: string,
-): void {
-  void session.bridge
-    .insert(session.handle, session.caret, text, "user")
-    .then(async (revision) => {
+  /** Abre o diálogo nativo; se o usuário escolher um arquivo, abre-o. */
+  async openDialog(): Promise<boolean> {
+    const path = await this.bridge.openDialog();
+    if (path === null || path.length === 0) return false;
+    return this.open(path);
+  }
+
+  async undo(): Promise<void> {
+    await this.runHistory("undo");
+  }
+
+  async redo(): Promise<void> {
+    await this.runHistory("redo");
+  }
+
+  /** Digitação mínima: insere no caret e relê o documento. */
+  async insertText(text: string): Promise<void> {
+    const session = this.session;
+    if (session === undefined) return;
+    try {
+      const revision = await session.bridge.insert(session.handle, session.caret, text, "user");
       session.caret += text.length;
       const next = await session.bridge.text(session.handle);
       session.source.setText(next, revision);
-      viewport.setMetrics({ lineCount: session.source.lineCount() });
+      this.viewport.setMetrics({ lineCount: session.source.lineCount() });
       updateCaretStatus(session.source, session.caret);
-      renderer.start();
-    })
-    .catch((error: unknown) => {
+      await this.refreshUndoStatus();
+      this.renderer.start();
+    } catch (error) {
       console.error("Scribe: falha ao inserir texto no documento", error);
-    });
+    }
+  }
+
+  private async runHistory(action: "undo" | "redo"): Promise<void> {
+    const session = this.session;
+    if (session === undefined) return;
+    try {
+      const state =
+        action === "undo"
+          ? await session.bridge.undo(session.handle)
+          : await session.bridge.redo(session.handle);
+      const next = await session.bridge.text(session.handle);
+      session.source.setText(next, state.revision);
+      session.caret = Math.min(state.caret, next.length);
+      this.viewport.setMetrics({ lineCount: session.source.lineCount() });
+      updateCaretStatus(session.source, session.caret);
+      setUndoStatus(state.canUndo, state.canRedo);
+      this.renderer.start();
+    } catch (error) {
+      console.error(`Scribe: falha ao ${action === "undo" ? "desfazer" : "refazer"}`, error);
+    }
+  }
+
+  private async refreshUndoStatus(): Promise<void> {
+    const session = this.session;
+    if (session === undefined) {
+      setUndoStatus(false, false);
+      return;
+    }
+    try {
+      const state = await session.bridge.undoState(session.handle);
+      setUndoStatus(state.canUndo, state.canRedo);
+    } catch {
+      setUndoStatus(false, false);
+    }
+  }
+
+  private detachSession(): void {
+    this.session?.dispose();
+    this.session = undefined;
+  }
 }
 
 // ---- demo (fallback sem documento) --------------------------------------------------------------
@@ -413,6 +528,20 @@ function updateCaretStatus(source: DocumentLineSource, offset: number): void {
   status.textContent = `${position.line + 1}:${position.column + 1}`;
 }
 
+/** Reflete a disponibilidade de undo/redo na status bar (habilitado/desabilitado). */
+function setUndoStatus(canUndo: boolean, canRedo: boolean): void {
+  const undo = document.getElementById("status-undo");
+  if (undo) {
+    undo.textContent = "↶ undo";
+    undo.classList.toggle("disabled", !canUndo);
+  }
+  const redo = document.getElementById("status-redo");
+  if (redo) {
+    redo.textContent = "↷ redo";
+    redo.classList.toggle("disabled", !canRedo);
+  }
+}
+
 /**
  * Boot do renderer. **Guardado**: sem `document`/canvas (ex.: ambiente `node` de teste) devolve
  * `false` **sem** lançar e **sem** agendar frame — o loop nunca sobe fora do navegador.
@@ -470,18 +599,30 @@ export async function bootRenderer(): Promise<boolean> {
   renderer.resize(surface.clientWidth || 800, surface.clientHeight || 600);
 
   const bridge = readBridge();
-  const session =
-    bridge !== undefined ? await connectDocument(bridge, source, viewport, renderer) : undefined;
-  if (session === undefined) {
+  const controller =
+    bridge !== undefined
+      ? new DocumentController(bridge, source, viewport, renderer)
+      : undefined;
+
+  const initialPath = documentPath();
+  let opened = false;
+  if (controller !== undefined && initialPath !== undefined) {
+    opened = await controller.open(initialPath);
+  } else if (bridge !== undefined) {
+    console.info("Scribe: ponte do preload presente, mas sem ?file= — renderer em modo demo");
+  }
+  if (!opened) {
     source.setText(demoText(), 0);
     viewport.setMetrics({ lineCount: source.lineCount() });
-    setDocStatus(bridge === undefined ? "demo (sem preload)" : "demo (sem ?file=)");
+    if (initialPath === undefined) {
+      setDocStatus(bridge === undefined ? "demo (sem preload)" : "demo (sem ?file=)");
+    }
   }
 
   const globalScope = globalThis as { attachLineSource?: (source: LineSource) => void };
   globalScope.attachLineSource = (next: LineSource): void => renderer.attachSource(next);
 
-  attachInputListeners(surface, viewport, renderer, session);
+  attachInputListeners(surface, viewport, renderer, controller);
   window.addEventListener("resize", () => renderer.resize(surface.clientWidth, surface.clientHeight));
   renderer.start();
   return true;
@@ -497,7 +638,7 @@ function attachInputListeners(
   surface: HTMLCanvasElement,
   viewport: ViewportImpl,
   renderer: ScribeRenderer,
-  session: DocumentSession | undefined,
+  controller: DocumentController | undefined,
 ): void {
   const lineHeight = Math.ceil(TEXT_STYLE.sizePx * 1.4);
   const currentLine = (): number => Math.floor(viewport.scrollOffsetPx() / lineHeight);
@@ -512,16 +653,47 @@ function attachInputListeners(
   );
 
   surface.addEventListener("keydown", (event: KeyboardEvent) => {
+    const primary = event.ctrlKey || event.metaKey;
+
+    // Atalhos de documento: Ctrl/Cmd+O (abrir), Ctrl/Cmd+Z (undo), Ctrl/Cmd+Shift+Z / Ctrl/Cmd+Y
+    // (redo) e Esc durante "abrindo…" (cancela a abertura em curso).
+    if (primary && !event.altKey && (event.key === "o" || event.key === "O")) {
+      event.preventDefault();
+      if (controller !== undefined) void controller.openDialog();
+      return;
+    }
+    if (primary && !event.altKey && !event.shiftKey && (event.key === "z" || event.key === "Z")) {
+      event.preventDefault();
+      if (controller !== undefined) void controller.undo();
+      return;
+    }
+    if (
+      primary &&
+      !event.altKey &&
+      ((event.shiftKey && (event.key === "z" || event.key === "Z")) ||
+        event.key === "y" ||
+        event.key === "Y")
+    ) {
+      event.preventDefault();
+      if (controller !== undefined) void controller.redo();
+      return;
+    }
+    if (event.key === "Escape") {
+      if (controller !== undefined && controller.cancelOpening()) {
+        event.preventDefault();
+        return;
+      }
+    }
+
     const page = Math.max(1, Math.floor(surface.clientHeight / lineHeight) - 1);
     const line = viewport.visibleLineRange();
     if (event.key === "PageDown") viewport.scrollTo(currentLine() + page, { animate: true });
     else if (event.key === "PageUp") viewport.scrollTo(currentLine() - page, { animate: true });
     else if (event.key === "Home") viewport.scrollTo(0, { animate: true });
     else if (event.key === "End") viewport.scrollTo(line.first + 1_000_000, { animate: true });
-    else if (session !== undefined && isPrintable(event)) {
+    else if (controller !== undefined && controller.current !== undefined && isPrintable(event)) {
       event.preventDefault();
-      insertIntoSession(session, renderer, viewport, event.key);
-      renderer.start();
+      void controller.insertText(event.key);
       return;
     } else return;
     event.preventDefault();

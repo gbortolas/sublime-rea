@@ -55,3 +55,14 @@ body {
   font-size: 0.8rem;
   font-variant-numeric: tabular-nums;
 }
+
+/* Indicadores de undo/redo: apagados quando indisponíveis (o renderer alterna .disabled). */
+#status-undo,
+#status-redo {
+  font-variant-numeric: normal;
+  transition: opacity 120ms ease-out;
+}
+
+#status-bar .disabled {
+  opacity: 0.35;
+}

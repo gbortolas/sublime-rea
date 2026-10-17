@@ -50,11 +50,24 @@ export interface DocumentChangedEvent {
 }
 
 /**
+ * Estado observável de undo/redo de um documento — é o payload que o renderer usa para atualizar
+ * a status bar (DEC-TR-3). `revision` é a revisão do buffer após a operação; `caret` é a posição
+ * que o `UndoStack` restaurou (o cursor do documento, em code units UTF-16).
+ */
+export interface DocumentUndoState {
+  readonly canUndo: boolean;
+  readonly canRedo: boolean;
+  readonly revision: number;
+  readonly caret: number;
+}
+
+/**
  * Mapa de métodos expostos pelo **main** ao **renderer**. O resultado é o valor da resposta
  * (o transporte é assíncrono: `invoke` devolve `Promise`). A ordem de declaração não é wire.
  */
 export interface IpcMethods {
   "document.open"(path: string): DocumentHandle;
+  "document.openDialog"(): string | null;
   "document.text"(handle: DocumentHandle): string;
   "document.revision"(handle: DocumentHandle): number;
   "document.insert"(
@@ -63,6 +76,9 @@ export interface IpcMethods {
     text: string,
     origin: "plugin" | "user",
   ): number;
+  "editor.undo"(handle: DocumentHandle): DocumentUndoState;
+  "editor.redo"(handle: DocumentHandle): DocumentUndoState;
+  "editor.undoState"(handle: DocumentHandle): DocumentUndoState;
   "editor.snapshot"(): MainThreadBusy;
 }
 
@@ -82,9 +98,13 @@ export type IpcResult<M extends IpcMethodName> = ResultOf<IpcMethods[M]>;
 /** Nomes válidos em tempo de execução (o mapa é só de tipos; isto valida o wire). */
 export const IPC_METHODS = [
   "document.open",
+  "document.openDialog",
   "document.text",
   "document.revision",
   "document.insert",
+  "editor.undo",
+  "editor.redo",
+  "editor.undoState",
   "editor.snapshot",
 ] as const satisfies readonly IpcMethodName[];
 

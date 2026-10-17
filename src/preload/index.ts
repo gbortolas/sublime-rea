@@ -13,7 +13,12 @@
  * - `scribe.host.ping/onReady` → liveness legada do host de extensões.
  */
 import { contextBridge, ipcRenderer } from "electron";
-import type { DocumentChangedEvent, DocumentHandle, MainThreadBusy } from "../shared";
+import type {
+  DocumentChangedEvent,
+  DocumentHandle,
+  DocumentUndoState,
+  MainThreadBusy,
+} from "../shared";
 
 export interface HostReadyInfo {
   readonly apiVersion: string;
@@ -28,7 +33,8 @@ export interface ScribePreloadApi {
     ping(): Promise<"pong">;
     onReady(callback: (info: HostReadyInfo) => void): () => void;
   };
-  open(path: string): Promise<DocumentHandle>;
+  open(path: string, signalId?: number): Promise<DocumentHandle>;
+  openDialog(): Promise<string | null>;
   text(handle: DocumentHandle): Promise<string>;
   revision(handle: DocumentHandle): Promise<number>;
   insert(
@@ -37,6 +43,13 @@ export interface ScribePreloadApi {
     text: string,
     origin?: InsertOrigin,
   ): Promise<number>;
+  undo(handle: DocumentHandle): Promise<DocumentUndoState>;
+  redo(handle: DocumentHandle): Promise<DocumentUndoState>;
+  undoState(handle: DocumentHandle): Promise<DocumentUndoState>;
+  /** Cancela a operação em voo identificada por `signalId` (envelope `IpcCancel`). */
+  cancel(signalId: number): void;
+  /** Gera um `signalId` novo para uma operação cancelável (evita colisão com outros chamadores). */
+  nextSignalId(): number;
   snapshot(): Promise<MainThreadBusy>;
   onDocumentChanged(callback: (event: DocumentChangedEvent) => void): () => void;
 }
@@ -53,6 +66,14 @@ interface RequestEnvelope {
   readonly id: number;
   readonly method: string;
   readonly args: readonly unknown[];
+  readonly signalId?: number;
+}
+
+/** Push de cancelamento (mesmo canal; sem `id`/`method` — o main despacha pelo `kind`). */
+interface CancelEnvelope {
+  readonly v: string;
+  readonly kind: "cancel";
+  readonly signalId: number;
 }
 
 interface ResponseEnvelope {
@@ -70,14 +91,15 @@ interface EventEnvelope {
 }
 
 let requestSeq = 0;
+let signalSeq = 0;
 
 /** Envia um request e desembrulha a resposta; erro remoto vira exceção tipada (nunca silencioso). */
-function call<T>(method: string, args: readonly unknown[]): Promise<T> {
+function call<T>(method: string, args: readonly unknown[], signalId?: number): Promise<T> {
   requestSeq += 1;
-  const envelope: RequestEnvelope = { v: IPC_VERSION, id: requestSeq, method, args };
-  return ipcRenderer
-    .invoke(CHANNEL_REQUEST, envelope)
-    .then((raw: unknown) => unwrap<T>(raw, requestSeq));
+  const id = requestSeq;
+  const envelope: RequestEnvelope =
+    signalId === undefined ? { v: IPC_VERSION, id, method, args } : { v: IPC_VERSION, id, method, args, signalId };
+  return ipcRenderer.invoke(CHANNEL_REQUEST, envelope).then((raw: unknown) => unwrap<T>(raw, id));
 }
 
 function unwrap<T>(raw: unknown, id: number): T {
@@ -102,7 +124,9 @@ const api: ScribePreloadApi = {
       };
     },
   },
-  open: (path: string): Promise<DocumentHandle> => call<DocumentHandle>("document.open", [path]),
+  open: (path: string, signalId?: number): Promise<DocumentHandle> =>
+    call<DocumentHandle>("document.open", [path], signalId),
+  openDialog: (): Promise<string | null> => call<string | null>("document.openDialog", []),
   text: (handle: DocumentHandle): Promise<string> => call<string>("document.text", [handle]),
   revision: (handle: DocumentHandle): Promise<number> =>
     call<number>("document.revision", [handle]),
@@ -112,6 +136,21 @@ const api: ScribePreloadApi = {
     text: string,
     origin: InsertOrigin = "user",
   ): Promise<number> => call<number>("document.insert", [handle, at, text, origin]),
+  undo: (handle: DocumentHandle): Promise<DocumentUndoState> =>
+    call<DocumentUndoState>("editor.undo", [handle]),
+  redo: (handle: DocumentHandle): Promise<DocumentUndoState> =>
+    call<DocumentUndoState>("editor.redo", [handle]),
+  undoState: (handle: DocumentHandle): Promise<DocumentUndoState> =>
+    call<DocumentUndoState>("editor.undoState", [handle]),
+  cancel: (signalId: number): void => {
+    const envelope: CancelEnvelope = { v: IPC_VERSION, kind: "cancel", signalId };
+    // Push: sem resposta correlacionada; engolir a rejeição da ponte é intencional.
+    void ipcRenderer.invoke(CHANNEL_REQUEST, envelope).catch(() => undefined);
+  },
+  nextSignalId: (): number => {
+    signalSeq += 1;
+    return signalSeq;
+  },
   snapshot: (): Promise<MainThreadBusy> => call<MainThreadBusy>("editor.snapshot", []),
   onDocumentChanged: (callback: (event: DocumentChangedEvent) => void): (() => void) => {
     const listener = (_event: unknown, raw: unknown): void => {

@@ -25,6 +25,7 @@ import type {
   DocumentChangedEvent,
   DocumentHandle,
   DocumentRegistry,
+  DocumentUndoState,
   Edit,
   EditOrigin,
   MainThreadBusy,
@@ -35,6 +36,7 @@ import type {
   TaskPool,
 } from "../../shared";
 import {
+  CancellationError,
   DEFAULT_RENDER_BACKEND,
   Emitter,
   PROPERTY_IO_WORKERS,
@@ -123,7 +125,7 @@ export interface EditorCore {
   /** Resolve quando o índice de pacotes terminar (resolvido se não houve raízes). */
   readonly packagesReady: Promise<void>;
 
-  openDocument(path: string): Promise<DocumentHandle>;
+  openDocument(path: string, signal?: AbortSignal): Promise<DocumentHandle>;
   documentText(handle: DocumentHandle): string;
   insertText(
     handle: DocumentHandle,
@@ -132,6 +134,12 @@ export interface EditorCore {
     origin?: "plugin" | "user",
   ): Promise<number>;
   revisionOf(handle: DocumentHandle): number;
+  /** Desfaz a última transação do documento (delega ao `CommandBus`/`UndoStack`). */
+  undoDocument(handle: DocumentHandle): Promise<DocumentUndoState>;
+  /** Refaz a última transação desfeita do documento (par simétrico de `undoDocument`). */
+  redoDocument(handle: DocumentHandle): Promise<DocumentUndoState>;
+  /** Leitura barata do estado de undo/redo (para a status bar), sem mutar nada. */
+  undoStateOf(handle: DocumentHandle): DocumentUndoState;
   onDocumentChanged(cb: (event: DocumentChangedEvent) => void): Disposable;
   /** `MainThreadBusy` do scheduler com as lanes do pool (DEC-CON-10). */
   snapshot(): MainThreadBusy;
@@ -312,6 +320,45 @@ export function createEditorCore(options: EditorCoreOptions = {}): EditorCore {
     return buffer.revision;
   }
 
+  /**
+   * Estado de undo/redo do documento + cursor. A pilha (`UndoStack`) é do `CommandBus`; aqui só
+   * lemos as profundidades (não inventamos API que o núcleo não suporta).
+   */
+  function undoStateOf(handle: DocumentHandle): DocumentUndoState {
+    const buffer = resolveBuffer(handle);
+    const stack = commands.undoStack;
+    return {
+      canUndo: stack.undoDepth > 0,
+      canRedo: stack.redoDepth > 0,
+      revision: buffer.revision,
+      caret: state.caret,
+    };
+  }
+
+  /**
+   * Desfaz/refaz dentro do escopo do documento (espelha `runInsert`): fixa o `pendingHandle` para
+   * que o alvo do `CommandBus` aponte ao documento certo, aplica o inverso pelo `UndoStack` e
+   * devolve o estado observável. Serializado na mesma fila de escrita dos inserts.
+   */
+  async function runHistory(
+    handle: DocumentHandle,
+    action: "undo" | "redo",
+  ): Promise<DocumentUndoState> {
+    assertNotDisposed();
+    resolveBuffer(handle);
+    return enqueue(() => {
+      state.pendingHandle = handle;
+      try {
+        if (action === "undo") commands.undo();
+        else commands.redo();
+      } finally {
+        state.pendingHandle = undefined;
+      }
+      state.activeHandle = handle;
+      return Promise.resolve(undoStateOf(handle));
+    });
+  }
+
   return {
     registry,
     commands,
@@ -321,9 +368,17 @@ export function createEditorCore(options: EditorCoreOptions = {}): EditorCore {
     properties,
     packagesReady,
 
-    async openDocument(path: string): Promise<DocumentHandle> {
+    async openDocument(path: string, signal?: AbortSignal): Promise<DocumentHandle> {
       assertNotDisposed();
+      if (signal?.aborted) {
+        throw new CancellationError(`abertura de "${path}" cancelada antes de começar`);
+      }
       const handle = await registry.open(path);
+      if (signal?.aborted) {
+        // Cancelou durante o I/O: não registra a abertura e libera o documento recém-criado.
+        if (!opened.has(handle)) registry.dispose(handle);
+        throw new CancellationError(`abertura de "${path}" cancelada`);
+      }
       opened.add(handle);
       ensureSubscribed(handle);
       state.activeHandle = handle;
@@ -345,6 +400,18 @@ export function createEditorCore(options: EditorCoreOptions = {}): EditorCore {
 
     revisionOf(handle: DocumentHandle): number {
       return resolveBuffer(handle).revision;
+    },
+
+    undoDocument(handle: DocumentHandle): Promise<DocumentUndoState> {
+      return runHistory(handle, "undo");
+    },
+
+    redoDocument(handle: DocumentHandle): Promise<DocumentUndoState> {
+      return runHistory(handle, "redo");
+    },
+
+    undoStateOf(handle: DocumentHandle): DocumentUndoState {
+      return undoStateOf(handle);
     },
 
     onDocumentChanged(cb: (event: DocumentChangedEvent) => void): Disposable {

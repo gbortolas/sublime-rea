@@ -122,4 +122,65 @@ describe("createEditorCore (integração)", () => {
     core.dispose();
     await expect(core.openDocument("/doc.txt")).rejects.toThrow(EditorCoreDisposedError);
   });
+
+  it("undoDocument desfaz a última transação e redoDocument refaz", async () => {
+    const core = createEditorCore({
+      fileSystem: memoryFs({ "/doc.txt": "abc" }),
+      availableParallelism: 4,
+    });
+    try {
+      const handle = await core.openDocument("/doc.txt");
+      expect(core.undoStateOf(handle)).toMatchObject({ canUndo: false, canRedo: false, revision: 1 });
+
+      await core.insertText(handle, 3, "d", "user");
+      expect(core.documentText(handle)).toBe("abcd");
+      expect(core.undoStateOf(handle).canUndo).toBe(true);
+
+      const undone = await core.undoDocument(handle);
+      expect(core.documentText(handle)).toBe("abc");
+      expect(undone.canUndo).toBe(false);
+      expect(undone.canRedo).toBe(true);
+      expect(undone.revision).toBe(core.revisionOf(handle));
+      expect(Number.isInteger(undone.caret)).toBe(true);
+
+      const redone = await core.redoDocument(handle);
+      expect(core.documentText(handle)).toBe("abcd");
+      expect(redone.canUndo).toBe(true);
+      expect(redone.canRedo).toBe(false);
+    } finally {
+      core.dispose();
+    }
+  });
+
+  it("undo/redo com handle inválido lança erro alto", async () => {
+    const core = createEditorCore({
+      fileSystem: memoryFs({ "/doc.txt": "abc" }),
+      availableParallelism: 4,
+    });
+    try {
+      await core.openDocument("/doc.txt");
+      const bad = 7 as DocumentHandle;
+      await expect(core.undoDocument(bad)).rejects.toThrow(InvalidDocumentHandleError);
+      await expect(core.redoDocument(bad)).rejects.toThrow(InvalidDocumentHandleError);
+      expect(() => core.undoStateOf(bad)).toThrow(InvalidDocumentHandleError);
+    } finally {
+      core.dispose();
+    }
+  });
+
+  it("openDocument com signal já abortado lança CancellationError sem abrir", async () => {
+    const core = createEditorCore({
+      fileSystem: memoryFs({ "/doc.txt": "abc" }),
+      availableParallelism: 4,
+    });
+    try {
+      const controller = new AbortController();
+      controller.abort("teste");
+      await expect(core.openDocument("/doc.txt", controller.signal)).rejects.toThrow(
+        "cancelada",
+      );
+    } finally {
+      core.dispose();
+    }
+  });
 });
