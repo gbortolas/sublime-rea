@@ -289,6 +289,14 @@ async function dispatchIpc(
       return core.documentText(requireHandle(request.args[0], "document.text"));
     case "document.revision":
       return core.revisionOf(requireHandle(request.args[0], "document.revision"));
+    case "document.save": {
+      const handle = requireHandle(request.args[0], "document.save");
+      return core.saveDocument(handle, signal);
+    }
+    case "document.isDirty": {
+      const handle = requireHandle(request.args[0], "document.isDirty");
+      return core.isDirty(handle);
+    }
     case "document.insert": {
       const handle = requireHandle(request.args[0], "document.insert");
       const at = requireNumber(request.args[1], "document.insert", "at");

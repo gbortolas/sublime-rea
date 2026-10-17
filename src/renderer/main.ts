@@ -238,6 +238,7 @@ interface ScribeBridge {
   undo(handle: number): Promise<UndoStateDto>;
   redo(handle: number): Promise<UndoStateDto>;
   undoState(handle: number): Promise<UndoStateDto>;
+  save(handle: number): Promise<void>;
   /**
    * Destaque de sintaxe de um range (opcional de propósito): um preload **mais antigo** que o
    * contrato atual simplesmente não a expõe — o renderer degrada para a cor default, sem crash.
@@ -640,6 +641,7 @@ class DocumentController {
       void this.bridge.text(handle).then((next) => {
         this.source.setText(next, event.revision);
         this.viewport.setMetrics({ lineCount: this.source.lineCount() });
+        setDirtyStatus(true);
         this.renderer.start();
       });
     });
@@ -743,6 +745,18 @@ class DocumentController {
   private detachSession(): void {
     this.session?.dispose();
     this.session = undefined;
+  }
+
+  async save(): Promise<void> {
+    const session = this.session;
+    if (session === undefined) return;
+    try {
+      await session.bridge.save(session.handle);
+      setDirtyStatus(false);
+    } catch (error) {
+      console.error("Scribe: falha ao salvar", error);
+      setDocStatus(`erro ao salvar: ${error instanceof Error ? error.message : String(error)}`);
+    }
   }
 }
 
@@ -878,6 +892,13 @@ function setStatus(text: string): void {
 function setDocStatus(text: string): void {
   const status = document.getElementById("status-doc");
   if (status) status.textContent = text;
+}
+
+function setDirtyStatus(dirty: boolean): void {
+  const el = document.getElementById("status-dirty");
+  if (!el) return;
+  el.textContent = dirty ? "● modificado" : "";
+  el.classList.toggle("dirty", dirty);
 }
 
 function updateCaretStatus(source: DocumentLineSource, offset: number): void {
@@ -1236,6 +1257,11 @@ function attachInputListeners(
     ) {
       event.preventDefault();
       if (controller !== undefined) void controller.redo();
+      return;
+    }
+    if (primary && !event.altKey && !event.shiftKey && (event.key === "s" || event.key === "S")) {
+      event.preventDefault();
+      void controller?.save();
       return;
     }
     if (event.key === "Escape") {

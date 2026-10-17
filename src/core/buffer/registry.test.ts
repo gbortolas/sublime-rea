@@ -20,6 +20,10 @@ class FakeFileSystem implements FileSystem {
     if (content === undefined) throw new Error(`ENOENT: ${path}`);
     return content;
   }
+
+  async writeFile(path: string, data: string): Promise<void> {
+    this.files.set(path, data);
+  }
 }
 
 describe("DocumentRegistryImpl", () => {

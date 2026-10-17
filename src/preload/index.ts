@@ -41,6 +41,8 @@ export interface ScribePreloadApi {
   openDialog(): Promise<string | null>;
   text(handle: DocumentHandle): Promise<string>;
   revision(handle: DocumentHandle): Promise<number>;
+  save(handle: DocumentHandle): Promise<void>;
+  isDirty(handle: DocumentHandle): Promise<boolean>;
   insert(
     handle: DocumentHandle,
     at: number,
@@ -144,6 +146,10 @@ const api: ScribePreloadApi = {
   text: (handle: DocumentHandle): Promise<string> => call<string>("document.text", [handle]),
   revision: (handle: DocumentHandle): Promise<number> =>
     call<number>("document.revision", [handle]),
+  save: (handle: DocumentHandle): Promise<void> =>
+    call<void>("document.save", [handle]),
+  isDirty: (handle: DocumentHandle): Promise<boolean> =>
+    call<boolean>("document.isDirty", [handle]),
   insert: (
     handle: DocumentHandle,
     at: number,

@@ -97,6 +97,7 @@ export interface DocumentState {
   readonly uri: string;
   readonly store: TextStore;
   readonly dirty: boolean;
+  readonly savedRevision: number; // revisão em que foi salvo pela última vez (0 = nunca salvo)
 }
 
 /**

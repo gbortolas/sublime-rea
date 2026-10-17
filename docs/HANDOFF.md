@@ -22,9 +22,7 @@ decidido: **Scribe** (**P2.3** ✅) · **P2.4 FECHADO** (fatia vertical end-to-e
 A/B/C** (`04096ae`: abrir arquivo CLI+`dialog` · undo/redo visível · cancelamento e2e) · ✅ **Slice D**
 (`2a169be`: realce de sintaxe e2e) · ✅ **P2.4b** (achados de revisão do realce corrigidos, mais um bug
 **alto** extra) · ✅ **P2.4c** (busca/substituição na lane `background` — **primeiro uso real** do
-`TaskPool`/`Scheduler`; **423 testes / 43 arquivos**) · ⏳ **próximo: P2.5 — salvar arquivo (`Ctrl/Cmd+S`
-+ estado *dirty*)**, o item #1 do README ("abrir/editar/**salvar** — o mínimo inegociável"), que **ainda
-não existe** (o `TaskKind:"writeFile"` está no pool, mas ninguém o chama).
+`TaskPool`/`Scheduler`; **423 testes / 43 arquivos**) · ✅ **P2.5** (salvar arquivo `Ctrl/Cmd+S` + dirty tracking — lane `io` finalmente usada; escrita atômica tmp+rename; guarda dirty para evitar I/O fútil) · ⏳ **próximo: P3.11 — pintar ocorrências da busca no canvas**
 
 **✅ Passo operacional resolvido (2026-10-16).** O `setup.py` foi rodado e o MCP `rea` foi relançado
 **já com `REA_GHIDRA_STARTUP_TIMEOUT_MS=900000`** (confirmado em `/proc/*/environ`) — **não** é mais
@@ -38,16 +36,7 @@ python3 setup/setup.py        # idempotente: reescreve setup/env.sh + environmen
 Sem o deadline maior, `open_binary`/`analyze` **via MCP** volta a estourar os 330 s (a análise leva
 ~355 s).
 
-**Próxima tarefa recomendada:** **P2.5 — salvar arquivo** (`Ctrl/Cmd+S` + estado *dirty*) — fecha o item
-#1 do `README.md` (*"abrir / editar / **salvar** — o mínimo inegociável"*), que **hoje não existe**: o
-`TaskKind:"writeFile"` está no `TaskPool` (lane `io`) mas **ninguém o chama**; o contrato do buffer já
-expõe `dirty`. Plano completo (e as pegadinhas: `dirty` após undo, escrita atômica no worker, erro
-tipado de I/O) em [`BACKLOG.md`](BACKLOG.md) §P2.5. É o **segundo** uso real de uma lane do pool (a
-primeira foi `index`, na busca) — e a fatia casaria bem com o **residual do P2.4b** (teto de tokenização
-por documento **ou** tokenização em worker com prazo), que continua **aberto** (ver o último bullet do
-§P2.4b). O código está em `src/`; as convenções e as costuras congeladas estão em
-[`docs/scaffold/00-convencoes-e-costuras.md`](scaffold/00-convencoes-e-costuras.md) — **leia esse doc
-antes de mexer em `src/`**.
+**Próxima tarefa recomendada:** **P3.11 — pintar as ocorrências da busca no canvas** (BACKLOG.md §P3.11). Hoje a navegação só move caret + scroll para o match; pintar os spans (e destacar o match "atual") no canvas exige passar as faixas ao `buildInstances`/`RenderPipeline`. O P2.5 fechou o item #1 do README ("abrir / editar / **salvar** — o mínimo inegociável"). O residual do P2.4b (teto de tokenização por documento) continua aberto.
 
 > ✅ **Pegadinha resolvida (2026-10-16, P3.9):** o `setup.py` agora **detecta** um JDK ≥ 21
 > compatível (`JAVA_HOME`, PATH, sdkman, `/usr/lib/jvm`) e escreve um **`export JAVA_HOME=…` ativo**

@@ -72,6 +72,8 @@ export interface IpcMethods {
   "document.openDialog"(): string | null;
   "document.text"(handle: DocumentHandle): string;
   "document.revision"(handle: DocumentHandle): number;
+  "document.save"(handle: DocumentHandle): void;
+  "document.isDirty"(handle: DocumentHandle): boolean;
   "document.insert"(
     handle: DocumentHandle,
     at: number,
@@ -119,6 +121,8 @@ export const IPC_METHODS = [
   "document.openDialog",
   "document.text",
   "document.revision",
+  "document.save",
+  "document.isDirty",
   "document.insert",
   "editor.undo",
   "editor.redo",

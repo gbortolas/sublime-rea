@@ -67,6 +67,11 @@ body {
   opacity: 0.35;
 }
 
+#status-dirty.dirty {
+  color: #e8a838;
+  font-weight: bold;
+}
+
 /*
  * Find bar: flutua no topo à direita do overlay. `pointer-events: auto` reativa o mouse (o overlay
  * é `pointer-events: none`). O atributo `hidden` esconde — o seletor de atributo vence `display:flex`.

@@ -155,6 +155,8 @@ export interface EditorCore {
     origin?: "plugin" | "user",
   ): Promise<number>;
   revisionOf(handle: DocumentHandle): number;
+  saveDocument(handle: DocumentHandle, signal?: AbortSignal): Promise<void>;
+  isDirty(handle: DocumentHandle): boolean;
   /** Gramática resolvida para a extensão do documento; `undefined` se não houver (DEC-PKG-8). */
   grammarForDocument(handle: DocumentHandle): SyntaxGrammar | undefined;
   /** Destaque por linha do range pedido (o renderer consome isto pelo IPC `syntax.highlight`). */
@@ -603,6 +605,8 @@ export function createEditorCore(options: EditorCoreOptions = {}): EditorCore {
     }
     state.activeHandle = handle;
     state.caret = at + text.length;
+    // BLOCKER-1 (P2.5 review): toda edição de usuário suja o documento.
+    registry.setDirty(handle, true);
     return buffer.revision;
   }
 
@@ -641,6 +645,11 @@ export function createEditorCore(options: EditorCoreOptions = {}): EditorCore {
         state.pendingHandle = undefined;
       }
       state.activeHandle = handle;
+      // Blocker-1/P2.5: undo/redo também suja ou limpa o documento.
+      // Compara a revisão atual com a salva — se undo voltou ao texto original, limpa.
+      const buf = resolveBuffer(handle);
+      const savedRev = registry.get(handle)?.savedRevision ?? 0;
+      registry.setDirty(handle, buf.revision !== savedRev);
       return Promise.resolve(undoStateOf(handle));
     });
   }
@@ -689,6 +698,12 @@ export function createEditorCore(options: EditorCoreOptions = {}): EditorCore {
 
     revisionOf(handle: DocumentHandle): number {
       return resolveBuffer(handle).revision;
+    },
+
+    isDirty(handle: DocumentHandle): boolean {
+      const state = registry.get(handle);
+      if (state === undefined) throw new InvalidDocumentHandleError(handle);
+      return state.dirty;
     },
 
     grammarForDocument(handle: DocumentHandle): SyntaxGrammar | undefined {
@@ -781,9 +796,37 @@ export function createEditorCore(options: EditorCoreOptions = {}): EditorCore {
           }
           state.activeHandle = handle;
           state.caret = Math.min(state.caret, buffer.text().length);
+          // Blocker-1 (P2.5 review): replaceAll também suja o documento.
+          registry.setDirty(handle, true);
           return { replaced: edits.length, revision: buffer.revision };
         }),
       );
+    },
+
+    async saveDocument(handle: DocumentHandle, signal?: AbortSignal): Promise<void> {
+      assertNotDisposed();
+      // Risco-3 (P2.5 review): não escreve se o documento não está sujo.
+      if (!this.isDirty(handle)) return;
+      return enqueue(async () => {
+        const buffer = resolveBuffer(handle);
+        const state = this.registry.get(handle);
+        if (state === undefined) throw new InvalidDocumentHandleError(handle);
+
+        if (signal?.aborted) return;
+
+        const text = buffer.text();
+        const encoded = new TextEncoder().encode(text).buffer as ArrayBuffer;
+
+        await pool.run(
+          { kind: "writeFile" as const, path: state.uri, data: encoded },
+          signal !== undefined ? { lane: "io" as const, signal } : { lane: "io" as const },
+        ).done;
+
+        // Marca como não sujo
+        const reg = this.registry as DocumentRegistryImpl;
+        reg.setDirty(handle, false);
+        reg.setSavedRevision(handle, buffer.revision);
+      });
     },
 
     undoDocument(handle: DocumentHandle): Promise<DocumentUndoState> {

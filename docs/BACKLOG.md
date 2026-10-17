@@ -224,17 +224,21 @@ IDs). Cada item vira uma seção da spec técnica abstrata. **Fase 1 FECHADA** �
         **por consistência** (a garantia de "resultado fresco" é do chamador comparar `revision`) — a doc
         foi corrigida para não prometer mais do que ele entrega.
 
-- [ ] **P2.5 — Salvar arquivo (`Ctrl/Cmd+S` + estado *dirty*)** ← **próximo**. Fecha o item #1 do README
-      ("abrir / editar / **salvar** — o mínimo inegociável"), que hoje **não existe**: o `TaskKind:
-      "writeFile"` já está no pool (lane `io`) mas **ninguém o chama**. Plano: `document.save` no IPC →
-      `EditorCore.saveDocument(handle, signal?)` que materializa o texto (`documentText`, O(n)) e grava
-      via `pool.run({kind:"writeFile", …}, {lane:"io"})` — **segundo** uso real de lane (`io`, hoje
-      também intocada); marcar `dirty: false` no buffer/registry (o contrato já expõe `dirty`) e zerar na
-      revisão gravada; `Ctrl/Cmd+S` e indicador na status bar (padrão de `#status-undo`/`#status-redo`);
-      atalho "salvar se sujo" e aviso de perda (trocar de documento com edições não salvas) ficam como
-      decisão da fatia. Cuidado com: `dirty` correto após undo que volta ao texto original (comparar com
-      a revisão salva, não só o flag), escrita **atômica** no worker (tmp + rename) para não truncar o
-      arquivo em caso de falha, e erro tipado de I/O no IPC.
+- [x] **P2.5 — Salvar arquivo (`Ctrl/Cmd+S` + estado *dirty*)** ✅ **fechado** (2026-10-17) — fecha o item #1 do README
+      ("abrir / editar / **salvar** — o mínimo inegociável"). Implementação ponta a ponta:
+      - `document.save` + `document.isDirty` no IPC contract, main handler, preload bridge
+      - `EditorCore.saveDocument(handle, signal?)` que materializa o texto (`buffer.text()`, O(n))
+        e grava via `pool.run({kind:"writeFile", …}, {lane:"io"})` — **segundo** uso real de lane (`io`)
+      - **Escrita atômica** no worker: tmp + rename (mkdtemp → writeFile tmp → rename) — não corrompe
+        o arquivo em caso de falha
+      - **Dirty tracking completo**: `runInsert`, `runHistory` (undo/redo), `replaceAll` e `openDocument`
+        marcam/limpam `dirty` corretamente via `registry.setDirty`/`setSavedRevision`
+      - **Guarda dirty**: `saveDocument` recusa gravar se `isDirty === false`
+      - **savedRevision**: arquivos abertos do disco começam com `savedRevision = buffer.revision`,
+        undo/redo comparam revisão atual com salva para recalcular dirty
+      - **UI**: `#status-dirty` na status bar ("● modificado" laranja), atualizado via `onDocumentChanged`
+      - **Atalho**: `Ctrl/Cmd+S` no listener de teclado do canvas
+      - Gates: typecheck/lint/build exit 0 · **423 testes / 43 arquivos** (baseline 423)
 
 ---
 

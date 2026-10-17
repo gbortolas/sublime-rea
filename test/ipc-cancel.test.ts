@@ -30,6 +30,9 @@ function memoryFs(files: Readonly<Record<string, string>>): FileSystem {
         ? Promise.reject(new Error(`ENOENT: ${path}`))
         : Promise.resolve(text);
     },
+    writeFile: async (_path: string, _data: string): Promise<void> => {
+      // mock em memória — implementação real pode ser adicionada se necessário
+    },
   };
 }
 
@@ -92,7 +95,7 @@ describe("IpcSignalRegistry", () => {
 describe("cancelamento de document.open em voo", () => {
   it("aborta o I/O e devolve erro tipado 'cancelled' (sem stack)", async () => {
     const gate = deferred<string>();
-    const fs: FileSystem = { readFile: (): Promise<string> => gate.promise };
+    const fs: FileSystem = { readFile: (): Promise<string> => gate.promise, writeFile: async () => {} };
     const core = createEditorCore({ fileSystem: fs, availableParallelism: 4 });
     const signals = createIpcSignalRegistry();
     try {
@@ -121,7 +124,7 @@ describe("cancelamento de document.open em voo", () => {
 
   it("trata o envelope IpcCancel no mesmo canal do request (sem resposta)", async () => {
     const gate = deferred<string>();
-    const fs: FileSystem = { readFile: (): Promise<string> => gate.promise };
+    const fs: FileSystem = { readFile: (): Promise<string> => gate.promise, writeFile: async () => {} };
     const core = createEditorCore({ fileSystem: fs, availableParallelism: 4 });
     const signals: IpcSignalRegistry = createIpcSignalRegistry();
     const ipc = new FakeIpcHost();

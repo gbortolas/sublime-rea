@@ -38,6 +38,7 @@ import { LocalTextStore } from "./store";
 /** Port mínimo de I/O de arquivo exigido por `DocumentRegistry.open` (escolha nossa). */
 export interface FileSystem {
   readFile(path: string): Promise<string>;
+  writeFile(path: string, data: string): Promise<void>;
 }
 
 /** Erro alto: não se abre documento sem port de I/O injetado (DEC-TR-5). */
@@ -131,6 +132,9 @@ export class DocumentRegistryImpl implements DocumentRegistry {
     }
 
     const created = this.addDocument(path, text);
+    // Blocker-2 (P2.5 review): o buffer recém-lido do disco começa limpo.
+    // A revisão inicial é 1 (store.generation), então savedRevision precisa bater.
+    this.setSavedRevision(created.handle, created.buffer.revision);
     this.handleByPath.set(path, created.handle);
     this.emitter.fire(created.handle);
     return created.handle;
@@ -178,6 +182,18 @@ export class DocumentRegistryImpl implements DocumentRegistry {
     this.emitter.fire(handle);
   }
 
+  setDirty(handle: DocumentHandle, dirty: boolean): void {
+    const state = this.documents.get(handle);
+    if (state === undefined || !this.isValid(handle)) throw new UnknownDocumentError(handle);
+    (state as { dirty: boolean }).dirty = dirty;
+  }
+
+  setSavedRevision(handle: DocumentHandle, revision: number): void {
+    const state = this.documents.get(handle);
+    if (state === undefined || !this.isValid(handle)) throw new UnknownDocumentError(handle);
+    (state as { savedRevision: number }).savedRevision = revision;
+  }
+
   private addDocument(uri: string, text: string): { handle: DocumentHandle; buffer: BufferImpl } {
     const handle = this.allocate();
     const store = new LocalTextStore(handle, text);
@@ -189,6 +205,7 @@ export class DocumentRegistryImpl implements DocumentRegistry {
       uri,
       store,
       dirty: false,
+      savedRevision: 0,
     });
     return { handle, buffer };
   }
@@ -229,5 +246,6 @@ export async function createNodeFileSystem(): Promise<FileSystem> {
   const fs = await import("node:fs/promises");
   return {
     readFile: (path: string): Promise<string> => fs.readFile(path, "utf8"),
+    writeFile: (path: string, data: string): Promise<void> => fs.writeFile(path, data, "utf8"),
   };
 }

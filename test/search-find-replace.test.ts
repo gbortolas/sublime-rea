@@ -23,6 +23,9 @@ function memoryFs(files: Readonly<Record<string, string>>): FileSystem {
         ? Promise.reject(new Error(`ENOENT: ${path}`))
         : Promise.resolve(text);
     },
+    writeFile: async (_path: string, _data: string): Promise<void> => {
+      // mock em memória
+    },
   };
 }
 

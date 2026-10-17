@@ -14,7 +14,9 @@
  * isso ele **só** importa `node:*` em runtime e usa `import type` para os contratos de
  * `../../shared` (apagados na transpilação). Não adicione import de valor do projeto aqui.
  */
-import { open, readFile, writeFile } from "node:fs/promises";
+import { open, readFile, writeFile, rename, mkdtemp, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { parentPort, workerData } from "node:worker_threads";
 import type {
   DocumentHandle,
@@ -160,7 +162,15 @@ async function executeTask(
       return await readFile(payload.path, "utf8");
     }
     case "writeFile": {
-      await writeFile(payload.path, new Uint8Array(payload.data));
+      // Escrita atômica: tmp + rename para não truncar o arquivo em caso de falha.
+      const tmpDir = await mkdtemp(join(tmpdir(), "scribe-write-"));
+      const tmpPath = join(tmpDir, "tmp");
+      try {
+        await writeFile(tmpPath, new Uint8Array(payload.data));
+        await rename(tmpPath, payload.path);
+      } finally {
+        await rm(tmpDir, { recursive: true, force: true }).catch(() => {});
+      }
       return undefined;
     }
     case "scanLines":
