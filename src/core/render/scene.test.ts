@@ -153,10 +153,10 @@ describe("buildInstances — caret", () => {
       color: 0xffffffff,
       width: 2,
     });
-    expect(scene.rects).toHaveLength(2);
-    expect(scene.rects[1]?.color).toBe(0xffffffff);
-    expect(scene.rects[1]?.rect.h).toBe(20);
-    expect(scene.rects[1]?.rect.y).toBe(24);
+    expect(scene.rects).toHaveLength(3);
+    expect(scene.rects[2]?.color).toBe(0xffffffff);
+    expect(scene.rects[2]?.rect.h).toBe(20);
+    expect(scene.rects[2]?.rect.y).toBe(24);
   });
 
   it("ignora o caret fora do range", () => {

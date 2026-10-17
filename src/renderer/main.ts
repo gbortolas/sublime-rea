@@ -1694,7 +1694,7 @@ function attachInputListeners(
     "wheel",
     (event: WheelEvent) => {
       event.preventDefault();
-      viewport.scrollTo(currentLine() + Math.sign(event.deltaY) * 3);
+      viewport.scrollTo(currentLine() + Math.sign(event.deltaY) * 3, { animate: true });
     },
     { passive: false },
   );

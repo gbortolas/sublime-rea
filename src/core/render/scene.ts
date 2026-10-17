@@ -209,6 +209,19 @@ export function buildInstances(
     }
   }
 
+  // Cursor line highlight (P1#1): fundo sutil na linha do cursor no text area.
+  if (caret && caret.line >= first && caret.line < end) {
+    rects.push({
+      rect: {
+        x: layout.gutterWidth,
+        y: layout.paddingTop + caret.line * layout.lineHeight - layout.scrollOffsetPx,
+        w: layout.viewport.w - layout.gutterWidth - layout.scrollbarWidth,
+        h: layout.lineHeight,
+      },
+      color: lighten(layout.background, 0.03),
+    });
+  }
+
   for (let index = first; index < end; index++) {
     const text = source.line(index);
     const y = layout.paddingTop + index * layout.lineHeight - layout.scrollOffsetPx;
