@@ -7,6 +7,7 @@
   "main": "dist/main/index.js",
   "scripts": {
     "build": "node scripts/build.mjs",
+    "dist": "npm run build && electron-builder",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "lint": "eslint .",
     "test": "vitest run",
@@ -18,6 +19,7 @@
     "@eslint/js": "^9.0.0",
     "@types/node": "^24.0.0",
     "electron": "^38.0.0",
+    "electron-builder": "^26.15.3",
     "esbuild": "^0.25.0",
     "eslint": "^9.0.0",
     "typescript": "^5.6.0",

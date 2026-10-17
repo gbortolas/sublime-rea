@@ -89,6 +89,7 @@ export class FakeTarget implements UndoTarget {
   text = "";
   private cursor = 0;
   private sel: Selection = { anchor: 0, active: 0 };
+  private sels: Selection[] = [{ anchor: 0, active: 0 }];
 
   applyEdits(edits: readonly Edit[], _origin: EditOrigin): void {
     for (const e of edits) {
@@ -111,6 +112,15 @@ export class FakeTarget implements UndoTarget {
 
   setSelection(s: Selection): void {
     this.sel = s;
+  }
+
+  selections(): readonly Selection[] {
+    return this.sels;
+  }
+
+  setSelections(sels: readonly Selection[]): void {
+    this.sels = sels as Selection[];
+    this.sel = sels.length > 0 ? sels[0]! : { anchor: 0, active: 0 };
   }
 }
 

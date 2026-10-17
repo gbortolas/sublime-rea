@@ -123,6 +123,10 @@ export function buildInstances(
   highlight?: SceneHighlight,
   searchHighlight?: SearchHighlight,
   selection?: Selection,
+  /** Cuidados extras para múltiplos cursores (P2#5). */
+  extraCarets?: readonly CaretPosition[],
+  /** Seleções extras para múltiplos cursores (P2#5). */
+  extraSelections?: readonly Selection[],
 ): SceneInstances {
   const rects: RectInstance[] = [
     { rect: layout.viewport, color: layout.background },
@@ -365,6 +369,76 @@ export function buildInstances(
       },
       color: caret.color,
     });
+  }
+
+  // Cuidados extras para múltiplos cursores (P2#5)
+  if (extraCarets) {
+    for (const ec of extraCarets) {
+      if (ec.line >= first && ec.line < end) {
+        rects.push({
+          rect: {
+            x: layout.paddingLeft + caretAdvance(atlas, style, ec.column, spaceAdvance),
+            y: layout.paddingTop + ec.line * layout.lineHeight - layout.scrollOffsetPx,
+            w: ec.width,
+            h: layout.lineHeight,
+          },
+          color: ec.color,
+        });
+      }
+    }
+  }
+
+  // Seleções extras para múltiplos cursores (P2#5)
+  if (extraSelections) {
+    for (const extraSel of extraSelections) {
+      if (SelectionOps.isCollapsed(extraSel)) continue;
+      const { start, end } = SelectionOps.normalized(extraSel);
+      const startPos = source.positionAt(start);
+      const endPos = source.positionAt(Math.max(0, end - 1));
+      const selFirst = Math.max(first, startPos.line);
+      const selLast = Math.min(endPos.line, end - 1, source.lineCount() - 1);
+      for (let line = selFirst; line <= selLast; line++) {
+        const text = source.line(line);
+        const lineStartCol = line === startPos.line ? startPos.column : 0;
+        const lineEndCol = line === endPos.line ? endPos.column : text.length;
+        if (lineStartCol >= lineEndCol) continue;
+        let sx = layout.paddingLeft;
+        let scol = 0;
+        let soff = 0;
+        let selStartX = sx;
+        let selEndX = sx;
+        const targetOff = Math.min(lineEndCol, text.length);
+        while (soff < targetOff) {
+          if (soff === lineStartCol) selStartX = sx;
+          const code = text.codePointAt(soff);
+          if (code === undefined) break;
+          const rune = String.fromCodePoint(code);
+          const size = rune.length;
+          if (rune === "\t") {
+            const stop = layout.tabWidth - (scol % layout.tabWidth);
+            sx += spaceAdvance * stop;
+            scol += stop;
+            soff += size;
+            continue;
+          }
+          const placed = atlas.resolveGlyph(rune, style);
+          sx += placed.advance;
+          scol += 1;
+          soff += size;
+        }
+        selEndX = sx;
+        if (selEndX - selStartX <= 0) continue;
+        rects.push({
+          rect: {
+            x: selStartX,
+            y: layout.paddingTop + line * layout.lineHeight - layout.scrollOffsetPx,
+            w: Math.max(selEndX - selStartX, 0),
+            h: layout.lineHeight,
+          },
+          color: SELECTION_COLOR,
+        });
+      }
+    }
   }
 
   return { rects, glyphs, lines };

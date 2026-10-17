@@ -1,0 +1,84 @@
+name: Release
+
+# Build dos instaladores e publicação numa GitHub Release.
+# Dispara ao push de uma tag v* (ex.: v0.1.0) ou manualmente.
+# Gera: Windows (.exe / nsis) e Linux (AppImage).
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+
+permissions:
+  contents: write # necessário para criar/atualizar a Release
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: ubuntu-22.04
+            target: linux
+          - platform: windows-latest
+            target: windows
+
+    runs-on: ${{ matrix.platform }}
+    timeout-minutes: 60
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "24.14.0"
+          cache: npm
+
+      - name: Setup MSVC (Windows)
+        if: matrix.target == 'windows'
+        uses: ilammy/msvc-dev-cmd@v1
+
+      - name: Install (npm ci)
+        run: npm ci
+
+      # A versão exibida no app vem do "version" do package.json via
+      # app.getVersion(). A tag git é a fonte única da verdade: sincronizamos
+      # o package.json com a tag (vX.Y.Z -> X.Y.Z) antes de empacotar.
+      - name: Sync version from tag
+        shell: bash
+        run: |
+          ref="${{ github.ref_name }}"
+          if [[ "${{ github.ref_type }}" == "tag" && "$ref" =~ ^v[0-9]+\.[0-9]+\.[0-9]+ ]]; then
+            version="${ref#v}"
+            echo "Definindo versão do app a partir da tag: $version"
+            npm version "$version" --no-git-tag-version --allow-same-version
+          else
+            echo "Sem tag semântica (ref=$ref); mantém a versão do package.json."
+          fi
+
+      # Build do bundle e empacotamento com electron-builder.
+      # --publish never: anexamos os artefatos via action-gh-release abaixo.
+      - name: Build & package
+        run: npm run dist -- --publish never
+
+      - name: List artifacts
+        shell: bash
+        run: |
+          echo "=== release/ ==="
+          find release -maxdepth 1 -type f 2>/dev/null || echo "release/ vazio"
+
+      - name: Upload Linux (AppImage)
+        if: matrix.target == 'linux'
+        uses: softprops/action-gh-release@v2
+        with:
+          files: release/*.AppImage
+          tag_name: ${{ github.ref_name }}
+
+      - name: Upload Windows (.exe)
+        if: matrix.target == 'windows'
+        uses: softprops/action-gh-release@v2
+        with:
+          files: release/*.exe
+          tag_name: ${{ github.ref_name }}

@@ -24,7 +24,7 @@ import type { DocumentHandle } from "./handles";
 import type { DocumentHighlight } from "./syntax-contract";
 import type { MainThreadBusy } from "./concurrency-contract";
 import type { ReplaceAllResult, SearchDocumentResult, SearchQuery } from "./search-contract";
-import type { Selection } from "./selection-contract";
+import type { Selection, SelectionSet } from "./selection-contract";
 
 /** Versão do contrato do canal — `"<major>.<minor>"` (DEC-IPC-11: handshake negocia). */
 export type IpcVersion = `${number}.${number}`;
@@ -64,6 +64,7 @@ export interface DocumentUndoState {
   readonly revision: number;
   readonly caret: number;
   readonly selection: Selection;
+  readonly selections: SelectionSet;
 }
 
 /**

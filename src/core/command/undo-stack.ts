@@ -42,6 +42,10 @@ export interface UndoTarget {
   selection(): Selection;
   /** Substitui o estado de seleção. */
   setSelection(s: Selection): void;
+  /** Múltiplas seleções (P2#5). Array vazio = sem cursor. */
+  selections(): readonly Selection[];
+  /** Substitui todas as seleções. */
+  setSelections(sels: readonly Selection[]): void;
 }
 
 export interface UndoRecordOptions {
@@ -52,6 +56,8 @@ export interface UndoRecordOptions {
   readonly caretAfter?: number;
   readonly selectionBefore?: Selection;
   readonly selectionAfter?: Selection;
+  readonly selectionsBefore?: readonly Selection[];
+  readonly selectionsAfter?: readonly Selection[];
 }
 
 export interface UndoStackOptions {
@@ -75,6 +81,8 @@ interface Step {
   caretAfter: number;
   selectionBefore: Selection;
   selectionAfter: Selection;
+  selectionsBefore: readonly Selection[];
+  selectionsAfter: readonly Selection[];
   marked: boolean;
 }
 
@@ -139,6 +147,8 @@ export class UndoStack {
     const caretAfter = opts.caretAfter ?? caretBefore;
     const selectionBefore = opts.selectionBefore ?? { anchor: 0, active: 0 };
     const selectionAfter = opts.selectionAfter ?? selectionBefore;
+    const selectionsBefore = opts.selectionsBefore ?? [selectionBefore];
+    const selectionsAfter = opts.selectionsAfter ?? [selectionAfter];
 
     const top = this.undoSteps[this.undoSteps.length - 1];
     const canMerge =
@@ -153,6 +163,7 @@ export class UndoStack {
       top.label = label;
       top.caretAfter = caretAfter;
       top.selectionAfter = selectionAfter;
+      top.selectionsAfter = selectionsAfter;
       this.softIntentFlag = undefined;
       return;
     }
@@ -168,6 +179,8 @@ export class UndoStack {
       caretAfter,
       selectionBefore,
       selectionAfter,
+      selectionsBefore,
+      selectionsAfter,
       marked: false,
     });
     if (this.undoSteps.length > this.maxDepth) {
@@ -206,6 +219,7 @@ export class UndoStack {
         prev.inverse = invert(prev.edits);
         prev.caretAfter = step.caretAfter;
         prev.selectionAfter = step.selectionAfter;
+        prev.selectionsAfter = step.selectionsAfter;
         prev.label = step.label;
         prev.groupId = undefined;
         prev.marked = false;
@@ -225,6 +239,7 @@ export class UndoStack {
     target.applyEdits(step.inverse, "undo");
     target.setCaret(step.caretBefore);
     target.setSelection(step.selectionBefore);
+    target.setSelections(step.selectionsBefore);
     this.redoSteps.push(step);
     this.softIntentFlag = undefined;
     return true;
@@ -237,6 +252,7 @@ export class UndoStack {
     target.applyEdits(step.edits, step.origin);
     target.setCaret(step.caretAfter);
     target.setSelection(step.selectionAfter);
+    target.setSelections(step.selectionsAfter);
     this.undoSteps.push(step);
     this.softIntentFlag = undefined;
     return true;
@@ -273,6 +289,7 @@ export class UndoStack {
     if (last !== undefined) {
       target.setCaret(last.caretAfter);
       target.setSelection(last.selectionAfter);
+      target.setSelections(last.selectionsAfter);
     }
   }
 

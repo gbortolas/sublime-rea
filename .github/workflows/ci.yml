@@ -1,0 +1,48 @@
+name: CI
+
+# Validação em cada push/PR: typecheck, testes e build do bundle.
+# Não gera instaladores (isso fica para o workflow de release separado).
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+  workflow_dispatch:
+
+# Cancela runs antigos do mesmo branch/PR quando um novo push chega.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "24.14.0"
+          cache: npm
+
+      # Dependências do sistema para módulos nativos (fallback).
+      - name: System deps (fallback de build nativo)
+        run: sudo apt-get update && sudo apt-get install -y build-essential python3
+
+      - name: Install (npm ci)
+        run: npm ci
+
+      - name: Typecheck
+        run: npm run typecheck
+
+      - name: Test
+        run: npm test
+
+      - name: Build
+        run: npm run build
+
+      - name: Verifica artefatos do build
+        run: |
+          test -f dist/main/index.js || { echo "::error::dist/main/index.js ausente"; exit 1; }
+          echo "✓ dist/main/index.js compilado"

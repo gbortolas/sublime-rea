@@ -16,6 +16,7 @@ import {
   DEFAULT_RENDER_BACKEND,
   RENDER_BACKEND_PROPERTY,
   SelectionOps,
+  SelectionSetOps,
   toDisposable,
 } from "../shared";
 import type {
@@ -30,6 +31,7 @@ import type {
   SearchMatch,
   SearchQuery,
   Selection,
+  SelectionSet,
   TextStyle,
 } from "../shared";
 import {
@@ -44,6 +46,7 @@ import {
   WebGPUBackend,
   WebGPUUnavailableError,
   type AtlasSurface,
+  type CaretPosition,
   type GlyphBitmap,
   type GlyphRasterizer,
   type LineLayout,
@@ -291,6 +294,7 @@ interface DocumentSession {
   readonly source: DocumentLineSource;
   caret: number;
   selection: Selection;
+  selections: SelectionSet; // P2#5
   dispose(): void;
 }
 
@@ -658,7 +662,9 @@ class DocumentController {
         if (this.session) {
           this.session.caret = Math.min(this.session.caret, next.length);
           this.session.selection = SelectionOps.collapsed(this.session.caret);
+          this.session.selections = SelectionSetOps.singular(this.session.caret);
           this.renderer.setSelection(this.session.selection);
+          this.renderer.setSelections(this.session.selections);
         }
         setDirtyStatus(true);
         this.renderer.start();
@@ -670,9 +676,11 @@ class DocumentController {
       source: this.source,
       caret: 0,
       selection: SelectionOps.collapsed(0),
+      selections: SelectionSetOps.singular(0), // P2#5
       dispose: unsubscribe,
     };
     this.renderer.setSelection(this.session.selection);
+    this.renderer.setSelections(this.session.selections);
     setDocStatus(path);
     updateCaretStatus(this.source, 0);
     await this.refreshUndoStatus();
@@ -721,7 +729,9 @@ class DocumentController {
       const revision = await session.bridge.insert(session.handle, insertAt, text, "user");
       session.caret = insertAt + text.length;
       session.selection = SelectionOps.collapsed(session.caret);
+      session.selections = SelectionSetOps.singular(session.caret);
       this.renderer.setSelection(session.selection);
+      this.renderer.setSelections(session.selections);
       const next = await session.bridge.text(session.handle);
       session.source.setText(next, revision);
       this.viewport.setMetrics({ lineCount: session.source.lineCount() });
@@ -745,7 +755,9 @@ class DocumentController {
       session.source.setText(next, state.revision);
       session.caret = Math.min(state.caret, next.length);
       session.selection = SelectionOps.collapsed(session.caret);
+      session.selections = SelectionSetOps.singular(session.caret);
       this.renderer.setSelection(session.selection);
+      this.renderer.setSelections(session.selections);
       this.viewport.setMetrics({ lineCount: session.source.lineCount() });
       updateCaretStatus(session.source, session.caret);
       setUndoStatus(state.canUndo, state.canRedo);
@@ -813,6 +825,7 @@ class ScribeRenderer {
   private requestHighlight: ((first: number, count: number) => void) | undefined;
   private searchHighlightValue: SearchHighlight | undefined;
   private currentSelection: Selection | undefined;
+  private currentSelections: SelectionSet | undefined; // P2#5
 
   constructor(
     private readonly canvas: HTMLCanvasElement,
@@ -839,6 +852,14 @@ class ScribeRenderer {
   /** Atualiza a seleção ativa para pintura no próximo frame. */
   setSelection(selection: Selection | undefined): void {
     this.currentSelection = selection;
+  }
+
+  /** Define as múltiplas seleções (P2#5). */
+  setSelections(sels: SelectionSet | undefined): void {
+    this.currentSelections = sels;
+    if (sels !== undefined && sels.length > 0) {
+      this.currentSelection = sels[0];
+    }
   }
 
   attachSource(source: LineSource): void {
@@ -899,21 +920,42 @@ class ScribeRenderer {
       scrollbarTrack: lightenColor(COLORS.background, 0.05),
       scrollbarThumb: lightenColor(COLORS.background, 0.25),
     };
+
+    // Computa carets e seleções extras para multi-cursor (P2#5)
+    const primaryCaret = {
+      line: Math.floor(this.viewport.scrollOffsetPx() / layout.lineHeight),
+      column: 0,
+      color: COLORS.caret,
+      width: 2,
+    };
+    let extraCarets: readonly CaretPosition[] | undefined;
+    let extraSelections: readonly Selection[] | undefined;
+    if (this.currentSelections !== undefined && this.currentSelections.length > 1) {
+      const ec: CaretPosition[] = [];
+      const es: Selection[] = [];
+      // Primeira seleção é a primária (já tratada pelo primaryCaret/currentSelection)
+      for (let si = 1; si < this.currentSelections.length; si++) {
+        const sel = this.currentSelections[si]!;
+        if (!SelectionOps.isCollapsed(sel)) es.push(sel);
+        const pos = this.source.positionAt(sel.active);
+        ec.push({ line: pos.line, column: pos.column, color: COLORS.caret, width: 2 });
+      }
+      if (ec.length > 0) extraCarets = ec;
+      if (es.length > 0) extraSelections = es;
+    }
+
     const scene = buildInstances(
       this.source,
       layout,
       this.atlas,
       this.style,
       range,
-      {
-        line: Math.floor(this.viewport.scrollOffsetPx() / layout.lineHeight),
-        column: 0,
-        color: COLORS.caret,
-        width: 2,
-      },
+      primaryCaret,
       this.highlighter,
       this.searchHighlightValue,
       this.currentSelection,
+      extraCarets,
+      extraSelections,
     );
     this.requestHighlight?.(range.first, range.count);
 
@@ -1370,13 +1412,23 @@ function attachInputListeners(
     col = Math.max(0, Math.min(col, text.length));
     const offset = session.source.offsetOf(line, col);
     mouseDragAnchor = offset;
-    if (event.shiftKey) {
+    if (event.ctrlKey || event.metaKey) {
+      // Ctrl+click: adiciona cursor extra (P2#5)
+      const existing = session.selections;
+      const already = existing.some((s) => s.active === offset);
+      if (!already) {
+        session.selections = [...existing, SelectionOps.collapsed(offset)] as SelectionSet;
+      }
+    } else if (event.shiftKey) {
       session.selection = { anchor: session.selection.anchor, active: offset };
+      session.selections = [session.selection] as SelectionSet;
     } else {
       session.selection = SelectionOps.collapsed(offset);
+      session.selections = SelectionSetOps.singular(offset);
     }
     session.caret = offset;
     renderer.setSelection(session.selection);
+    renderer.setSelections(session.selections);
     updateCaretStatus(session.source, offset);
     renderer.start();
   });
@@ -1400,8 +1452,11 @@ function attachInputListeners(
     col = Math.max(0, Math.min(col, text.length));
     const offset = session.source.offsetOf(clampedLine, col);
     session.selection = { anchor: mouseDragAnchor, active: offset };
+    // Drag colapsa para seleção única
+    session.selections = [session.selection] as SelectionSet;
     session.caret = offset;
     renderer.setSelection(session.selection);
+    renderer.setSelections(session.selections);
     updateCaretStatus(session.source, offset);
     renderer.start();
   });
@@ -1467,7 +1522,9 @@ function attachInputListeners(
         const { start } = SelectionOps.normalized(s);
         session.caret = start;
         session.selection = SelectionOps.collapsed(start);
+        session.selections = SelectionSetOps.singular(start);
         renderer.setSelection(session.selection);
+        renderer.setSelections(session.selections);
         void controller.insertText(""); // insert vazio no start = delete o texto selecionado
         renderer.start();
       }
@@ -1509,12 +1566,15 @@ function attachInputListeners(
       if (event.shiftKey) {
         // Shift+seta: estende a seleção
         session.selection = { anchor: session.selection.anchor, active: newOffset };
+        session.selections = [session.selection] as SelectionSet;
       } else {
         // Seta sem Shift: colapsa a seleção
         session.selection = SelectionOps.collapsed(newOffset);
+        session.selections = SelectionSetOps.singular(newOffset);
       }
       session.caret = newOffset;
       renderer.setSelection(session.selection);
+      renderer.setSelections(session.selections);
       updateCaretStatus(source, newOffset);
       // Scroll para a linha do cursor
       const caretLine = source.positionAt(newOffset).line;
@@ -1537,6 +1597,24 @@ function attachInputListeners(
     } else return;
     event.preventDefault();
     renderer.start();
+  });
+
+  // Drag & drop de arquivo (P2#7): arrastar um arquivo do SO pro canvas abre ele.
+  surface.addEventListener("dragover", (event: DragEvent) => {
+    event.preventDefault();
+    event.dataTransfer!.dropEffect = "copy";
+  });
+
+  surface.addEventListener("drop", async (event: DragEvent) => {
+    event.preventDefault();
+    if (controller === undefined) return;
+    const files = event.dataTransfer?.files;
+    if (files === undefined || files.length === 0) return;
+    const path = (files[0] as { path?: string } | undefined)?.path;
+    // Em Electron, `File.path` contém o caminho real do arquivo no sistema.
+    if (path === undefined || path.length === 0) return;
+    const opened = await controller.open(path);
+    if (opened) findBar?.syncDocument();
   });
 }
 

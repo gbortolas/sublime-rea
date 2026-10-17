@@ -43,6 +43,7 @@ import type {
   SearchQuery,
   SearchResult,
   Selection,
+  SelectionSet,
   SyntaxGrammar,
   TaskPool,
 } from "../../shared";
@@ -55,6 +56,7 @@ import {
   SEARCH_MAX_TEXT_LENGTH,
   SearchInputError,
   SelectionOps,
+  SelectionSetOps,
   parseResourceUri,
 } from "../../shared";
 import { availableParallelism as osAvailableParallelism } from "node:os";
@@ -201,6 +203,7 @@ interface CoreState {
   pendingHandle: DocumentHandle | undefined;
   caret: number;
   selection: Selection;
+  selections: SelectionSet; // P2#5
 }
 
 /** Cache de destaque por documento: linhas, estados de entrada e spans, tudo por revisão. */
@@ -363,7 +366,7 @@ export function createEditorCore(options: EditorCoreOptions = {}): EditorCore {
   const highlightCache = new Map<DocumentHandle, HighlightCacheEntry>();
   const syntaxReady: Promise<void> = packagesReady.then(() => loadGrammars(packages, grammars));
 
-  const state: CoreState = { activeHandle: undefined, pendingHandle: undefined, caret: 0, selection: SelectionOps.collapsed(0) };
+  const state: CoreState = { activeHandle: undefined, pendingHandle: undefined, caret: 0, selection: SelectionOps.collapsed(0), selections: SelectionSetOps.singular(0) };
   const emitter = new Emitter<DocumentChangedEvent>();
   const opened = new Set<DocumentHandle>();
   const subscriptions = new Map<DocumentHandle, Disposable>();
@@ -392,6 +395,13 @@ export function createEditorCore(options: EditorCoreOptions = {}): EditorCore {
       },
       setSelection(s: Selection): void {
         state.selection = s;
+      },
+      selections(): readonly Selection[] {
+        return state.selections;
+      },
+      setSelections(sels: readonly Selection[]): void {
+        state.selections = sels as SelectionSet;
+        state.selection = sels.length > 0 ? sels[0]! : SelectionOps.collapsed(0);
       },
     };
   }
@@ -605,29 +615,60 @@ export function createEditorCore(options: EditorCoreOptions = {}): EditorCore {
     let actualAt = at;
     let removeText: string | undefined;
     try {
-      // Se há seleção não colapsada, substitui o texto selecionado
-      if (!SelectionOps.isCollapsed(state.selection)) {
-        const { start, end } = SelectionOps.normalized(state.selection);
-        actualAt = start;
-        removeText = buffer.text().slice(start, end);
-      }
-      const result = await commands.run(
-        INSERT_COMMAND_ID,
-        { handle, at: actualAt, text, ...(removeText !== undefined ? { remove: removeText } : {}) },
-        { origin, group: `type:${handle}` },
-      );
-      if (!result.handled) {
-        throw new EditorArgumentError(
-          "command-missing",
-          `comando não registrado: ${INSERT_COMMAND_ID}`,
+      if (state.selections.length > 1) {
+        // Multi-cursor: aplica inserção em cada seleção, da última para a primeira (preserva offsets)
+        const sels = [...state.selections].sort((a, b) => b.active - a.active);
+        for (const sel of sels) {
+          const { start, end } = SelectionOps.normalized(sel);
+          const rText = start < end ? buffer.text().slice(start, end) : undefined;
+          const cmdArgs: Record<string, unknown> = { handle, at: start, text };
+          if (rText !== undefined) cmdArgs["remove"] = rText;
+          const result = await commands.run(
+            INSERT_COMMAND_ID,
+            cmdArgs,
+            { origin, group: `type:${handle}` },
+          );
+          if (!result.handled) {
+            throw new EditorArgumentError(
+              "command-missing",
+              `comando não registrado: ${INSERT_COMMAND_ID}`,
+            );
+          }
+        }
+      } else {
+        // Seleção única ou sem cursor: usa o comportamento original (backward compat)
+        if (state.selections.length === 1 && !SelectionOps.isCollapsed(state.selections[0]!)) {
+          const { start, end } = SelectionOps.normalized(state.selections[0]!);
+          actualAt = start;
+          removeText = buffer.text().slice(start, end);
+        }
+        const result = await commands.run(
+          INSERT_COMMAND_ID,
+          { handle, at: actualAt, text, ...(removeText !== undefined ? { remove: removeText } : {}) },
+          { origin, group: `type:${handle}` },
         );
+        if (!result.handled) {
+          throw new EditorArgumentError(
+            "command-missing",
+            `comando não registrado: ${INSERT_COMMAND_ID}`,
+          );
+        }
       }
     } finally {
       state.pendingHandle = undefined;
     }
     state.activeHandle = handle;
-    state.caret = actualAt + text.length;
-    state.selection = SelectionOps.collapsed(state.caret);
+    // Atualiza caret e selections APÓS a inserção
+    if (state.selections.length > 1) {
+      const lastSel = state.selections[state.selections.length - 1]!;
+      state.caret = lastSel.active;
+      state.selection = SelectionOps.collapsed(lastSel.active);
+      state.selections = SelectionSetOps.singular(lastSel.active);
+    } else {
+      state.caret = actualAt + text.length;
+      state.selection = SelectionOps.collapsed(state.caret);
+      state.selections = SelectionSetOps.singular(state.caret);
+    }
     // BLOCKER-1 (P2.5 review): toda edição de usuário suja o documento.
     registry.setDirty(handle, true);
     return buffer.revision;
@@ -646,6 +687,7 @@ export function createEditorCore(options: EditorCoreOptions = {}): EditorCore {
       revision: buffer.revision,
       caret: state.caret,
       selection: state.selection,
+      selections: state.selections,
     };
   }
 
