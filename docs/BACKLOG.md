@@ -294,6 +294,16 @@ IDs). Cada item vira uma seção da spec técnica abstrata. **Fase 1 FECHADA** �
 
 - [x] **Infra — PyCharm run configurations** ✅ **fechado** (2026-10-17). 6 Node.js run configs em `.idea/runConfigurations/`: typecheck, test, build, start, dist, lint.
 
+## 🐛 UX — Issues reportadas (v0.3.1)
+
+Problemas identificados ao testar o AppImage pela primeira vez:
+
+- [ ] **P0 — Demo text pouco convidativo**: o texto de demonstração ("linha de demonstração do pipeline de render") não deixa claro que o app é um editor de verdade. Substituir por um **welcome screen** com atalhos listados (Ctrl+O pra abrir, Ctrl+N pra novo, Ctrl+Shift+T pra tema) + instruções claras.
+- [ ] **P0 — Sem menu bar**: não há File > Open / Save / Save As. O app depende só de atalhos de teclado (Ctrl+O, Ctrl+S) que o usuário não conhece. Adicionar **menu nativo do Electron** (`Menu.buildFromTemplate`) com File, Edit, Selection, Find, View.
+- [ ] **P0 — Aparência "Sublime" genérica**: o Electron window chrome é default (sem custom title bar), sem branding do Scribe. Adicionar **custom title bar** ou ao menos mudar o título da janela e o ícone.
+- [ ] **P1 — Performance dos menus lentos**: menus nativos do Electron com muitos itens podem estar causando lentidão. Investigar e simplificar.
+- [ ] **P1 — Sem indicação de como abrir arquivo**: na primeira execução (sem `--file=`), o app mostra demo text mas não diz "pressione Ctrl+O para abrir um arquivo". Adicionar dica na status bar ou no canvas.
+
 ## 🧹 P3 — Housekeeping / dívidas
 
 - [x] **P3.10 — Bundlar o worker de `TaskPool` no build (matar a duplicação do scanner de busca)** ✅
