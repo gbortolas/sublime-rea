@@ -41,7 +41,7 @@ Features que transformam um brinquedo em ferramenta de trabalho.
 | 6 | **Múltiplos documentos / abas** | G | buffer registry existe | Tabs no topo, troca de documento ativo, fechar/reordenar, estado dirty por tab |
 | 7 | **Drag & drop de arquivo** | P | IPC de abertura | Arrastar arquivo do SO pro canvas abre ele |
 | 8 | **Temas (cores configuráveis)** | P | ThemeResolver existe | Trocar tema por JSON/JSONC, pal clara/escura, reload sem restart |
-| 9 | **Minimap** | G | viewport existe | Mapa reduzido do documento à direita, click navega, render em Canvas separado |
+| 9 | **Minimap** | G | viewport existe | Mapa reduzido do documento à direita, click navega, render em Canvas separado | ✅ |
 
 ## 🥉 P3 — Pós-MVP (features que expandem o escopo)
 
