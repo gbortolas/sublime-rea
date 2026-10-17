@@ -255,6 +255,17 @@ IDs). Cada item vira uma seção da spec técnica abstrata. **Fase 1 FECHADA** �
   - **renderer** — `renderOnce` computa `gutterWidth = dígitos * 9 + 16`, ajusta `paddingLeft` dinamicamente; `COLORS.gutterFg` (#6e6e6e)
   - Gates: typecheck/lint/build exit 0 · **430 testes / 43 arquivos** (baseline 430)
 
+- [x] **P1#3 — Scrollbar proporcional** ✅ **fechado** (2026-10-17). Barra de rolagem vertical à direita do canvas, thumb proporcional ao documento, click no track para navegar. Implementação:
+  - **scene** — `LineLayout.scrollbarWidth/scrollbarTrack/scrollbarThumb`; `buildInstances` pinta track + thumb proporcional (altura = viewportH × (viewportH / totalPx))
+  - **renderer** — `renderOnce` passa scrollbar (width=10px), `lightenColor()` helper; mousedown no track scrolla para a posição proporcional
+  - Gates: typecheck/lint/build exit 0 · **430 testes / 43 arquivos** (baseline 430)
+
+- [x] **P1#4 — Find & Replace UI visual** ✅ **fechado** (2026-10-17). Botões de toggle: case-sensitive (Aa), regex (.*), whole word (\b). Implementação:
+  - **find-bar** — `FindBarState.caseSensitive/regex/wholeWord`; `FindBarModel` com toggles + getters + `query()` propaga flags; `close()` reseta estado
+  - **index.html+CSS** — botões `.find-toggle` com `.active` state, CSS hover/active
+  - **renderer** — `attachFindBar` fia click listeners e atalhos `Ctrl+Alt+C/R/W`
+  - Gates: typecheck/lint/build exit 0 · **430 testes / 43 arquivos** (baseline 430)
+
 ## 🧹 P3 — Housekeeping / dívidas
 
 - [x] **P3.10 — Bundlar o worker de `TaskPool` no build (matar a duplicação do scanner de busca)** ✅

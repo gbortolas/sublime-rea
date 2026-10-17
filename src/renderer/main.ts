@@ -67,6 +67,15 @@ const COLORS = {
   gutterFg: 0x6e6e6eff as RGBA,
 };
 
+/** Clareia uma cor RGBA por um fator (0 = sem mudança, 1 = branco). */
+function lightenColor(color: RGBA, factor: number): RGBA {
+  const r = Math.min(255, Math.round(((color >>> 24) & 0xff) + (255 - ((color >>> 24) & 0xff)) * factor));
+  const g = Math.min(255, Math.round(((color >>> 16) & 0xff) + (255 - ((color >>> 16) & 0xff)) * factor));
+  const b = Math.min(255, Math.round(((color >>> 8) & 0xff) + (255 - ((color >>> 8) & 0xff)) * factor));
+  const a = color & 0xff;
+  return ((r << 24) | (g << 16) | (b << 8) | a) >>> 0;
+}
+
 // ---- rasterização/medição no renderer (fora da main thread seria o ideal — DEC-REN-3) ----------
 
 function fontString(style: TextStyle): string {
@@ -886,6 +895,9 @@ class ScribeRenderer {
       gutterWidth,
       gutterBackground: COLORS.gutter,
       gutterColor: COLORS.gutterFg,
+      scrollbarWidth: 10,
+      scrollbarTrack: lightenColor(COLORS.background, 0.05),
+      scrollbarThumb: lightenColor(COLORS.background, 0.25),
     };
     const scene = buildInstances(
       this.source,
@@ -1145,6 +1157,9 @@ export function attachFindBar(deps: FindBarDeps): FindBarBinding | undefined {
   const replaceButton = document.getElementById("find-replace-all");
   const status = document.getElementById("find-status");
   const closeButton = document.getElementById("find-close");
+  const caseBtn = document.getElementById("find-case");
+  const regexBtn = document.getElementById("find-regex");
+  const wordBtn = document.getElementById("find-word");
   if (
     find === undefined ||
     replaceAll === undefined ||
@@ -1195,6 +1210,10 @@ export function attachFindBar(deps: FindBarDeps): FindBarBinding | undefined {
     }
     // Dispara um novo frame pra pintar os destaques.
     deps.renderer.start();
+    // Botões de toggle: estado ativo dos toggles de busca.
+    caseBtn?.classList.toggle("active", state.caseSensitive);
+    regexBtn?.classList.toggle("active", state.regex);
+    wordBtn?.classList.toggle("active", state.wholeWord);
   };
 
   // Selecionar uma ocorrência move o caret (coluna do início) e rola até a linha dela.
@@ -1235,6 +1254,9 @@ export function attachFindBar(deps: FindBarDeps): FindBarBinding | undefined {
     model.close();
     deps.surface.focus();
   });
+  caseBtn?.addEventListener("click", () => model.toggleCaseSensitive());
+  regexBtn?.addEventListener("click", () => model.toggleRegex());
+  wordBtn?.addEventListener("click", () => model.toggleWholeWord());
   bar.addEventListener("keydown", (event: KeyboardEvent) => {
     if (event.key === "Escape") {
       event.preventDefault();
@@ -1253,6 +1275,25 @@ export function attachFindBar(deps: FindBarDeps): FindBarBinding | undefined {
     if ((event.ctrlKey || event.metaKey) && !event.altKey && (event.key === "f" || event.key === "F")) {
       event.preventDefault();
       openFind();
+      return;
+    }
+    // Ctrl+Alt+C/R/W alterna os toggles de busca de qualquer lugar da janela.
+    if ((event.ctrlKey || event.metaKey) && event.altKey && !event.shiftKey) {
+      if (event.key === "c" || event.key === "C") {
+        event.preventDefault();
+        model.toggleCaseSensitive();
+        return;
+      }
+      if (event.key === "r" || event.key === "R") {
+        event.preventDefault();
+        model.toggleRegex();
+        return;
+      }
+      if (event.key === "w" || event.key === "W") {
+        event.preventDefault();
+        model.toggleWholeWord();
+        return;
+      }
     }
   });
   // Edição muda a revisão: o modelo descarta a resposta de revisão superada e refaz a contagem.
@@ -1295,6 +1336,25 @@ function attachInputListeners(
   );
 
   let mouseDragAnchor: number | undefined;
+
+  // Scrollbar: mousedown no track/thumb (deve vir antes do mousedown do texto para capturar primeiro).
+  surface.addEventListener("mousedown", (event: MouseEvent) => {
+    const rect = surface.getBoundingClientRect();
+    const x = event.clientX - rect.left;
+    const sbx = surface.clientWidth - 10; // scrollbarWidth = 10
+    if (x < sbx) return; // não é na scrollbar
+    event.stopImmediatePropagation();
+
+    const y = event.clientY - rect.top;
+    const totalPx = (controller?.current?.source.lineCount() ?? 0) * lineHeight;
+    const viewportH = surface.clientHeight;
+    if (totalPx <= viewportH) return;
+
+    const ratio = Math.max(0, Math.min(1, y / viewportH));
+    const targetLine = Math.round(ratio * (totalPx / lineHeight));
+    viewport.scrollTo(targetLine);
+    renderer.start();
+  });
 
   surface.addEventListener("mousedown", (event: MouseEvent) => {
     const session = controller?.current;

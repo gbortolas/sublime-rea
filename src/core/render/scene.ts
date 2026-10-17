@@ -54,6 +54,12 @@ export interface LineLayout {
   readonly gutterBackground: RGBA;
   /** Cor dos números de linha no gutter. */
   readonly gutterColor: RGBA;
+  /** Largura da scrollbar vertical (0 = sem scrollbar). */
+  readonly scrollbarWidth: number;
+  /** Cor do track da scrollbar. */
+  readonly scrollbarTrack: RGBA;
+  /** Cor do thumb da scrollbar. */
+  readonly scrollbarThumb: RGBA;
 }
 
 /** Cursor opcional desenhado como `RectInstance`. */
@@ -157,6 +163,28 @@ export function buildInstances(
       thickness: 1,
       color: lighten(layout.gutterBackground, 0.15),
     });
+  }
+
+  // Scrollbar: track + thumb à direita.
+  if (layout.scrollbarWidth > 0) {
+    const sbx = layout.viewport.w - layout.scrollbarWidth;
+    // Track: fundo
+    rects.push({
+      rect: { x: sbx, y: 0, w: layout.scrollbarWidth, h: layout.viewport.h },
+      color: layout.scrollbarTrack,
+    });
+    // Thumb: proporcional ao conteúdo
+    const totalPx = source.lineCount() * layout.lineHeight;
+    if (totalPx > 0 && layout.viewport.h < totalPx) {
+      const thumbH = Math.max(20, layout.viewport.h * (layout.viewport.h / totalPx));
+      const maxScroll = totalPx - layout.viewport.h;
+      const ratio = maxScroll > 0 ? layout.scrollOffsetPx / maxScroll : 0;
+      const thumbY = ratio * (layout.viewport.h - thumbH);
+      rects.push({
+        rect: { x: sbx, y: thumbY, w: layout.scrollbarWidth, h: thumbH },
+        color: layout.scrollbarThumb,
+      });
+    }
   }
 
   for (let index = first; index < end; index++) {

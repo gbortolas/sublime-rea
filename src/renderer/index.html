@@ -28,6 +28,11 @@
         <div id="find-bar" role="search" aria-label="Buscar e substituir" hidden>
           <input id="find-input" type="text" placeholder="Buscar" aria-label="Buscar" autocomplete="off" spellcheck="false" />
           <span id="find-count" aria-live="polite">0/0</span>
+          <div class="find-toggles">
+            <button id="find-case" class="find-toggle" title="Case-sensitive (Ctrl+Alt+C)">Aa</button>
+            <button id="find-regex" class="find-toggle" title="Regex (Ctrl+Alt+R)">.*</button>
+            <button id="find-word" class="find-toggle" title="Whole word (Ctrl+Alt+W)">\b</button>
+          </div>
           <input id="find-replace-input" type="text" placeholder="Substituir" aria-label="Substituir" autocomplete="off" spellcheck="false" />
           <button id="find-replace-all" type="button">Substituir tudo</button>
           <span id="find-status" aria-live="polite"></span>

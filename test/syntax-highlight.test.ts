@@ -82,6 +82,9 @@ function layout(): LineLayout {
     gutterWidth: 0,
     gutterBackground: 0x2b2d30ff,
     gutterColor: 0x6e6e6eff,
+    scrollbarWidth: 0,
+    scrollbarTrack: 0x00000000,
+    scrollbarThumb: 0x00000000,
   };
 }
 

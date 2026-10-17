@@ -132,3 +132,32 @@ body {
 #find-bar button:hover {
   background: #4a4d51;
 }
+
+/* Botões de toggle (case-sensitive, regex, whole word) — estado inativo monocromático, ativo azul. */
+.find-toggles {
+  display: flex;
+  gap: 2px;
+  margin: 0 4px;
+}
+.find-toggle {
+  background: transparent;
+  border: 1px solid transparent;
+  color: #8a8a8a;
+  cursor: pointer;
+  padding: 2px 6px;
+  font-size: 12px;
+  font-family: monospace;
+  border-radius: 3px;
+  min-width: 24px;
+  text-align: center;
+  line-height: 1.4;
+}
+.find-toggle:hover {
+  border-color: #555;
+  color: #ccc;
+}
+.find-toggle.active {
+  background: #2a4a6a;
+  border-color: #4a7aaa;
+  color: #fff;
+}

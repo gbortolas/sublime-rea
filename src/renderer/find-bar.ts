@@ -38,6 +38,9 @@ export interface FindBarState {
   readonly status: string | undefined;
   /** Carimbo de tempo (ms) da última busca aplicada — `now` injetável. */
   readonly searchedAt: number;
+  readonly caseSensitive: boolean;
+  readonly regex: boolean;
+  readonly wholeWord: boolean;
 }
 
 /** Agenda de debounce injetável; devolve o cancelador. */
@@ -84,6 +87,9 @@ export class FindBarModel {
   private requestSeq = 0;
   private searchedAt = 0;
   private cancelDebounce: (() => void) | undefined;
+  private caseSensitiveValue = false;
+  private regexValue = false;
+  private wholeWordValue = false;
 
   constructor(private readonly options: FindBarOptions) {}
 
@@ -93,6 +99,18 @@ export class FindBarModel {
 
   get pattern(): string {
     return this.patternValue;
+  }
+
+  get caseSensitive(): boolean {
+    return this.caseSensitiveValue;
+  }
+
+  get regex(): boolean {
+    return this.regexValue;
+  }
+
+  get wholeWord(): boolean {
+    return this.wholeWordValue;
   }
 
   state(): FindBarState {
@@ -105,6 +123,9 @@ export class FindBarModel {
       truncated: this.truncatedFlag,
       status: this.statusValue,
       searchedAt: this.searchedAt,
+      caseSensitive: this.caseSensitiveValue,
+      regex: this.regexValue,
+      wholeWord: this.wholeWordValue,
     };
   }
 
@@ -135,6 +156,9 @@ export class FindBarModel {
   close(): boolean {
     if (!this.openFlag) return false;
     this.openFlag = false;
+    this.caseSensitiveValue = false;
+    this.regexValue = false;
+    this.wholeWordValue = false;
     this.cancelPending();
     this.emit();
     return true;
@@ -213,6 +237,32 @@ export class FindBarModel {
     }
   }
 
+  toggleCaseSensitive(): void {
+    this.caseSensitiveValue = !this.caseSensitiveValue;
+    if (this.openFlag && this.patternValue.length > 0) this.scheduleSearch();
+    this.emit();
+  }
+
+  toggleRegex(): void {
+    this.regexValue = !this.regexValue;
+    if (this.openFlag && this.patternValue.length > 0) this.scheduleSearch();
+    this.emit();
+  }
+
+  toggleWholeWord(): void {
+    this.wholeWordValue = !this.wholeWordValue;
+    if (this.openFlag && this.patternValue.length > 0) this.scheduleSearch();
+    this.emit();
+  }
+
+  setToggles(caseSensitive: boolean, regex: boolean, wholeWord: boolean): void {
+    this.caseSensitiveValue = caseSensitive;
+    this.regexValue = regex;
+    this.wholeWordValue = wholeWord;
+    if (this.openFlag && this.patternValue.length > 0) this.scheduleSearch();
+    this.emit();
+  }
+
   dispose(): void {
     this.cancelPending();
   }
@@ -220,7 +270,12 @@ export class FindBarModel {
   // ---- interno -------------------------------------------------------------------------------
 
   private query(): SearchQuery {
-    return { pattern: this.patternValue };
+    return {
+      pattern: this.patternValue,
+      ...(this.caseSensitiveValue ? { caseSensitive: true } : {}),
+      ...(this.regexValue ? { regex: true } : {}),
+      ...(this.wholeWordValue ? { wholeWord: true } : {}),
+    };
   }
 
   private move(step: number): void {
