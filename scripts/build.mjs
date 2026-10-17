@@ -25,9 +25,11 @@ import { build as esbuild } from "esbuild";
 const root = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const dist = resolve(root, "dist");
 
-/** Executa um comando e deixa stdout/stderr fluírem (falha alto se o exit != 0). */
+/** Executa um comando e deixa stdout/stderr fluírem (falha alto se o exit != 0).
+ * Usa `shell: true` no Windows porque `npx` é `npx.cmd` e `spawnSync` sem shell
+ * não encontra executáveis `.cmd` nativos do npm. */
 function run(command, args) {
-  execFileSync(command, args, { cwd: root, stdio: "inherit" });
+  execFileSync(command, args, { cwd: root, stdio: "inherit", shell: process.platform === "win32" });
 }
 
 async function main() {
