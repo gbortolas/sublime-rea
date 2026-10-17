@@ -1,7 +1,7 @@
 # HANDOFF — sublime-rea
 
 > **Documento de handoff entre sessões** (leia antes de retomar). Atualizado em **2026-10-17**.
-> Status: P1#1 (Seleção de texto) concluído. Próxima tarefa: P1#2 — Gutter com números de linha.
+> Status: P1#2 (Gutter) concluído. Próxima tarefa: P1#3 — Scrollbar proporcional.
 
 ---
 
@@ -14,8 +14,8 @@
 
 **Estado em uma linha:** ambiente ✅ · binário-alvo **100% analisável** ✅ · Track A (API Python +
 IPC) ✅ · **FASE 1 FECHADA** · **FASE 2 FECHADA** · **FASE 3 FECHADA** · P2.4/Slices A-D ✅ ·
-P2.4b/c ✅ · P2.5 (salvar) ✅ · P3.10/11/12 (dívidas) ✅ · **P1#1 — Seleção de texto ✅** ·
-**próximo: P1#2 — Gutter com números de linha**
+P2.4b/c ✅ · P2.5 (salvar) ✅ · P3.10/11/12 (dívidas) ✅ · P1#1 (seleção) ✅ · **P1#2 (gutter) ✅** ·
+**próximo: P1#3 — Scrollbar proporcional**
 
 **✅ Passo operacional resolvido (2026-10-16).** O `setup.py` foi rodado e o MCP `rea` foi relançado
 **já com `REA_GHIDRA_STARTUP_TIMEOUT_MS=900000`** (confirmado em `/proc/*/environ`) — **não** é mais
@@ -29,7 +29,7 @@ python3 setup/setup.py        # idempotente: reescreve setup/env.sh + environmen
 Sem o deadline maior, `open_binary`/`analyze` **via MCP** volta a estourar os 330 s (a análise leva
 ~355 s).
 
-**Próxima tarefa recomendada:** **P1#2 — Gutter com números de linha** ([`docs/ROADMAP.md`](ROADMAP.md)). Faixa à esquerda do canvas com número das linhas, highlight da linha atual, fundo do gutter separado. Esforço **P** (pequeno) — mexe só no `buildInstances`/layout do `LineLayout` + CSS do `index.html`. Depois dela: scrollbar proporcional (P1#3) e find bar visual (P1#4) — todos independentes, paralelizáveis.
+**Próxima tarefa recomendada:** **P1#3 — Scrollbar proporcional** ([`docs/ROADMAP.md`](ROADMAP.md)). Barra de rolagem à direita com thumb proporcional ao documento, drag do thumb. Esforço **P** (pequeno) — mexe no `Viewport` + `buildInstances`/render do scrollbar track + thumb. Depois: find bar visual (P1#4) — todos independentes.
 
 > ✅ **Pegadinha resolvida (2026-10-16, P3.9):** o `setup.py` agora **detecta** um JDK ≥ 21
 > compatível (`JAVA_HOME`, PATH, sdkman, `/usr/lib/jvm`) e escreve um **`export JAVA_HOME=…` ativo**

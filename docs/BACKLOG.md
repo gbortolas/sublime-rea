@@ -250,6 +250,11 @@ IDs). Cada item vira uma seção da spec técnica abstrata. **Fase 1 FECHADA** �
   - **renderer** — `src/renderer/main.ts`: `DocumentSession.selection`, eventos mouse (click/drag/Shift+click), setas com/sem Shift, Backspace/Delete com seleção (insere vazio no start = deleta), `ScribeRenderer.setSelection` → `buildInstances`
   - Gates: typecheck/lint/build exit 0 · **430 testes / 43 arquivos** (baseline 430)
 
+- [x] **P1#2 — Gutter com números de linha** ✅ **fechado** (2026-10-17). Faixa à esquerda do canvas com números de linha (1-based, direita-alinhados), fundo do gutter separado (#2b2d30), linha atual destacada, separador vertical, largura dinâmica pelo número de dígitos. Implementação:
+  - **scene** — `LineLayout.gutterWidth/gutterBackground/gutterColor`; `buildInstances` pinta fundo do gutter, números (glyphs) por linha visível, highlight da linha atual e separador vertical
+  - **renderer** — `renderOnce` computa `gutterWidth = dígitos * 9 + 16`, ajusta `paddingLeft` dinamicamente; `COLORS.gutterFg` (#6e6e6e)
+  - Gates: typecheck/lint/build exit 0 · **430 testes / 43 arquivos** (baseline 430)
+
 ## 🧹 P3 — Housekeeping / dívidas
 
 - [x] **P3.10 — Bundlar o worker de `TaskPool` no build (matar a duplicação do scanner de busca)** ✅
