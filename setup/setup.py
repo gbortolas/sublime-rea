@@ -48,7 +48,7 @@ from pathlib import Path
 # ---------------------------------------------------------------------------
 # Constantes base
 # ---------------------------------------------------------------------------
-TOTAL_STEPS = 10
+TOTAL_STEPS = 11
 PROJECT_NAME = "sublime-rea"
 RICH_VERSION_FALLBACK = "13.9.4"
 BOOTSTRAP_ENV = "SUBLIME_REA_RICH_BOOTSTRAPPED"
@@ -683,6 +683,9 @@ class Ctx:
             Path("~/.local/share/sublime-rea-tools").expanduser()
         )
         self.rea_tools_dir = Path(os.environ.get("REA_TOOLS_DIR") or default_tools).expanduser()
+        self.rea_tools_alias = Path(
+            os.environ.get("REA_TOOLS_ALIAS") or "~/sr-tools"
+        ).expanduser()
         self.ghidra_zip_path = self.rea_tools_dir / self.ghidra_zip_filename
         self.ghidra_install_dir = self.rea_tools_dir / self.ghidra_extracted_dirname
         self.pwntools_venv_dir = self.rea_tools_dir / self.pwntools_venv_dirname
@@ -1452,14 +1455,54 @@ def step_pwntools(ctx: Ctx, ui: UI) -> None:
 
 
 # ---------------------------------------------------------------------------
-# Etapa 7 — GHIDRA_INSTALL_DIR -> setup/env.sh (e, opcionalmente, ~/.bashrc)
+# Etapa 7 — Symlink ~/sr-tools → REA_TOOLS_DIR (Ghidra recusa "." no path)
+# ---------------------------------------------------------------------------
+def step_symlink(ctx: Ctx, ui: UI) -> None:
+    ui.step(7, f"Symlink {ctx.rea_tools_alias} → {ctx.rea_tools_dir}")
+    if ui.dry_run:
+        ui.show(f"mkdir -p {ctx.rea_tools_alias.parent}")
+        ui.show(f"ln -sfn {ctx.rea_tools_dir} {ctx.rea_tools_alias}")
+        ui.mark(7, "dry", "plano impresso")
+        return
+
+    alias = ctx.rea_tools_alias
+    target = ctx.rea_tools_dir
+
+    if alias.is_symlink():
+        # Symlink nosso: re-aponta para o $REA_TOOLS_DIR vigente.
+        alias.unlink()
+        alias.symlink_to(target)
+        ui.ok(f"symlink atualizado: {alias} → {target}")
+        ui.mark(7, "ok", "atualizado")
+    elif alias.exists():
+        # `symlink_to` num diretório REAL existente criaria o link DENTRO dele
+        # e o projeto Ghidra iria para o lugar errado.
+        raise SetupFailure(
+            EXIT_USAGE,
+            f"{alias} existe e NÃO é um symlink (diretório/arquivo real).",
+            [
+                f"O symlink aponta para {target} e é usado pelo Ghidra "
+                f"(que recusa '.' no path).",
+                f"Mova ou remova: mv {alias} {alias}.bak",
+            ],
+        )
+    else:
+        # Caminho não existe: cria o diretório pai e o symlink.
+        alias.parent.mkdir(parents=True, exist_ok=True)
+        alias.symlink_to(target)
+        ui.ok(f"symlink criado: {alias} → {target}")
+        ui.mark(7, "ok", "criado")
+
+
+# ---------------------------------------------------------------------------
+# Etapa 8 — GHIDRA_INSTALL_DIR -> setup/env.sh (e, opcionalmente, ~/.bashrc)
 # ---------------------------------------------------------------------------
 RC_MARKER = "sublime-rea setup"
 
 
 def step_env(ctx: Ctx, ui: UI, write_rc: bool) -> None:
     ui.step(
-        7,
+        8,
         f"Variáveis de ambiente (GHIDRA_INSTALL_DIR, {OPENCODE_PWNTOOLS_KEY}, "
         f"{GHIDRA_STARTUP_TIMEOUT_KEY})",
     )
@@ -1467,6 +1510,7 @@ def step_env(ctx: Ctx, ui: UI, write_rc: bool) -> None:
     startup_timeout_ms = _ghidra_startup_timeout_ms(ui)
     os.environ["GHIDRA_INSTALL_DIR"] = str(ctx.ghidra_install_dir)
     os.environ["REA_TOOLS_DIR"] = str(ctx.rea_tools_dir)
+    os.environ["REA_TOOLS_ALIAS"] = str(ctx.rea_tools_alias)
     os.environ["REA_PWNTOOLS_PYTHON"] = str(ctx.pwntools_python)
     os.environ[GHIDRA_STARTUP_TIMEOUT_KEY] = startup_timeout_ms
     if ctx.java_home:
@@ -1475,6 +1519,7 @@ def step_env(ctx: Ctx, ui: UI, write_rc: bool) -> None:
         # subprocess e herda este os.environ — por isso setamos aqui, antes dela.
         os.environ["JAVA_HOME"] = ctx.java_home
     ui.info(f"GHIDRA_INSTALL_DIR={ctx.ghidra_install_dir}")
+    ui.info(f"REA_TOOLS_ALIAS={ctx.rea_tools_alias}")
     ui.info(f"{OPENCODE_PWNTOOLS_KEY}={ctx.pwntools_python}")
     ui.info(f"{GHIDRA_STARTUP_TIMEOUT_KEY}={startup_timeout_ms} (deadline do provider Ghidra)")
     if ctx.java_home:
@@ -1504,6 +1549,7 @@ def step_env(ctx: Ctx, ui: UI, write_rc: bool) -> None:
             ENV_FILE,
             "# Gerado por setup/setup.py — 'source' este arquivo para exportar o ambiente do sublime-rea.\n"
             f'export REA_TOOLS_DIR="{ctx.rea_tools_dir}"\n'
+            f'export REA_TOOLS_ALIAS="{ctx.rea_tools_alias}"\n'
             f'export GHIDRA_INSTALL_DIR="{ctx.ghidra_install_dir}"\n'
             f'export {OPENCODE_PWNTOOLS_KEY}="{ctx.pwntools_python}"\n'
             f'export {GHIDRA_STARTUP_TIMEOUT_KEY}="{startup_timeout_ms}"  '
@@ -1531,24 +1577,24 @@ def step_env(ctx: Ctx, ui: UI, write_rc: bool) -> None:
     else:
         ui.info("rc não alterado (use --write-rc para persistir no ~/.bashrc)")
 
-    ui.mark(7, "ok", "env.sh escrito" if not ui.dry_run else "dry-run")
+    ui.mark(8, "ok", "env.sh escrito" if not ui.dry_run else "dry-run")
 
 
 # ---------------------------------------------------------------------------
 # Etapa 8 — extrair o alvo (Sublime Text) em target/
 # ---------------------------------------------------------------------------
 def step_target(ctx: Ctx, ui: UI) -> None:
-    ui.step(8, f"Extraindo alvo (Sublime Text build {ctx.sublime_build})")
+    ui.step(9, f"Extraindo alvo (Sublime Text build {ctx.sublime_build})")
     if _target_bin_valid(ctx.target_bin):
         ui.ok(f"alvo já extraído: {ctx.target_bin}")
-        ui.mark(8, "ok", "já extraído")
+        ui.mark(9, "ok", "já extraído")
         return
 
     rel_bin = ctx.target_bin.relative_to(ctx.target_dir)
 
     if ui.dry_run:
         _target_plan(ctx, ui)
-        ui.mark(8, "dry", "plano impresso")
+        ui.mark(9, "dry", "plano impresso")
         return
 
     # O tarball não é mais versionado: garante presença + SHA-256 (baixa sob
@@ -1593,7 +1639,7 @@ def step_target(ctx: Ctx, ui: UI) -> None:
             EXIT_TARGET, "extração do alvo falhou", [f"{ctx.target_bin} inválido após o tar."]
         )
     ui.ok(f"extraído: {ctx.target_bin}")
-    ui.mark(8, "ok", str(ctx.target_bin))
+    ui.mark(9, "ok", str(ctx.target_bin))
 
 
 def _tarball_sha_ok(ctx: Ctx, ui: UI) -> bool:
@@ -2034,14 +2080,14 @@ def _mcp_env_entries(ctx: Ctx, ui: UI | None = None) -> list[tuple[str, str]]:
 
 
 def step_mcp(ctx: Ctx, ui: UI, rea_cmd: list[str]) -> None:
-    ui.step(9, "Registrando MCP no opencode (rea setup --client opencode)")
+    ui.step(10, "Registrando MCP no opencode (rea setup --client opencode)")
     cmd = [*rea_cmd, "setup", "--client", "opencode", "--yes"]
     if ui.dry_run:
         # repassa --dry-run ao REA quando o próprio script está em dry-run
         ui.dry(" ".join([*cmd, "--dry-run"]))
         for key, value in _mcp_env_entries(ctx, ui):
             _ensure_opencode_env(ctx, ui, key, value)
-        ui.mark(9, "dry", "plano impresso")
+        ui.mark(10, "dry", "plano impresso")
         return
     # `REA_PWNTOOLS_PYTHON` já está em os.environ (etapa 6), herdado pelo subprocess.
     result = run(ui, cmd, check=False)
@@ -2060,7 +2106,7 @@ def step_mcp(ctx: Ctx, ui: UI, rea_cmd: list[str]) -> None:
             ui.ok(f"rea setup preservou {key} no registro")
         elif not _ensure_opencode_env(ctx, ui, key, value):
             ui.warn(f"{key} NÃO está no registro MCP; {_MCP_ENV_HINTS[key]}")
-    ui.mark(9, "ok", "registrado")
+    ui.mark(10, "ok", "registrado")
 
 
 # ---------------------------------------------------------------------------
@@ -2092,12 +2138,12 @@ def _parse_last_json_object(text: str) -> dict:
 
 
 def step_doctor(ctx: Ctx, ui: UI, rea_cmd: list[str]) -> None:
-    ui.step(10, "Verificação final (rea doctor)")
+    ui.step(11, "Verificação final (rea doctor)")
     cmd = [*rea_cmd, "doctor", "--client", "opencode", "--provider", "ghidra", "--format", "json"]
 
     if ui.dry_run:
         ui.dry(" ".join(cmd))
-        ui.mark(10, "dry", "plano impresso")
+        ui.mark(11, "dry", "plano impresso")
         return
 
     result = proc(cmd, timeout=600)
@@ -2136,7 +2182,7 @@ def step_doctor(ctx: Ctx, ui: UI, rea_cmd: list[str]) -> None:
                 detail = check.get("detail") or check.get("remediation") or ""
                 ui.warn(f"opcional (esperado): {name} [{cls}]: {detail}")
 
-        ui.mark(10, "ok", "healthy: true")
+        ui.mark(11, "ok", "healthy: true")
         return
 
     reasons = ["healthy: false"]
@@ -2192,6 +2238,7 @@ def run_all(ctx: Ctx, ui: UI, args: argparse.Namespace) -> int:
     rea_cmd = step_rea(ctx, ui)
     step_ghidra(ctx, ui)
     step_pwntools(ctx, ui)
+    step_symlink(ctx, ui)
     step_env(ctx, ui, args.write_rc)
     step_target(ctx, ui)
     step_mcp(ctx, ui, rea_cmd)

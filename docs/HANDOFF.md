@@ -21,7 +21,7 @@ decidido: **Scribe** (**P2.3** ✅) · **P2.4 FECHADO** (fatia vertical end-to-e
 A/B/C** (`04096ae`: abrir arquivo CLI+`dialog` · undo/redo visível · cancelamento e2e) · ✅ **Slice D**
 (`2a169be`: realce de sintaxe e2e) · ✅ **P2.4b** (achados de revisão do realce corrigidos, mais um bug
 **alto** extra) · ✅ **P2.4c** (busca/substituição na lane `background` — **primeiro uso real** do
-`TaskPool`/`Scheduler`; **423 testes / 43 arquivos**) · ✅ **P2.5** (salvar arquivo `Ctrl/Cmd+S` + dirty tracking — lane `io` finalmente usada; escrita atômica tmp+rename; guarda dirty para evitar I/O fútil) · ✅ **P3.11** (pintar ocorrências da busca no canvas — overlay de rects, match atual em magenta, demais em amarelo; 430 testes / 43 arquivos) · ✅ **P3.10** (bundlar o worker do TaskPool no build — matou 237 linhas de duplicata de busca; worker agora importa direto do shared; esbuild como fallback eval no lugar de `ts.transpileModule`) · ✅ **P3.12** (ciclo de vida das assinaturas do renderer — `FindBarBinding.dispose()` amarra `model.dispose()` + unsubscribe de `onDocumentChanged`) · ⏳ **próximo: P3.7 — formalizar ~/sr-tools no setup.py**
+`TaskPool`/`Scheduler`; **423 testes / 43 arquivos**) · ✅ **P2.5** (salvar arquivo `Ctrl/Cmd+S` + dirty tracking — lane `io` finalmente usada; escrita atômica tmp+rename; guarda dirty para evitar I/O fútil) · ✅ **P3.11** (pintar ocorrências da busca no canvas) · ✅ **P3.10** (bundlar o worker do TaskPool) · ✅ **P3.12** (ciclo de vida das assinaturas) · ✅ **P3.7** (symlink `~/sr-tools` formalizado no `setup.py`) · ⏳ **todos os P3s de dívida técnica do editor fechados; residual opcional: P3.5 Rizin, P3.6 snapshot**
 
 **✅ Passo operacional resolvido (2026-10-16).** O `setup.py` foi rodado e o MCP `rea` foi relançado
 **já com `REA_GHIDRA_STARTUP_TIMEOUT_MS=900000`** (confirmado em `/proc/*/environ`) — **não** é mais
@@ -35,7 +35,7 @@ python3 setup/setup.py        # idempotente: reescreve setup/env.sh + environmen
 Sem o deadline maior, `open_binary`/`analyze` **via MCP** volta a estourar os 330 s (a análise leva
 ~355 s).
 
-**Próxima tarefa recomendada:** **P3.7 — formalizar `~/sr-tools` no `setup.py`** (BACKLOG.md §P3.7). O Ghidra recusa path com componente iniciado por `.`, então `bin/ghidra-preanalyze.sh` usa o symlink `~/sr-tools → $REA_TOOLS_DIR` (criado idempotentemente pelo próprio script). Formalizar no `setup.py` para que qualquer ferramenta que precise do Ghidra encontre o caminho. Três P3s de dívida técnica foram fechados nesta sessão: **P3.11** (pintar ocorrências da busca), **P3.10** (bundlar worker) e **P3.12** (ciclo de vida das assinaturas). O residual (P3.5 Rizin, P3.6 snapshot) segue aberto como opcional.
+**Próxima tarefa recomendada:** **nenhuma dívida P3 urgente.** Todos os itens de dívida técnica do editor foram fechados nesta sessão: **P3.11** (pintar ocorrências no canvas), **P3.10** (bundlar worker), **P3.12** (ciclo de vida das assinaturas) e **P3.7** (symlink `~/sr-tools` no `setup.py`). O residual opcional (P3.5 Rizin, P3.6 snapshot) pode esperar. O editor Scribe já tem o mínimo inegociável: abrir/editar/salvar/undo/realce/busca com destaques visuais. Próximo passo: pensar em features reais (múltiplos documentos, guias/guias, gutter com numeração de linhas) ou partir para a parte acadêmica do trabalho (paper/documentação).
 
 > ✅ **Pegadinha resolvida (2026-10-16, P3.9):** o `setup.py` agora **detecta** um JDK ≥ 21
 > compatível (`JAVA_HOME`, PATH, sdkman, `/usr/lib/jvm`) e escreve um **`export JAVA_HOME=…` ativo**

@@ -306,10 +306,19 @@ IDs). Cada item vira uma seção da spec técnica abstrata. **Fase 1 FECHADA** �
 - [ ] **P3.6 — Snapshot de análise do REA**: baixa prioridade. O `snapshot_path=<*.json>` só faz
       *replay* de ferramentas em cache e exige análise completa; o projeto Ghidra persistente cobre
       melhor o caso.
-- [ ] **P3.7 — `~/sr-tools` (symlink)**: o Ghidra recusa path com componente iniciado por `.`, então
-      `bin/ghidra-preanalyze.sh` usa o symlink `~/sr-tools → $REA_TOOLS_DIR` (hoje criado
-      idempotentemente pelo próprio script, com erro claro se o caminho já for um diretório real).
-      Formalizar/documentar no `setup.py`.
+- [x] **P3.7 — `~/sr-tools` (symlink)** ✅ **fechado** (2026-10-17): o symlink `~/sr-tools → $REA_TOOLS_DIR`
+      agora é criado/manutenido pelo `setup.py` (não só pelo `ghidra-preanalyze.sh`). O Ghidra
+      recusa path com `.`, e `$REA_TOOLS_DIR` vive em `~/.local/…` — o symlink contorna isso.
+      Implementação:
+      - Nova função `step_symlink` (etapa 7/11): cria/atualiza o symlink com tratamento para 3
+        cenários (já é symlink → re-aponta; existe como dir/file real → erro claro; não existe →
+        cria)
+      - `Ctx.rea_tools_alias` em `Ctx.__init__` (lê `REA_TOOLS_ALIAS` do env ou default
+        `~/sr-tools`)
+      - `env.sh` exporta `REA_TOOLS_ALIAS` (consumido por `ghidra-preanalyze.sh`)
+      - `os.environ["REA_TOOLS_ALIAS"]` setado em `step_env` para propagação ao doctor
+      - Pipeline renumerada de 10→11 etapas
+      - Gates: typecheck/lint/test passam · dry-run exibe etapa 7/11 corretamente
 - [x] **P3.8 — `.serena/` untracked**: cache do LSP Serena; adicionado ao `.gitignore`.
 - [x] **P3.9 — `JAVA_HOME` no `setup/env.sh`** (2026-10-16): resolvido pela opção **(a)** — o
       `setup.py` detecta um JDK ≥ 21 compatível (`JAVA_HOME`, PATH, sdkman, `/usr/lib/jvm`) e escreve
