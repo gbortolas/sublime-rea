@@ -1,7 +1,7 @@
 # HANDOFF — sublime-rea
 
 > **Documento de handoff entre sessões** (leia antes de retomar). Atualizado em **2026-10-17**.
-> Status: P2#5 (Múltiplos cursores) + P2#7 (Drag & drop) + Infra (GitHub repo + CI/Release) concluídos. Próximo: P2#6 — Abas/múltiplos documentos.
+> Status: P2#6 (Abas) concluído. Próximo: P2#8 — Temas (cores configuráveis).
 
 ---
 
@@ -16,8 +16,8 @@
 IPC) ✅ · **FASE 1 FECHADA** · **FASE 2 FECHADA** · **FASE 3 FECHADA** · P2.4/Slices A-D ✅ ·
 P2.4b/c ✅ · P2.5 (salvar) ✅ · P3.10/11/12 (dívidas) ✅ · P1#1 (seleção) ✅ · P1#2 (gutter) ✅ ·
 **P1#3 (scrollbar) ✅ · P1#4 (find bar toggles) ✅ · P2#5 (múltiplos cursores) ✅** ·
-**P2#7 (drag & drop) ✅ · Infra (GitHub repo + CI/Release) ✅** ·
-**próximo: P2#6 — Abas/múltiplos documentos**
+**P2#7 (drag & drop) ✅ · Infra (GitHub repo + CI/Release) ✅ · P2#6 (abas) ✅** ·
+**próximo: P2#8 — Temas (cores configuráveis)**
 
 **✅ Passo operacional resolvido (2026-10-16).** O `setup.py` foi rodado e o MCP `rea` foi relançado
 **já com `REA_GHIDRA_STARTUP_TIMEOUT_MS=900000`** (confirmado em `/proc/*/environ`) — **não** é mais
@@ -31,7 +31,7 @@ python3 setup/setup.py        # idempotente: reescreve setup/env.sh + environmen
 Sem o deadline maior, `open_binary`/`analyze` **via MCP** volta a estourar os 330 s (a análise leva
 ~355 s).
 
-**Próxima tarefa recomendada:** **P2#6 — Abas/múltiplos documentos** ([`docs/ROADMAP.md`](ROADMAP.md)). Tabs no topo, troca de documento ativo, fechar/reordenar, estado dirty por tab. Esforço **G** (grande) — toca em UI DOM, IPC, e gerenciamento de sessão no renderer.
+**Próxima tarefa recomendada:** **P2#8 — Temas (cores configuráveis)** ([`docs/ROADMAP.md`](ROADMAP.md)). Trocar tema por JSON/JSONC, paleta clara/escura, reload sem restart. Esforço **P** (pequeno) — mexe no `ThemeResolver` + UI de seleção.
 
 > ✅ **Pegadinha resolvida (2026-10-16, P3.9):** o `setup.py` agora **detecta** um JDK ≥ 21
 > compatível (`JAVA_HOME`, PATH, sdkman, `/usr/lib/jvm`) e escreve um **`export JAVA_HOME=…` ativo**

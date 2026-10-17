@@ -269,12 +269,9 @@ IDs). Cada item vira uma seção da spec técnica abstrata. **Fase 1 FECHADA** �
 - [x] **P2#7 — Drag & drop de arquivo** ✅ **fechado** (2026-10-17). Arrastar arquivo do SO sobre o canvas abre ele (`dragover` + `drop` usando `File.path` do Electron).
 - Gates: typecheck/lint/build exit 0 · **430 testes / 43 arquivos** (baseline 430)
 
-- [x] **P2#5 — Múltiplos cursores** ✅ **fechado** (2026-10-17). Suporte a múltiplos cursores/seleções simultâneas (Ctrl+click, inserção em todos os cursores). Implementação:
-  - **shared** — `SelectionSet` (alias `readonly Selection[]`) + `SelectionSetOps`; `DocumentUndoState.selections`
-  - **undo** — `UndoTarget.selections/setSelections`; cada passo guarda `selectionsBefore/selectionsAfter`
-  - **core** — `CoreState.selections`; `runInsert` itera seleções da última para a primeira (preserva offsets)
-  - **scene** — `buildInstances` aceita `extraCarets?`/`extraSelections?` para pintar múltiplos carets/rects
-  - **renderer** — `DocumentSession.selections`; `ScribeRenderer.currentSelections`; Ctrl+click adiciona cursor; `renderOnce` passa arrays ao `buildInstances`
+- [x] **P2#6 — Abas/múltiplos documentos** ✅ **fechado** (2026-10-17). Tabs no topo do canvas, troca de documento ativo, fechar (click + middle-click), dirty state por tab, Ctrl+Tab/Ctrl+Shift+Tab pra navegar. Implementação:
+  - **index.html+CSS** — `<div id="tab-bar">` + estilos completos (32px, scroll, hover/active/close)
+  - **main.ts** — `DocumentController` refatorado: `sessions: TabSession[]`, `activate()`, `close()`, `renderTabBar()` (DOM), dirty tracking por sessão, `resize()` desconta 32px, Ctrl+Tab navigation
   - Gates: typecheck/lint/build exit 0 · **430 testes / 43 arquivos** (baseline 430)
 
 - [x] **Infra — GitHub repo + CI/Release** ✅ **fechado** (2026-10-17). Repositório `gbortolas/sublime-rea` criado e público; workflows CI (typecheck+test+build) e Release (Linux AppImage + Windows nsis); electron-builder configurado; ícone placeholder 256x256.

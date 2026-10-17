@@ -298,6 +298,21 @@ interface DocumentSession {
   dispose(): void;
 }
 
+export interface TabInfo {
+  readonly handle: number;
+  readonly label: string;
+  readonly dirty: boolean;
+  readonly active: boolean;
+}
+
+interface TabSession extends DocumentSession {
+  /** Nome do arquivo (curto, para exibir na tab). */
+  readonly label: string;
+  /** Offset de scroll salvo quando a sessão perde o foco. */
+  savedScrollPx: number;
+  dirty: boolean;
+}
+
 /** Requisição de destaque em voo: o que o renderer pediu (a resposta tem de cobrir exatamente isto). */
 export interface HighlightRequest {
   /** Identidade do documento do pedido (ver `HighlightDocumentKey`). */
@@ -605,18 +620,30 @@ function documentPath(): string | undefined {
  * (ou Esc) aborta a abertura anterior.
  */
 class DocumentController {
-  private session: DocumentSession | undefined;
+  private sessions: TabSession[] = [];
+  private activeIndex = -1;
   private opening: { readonly signalId: number; readonly path: string } | undefined;
 
   constructor(
     private readonly bridge: ScribeBridge,
-    private readonly source: DocumentLineSource,
     private readonly viewport: ViewportImpl,
     private readonly renderer: ScribeRenderer,
   ) {}
 
-  get current(): DocumentSession | undefined {
-    return this.session;
+  get current(): TabSession | undefined {
+    return this.activeIndex >= 0 ? this.sessions[this.activeIndex] : undefined;
+  }
+
+  get openSessions(): readonly TabSession[] {
+    return this.sessions;
+  }
+
+  currentIndex(): number {
+    return this.activeIndex;
+  }
+
+  private lineHeight(): number {
+    return Math.ceil(TEXT_STYLE.sizePx * 1.4);
   }
 
   /** Aborta a abertura em curso (se houver). `true` = havia uma para cancelar. */
@@ -650,43 +677,136 @@ class DocumentController {
     if (this.opening?.signalId !== signalId) return false; // cancelado ou substituído
 
     this.opening = undefined;
-    this.detachSession();
     const revision = await this.bridge.revision(handle);
-    this.source.setText(await this.bridge.text(handle), revision);
-    this.viewport.setMetrics({ lineCount: this.source.lineCount() });
+    // Cria novo DocumentLineSource para esta sessão
+    const source = new DocumentLineSource(await this.bridge.text(handle), revision);
+    const label = path.split("/").pop() ?? path;
+
     const unsubscribe = this.bridge.onDocumentChanged((event) => {
       if (event.handle !== handle) return;
       void this.bridge.text(handle).then((next) => {
-        this.source.setText(next, event.revision);
-        this.viewport.setMetrics({ lineCount: this.source.lineCount() });
-        if (this.session) {
-          this.session.caret = Math.min(this.session.caret, next.length);
-          this.session.selection = SelectionOps.collapsed(this.session.caret);
-          this.session.selections = SelectionSetOps.singular(this.session.caret);
-          this.renderer.setSelection(this.session.selection);
-          this.renderer.setSelections(this.session.selections);
+        source.setText(next, event.revision);
+        // Atualiza estado dirty da sessão
+        const s = this.sessions.find((s) => s.handle === handle);
+        if (s) s.dirty = true;
+        if (this.current?.handle === handle) {
+          this.viewport.setMetrics({ lineCount: source.lineCount() });
+          setDirtyStatus(true);
+          this.renderer.start();
         }
-        setDirtyStatus(true);
-        this.renderer.start();
+        this.renderTabBar();
       });
     });
-    this.session = {
+
+    const session: TabSession = {
       bridge: this.bridge,
       handle,
-      source: this.source,
+      source,
+      label,
       caret: 0,
       selection: SelectionOps.collapsed(0),
-      selections: SelectionSetOps.singular(0), // P2#5
+      selections: SelectionSetOps.singular(0),
+      savedScrollPx: 0,
+      dirty: false,
       dispose: unsubscribe,
     };
-    this.renderer.setSelection(this.session.selection);
-    this.renderer.setSelections(this.session.selections);
-    setDocStatus(path);
-    updateCaretStatus(this.source, 0);
+
+    this.sessions.push(session);
+    this.activeIndex = this.sessions.length - 1;
+    this.renderer.attachSource(source);
+    this.viewport.setMetrics({ lineCount: source.lineCount() });
+    this.viewport.scrollTo(0);
+    this.renderer.setSelection(session.selection);
+    this.renderer.setSelections(session.selections);
+    updateCaretStatus(source, 0);
+    setDocStatus(label);
+    setDirtyStatus(false);
     await this.refreshUndoStatus();
+    this.renderTabBar();
     this.renderer.start();
     console.info(`Scribe: documento ligado via preload "${path}" (handle ${handle})`);
     return true;
+  }
+
+  activate(index: number): void {
+    if (index === this.activeIndex || index < 0 || index >= this.sessions.length) return;
+    // Salva estado da sessão atual
+    const old = this.sessions[this.activeIndex];
+    if (old !== undefined) {
+      old.savedScrollPx = this.viewport.scrollOffsetPx();
+    }
+    // Ativa nova sessão
+    this.activeIndex = index;
+    const session = this.sessions[index]!;
+    this.renderer.attachSource(session.source);
+    this.viewport.setMetrics({ lineCount: session.source.lineCount() });
+    this.viewport.scrollTo(Math.round(session.savedScrollPx / this.lineHeight()));
+    this.renderer.setSelection(session.selection);
+    this.renderer.setSelections(session.selections);
+    updateCaretStatus(session.source, session.caret);
+    setDocStatus(session.label);
+    setDirtyStatus(session.dirty ?? false);
+    this.refreshUndoStatus();
+    this.renderTabBar();
+    this.renderer.start();
+  }
+
+  close(index: number): void {
+    if (index < 0 || index >= this.sessions.length) return;
+    const session = this.sessions[index]!;
+    session.dispose();
+    this.sessions.splice(index, 1);
+    if (this.sessions.length === 0) {
+      this.activeIndex = -1;
+      setDocStatus("sem documento");
+      setDirtyStatus(false);
+      setUndoStatus(false, false);
+    } else if (index <= this.activeIndex) {
+      this.activate(Math.max(0, this.activeIndex - 1));
+    } else {
+      this.activate(this.activeIndex);
+    }
+    this.renderTabBar();
+    this.renderer.start();
+  }
+
+  private renderTabBar(): void {
+    const bar = document.getElementById("tab-bar");
+    if (!bar) return;
+    bar.innerHTML = "";
+    for (let i = 0; i < this.sessions.length; i++) {
+      const s = this.sessions[i]!;
+      const tab = document.createElement("button");
+      tab.className = `tab${i === this.activeIndex ? " active" : ""}`;
+      tab.role = "tab";
+      tab.setAttribute("aria-selected", String(i === this.activeIndex));
+
+      const label = document.createElement("span");
+      label.className = "tab-label";
+      label.textContent = s.label;
+      tab.appendChild(label);
+
+      const close = document.createElement("span");
+      close.className = "tab-close";
+      close.textContent = "\u00d7";
+      close.title = "Fechar";
+      close.addEventListener("mousedown", (e: MouseEvent) => {
+        e.stopPropagation();
+        this.close(i);
+      });
+      tab.appendChild(close);
+
+      tab.addEventListener("click", () => this.activate(i));
+      tab.addEventListener("mousedown", (e: MouseEvent) => {
+        if (e.button === 1) {
+          // Middle click
+          e.preventDefault();
+          this.close(i);
+        }
+      });
+
+      bar.appendChild(tab);
+    }
   }
 
   /** Abre o diálogo nativo; se o usuário escolher um arquivo, abre-o. */
@@ -703,7 +823,7 @@ class DocumentController {
    * Rejeita se a ponte falhar (quem chama trata e marca a revisão como falha).
    */
   async loadHighlight(first: number, count: number): Promise<DocumentHighlight | null> {
-    const session = this.session;
+    const session = this.current;
     if (session === undefined || count <= 0) return null;
     const highlight = session.bridge.highlight;
     // Preload antigo (sem `syntax.highlight`): degrada explicitamente, sem crash (DEC-TR-7).
@@ -721,7 +841,7 @@ class DocumentController {
 
   /** Digitação mínima: insere no caret e relê o documento. */
   async insertText(text: string): Promise<void> {
-    const session = this.session;
+    const session = this.current;
     if (session === undefined) return;
     try {
       const s = session.selection;
@@ -736,6 +856,7 @@ class DocumentController {
       session.source.setText(next, revision);
       this.viewport.setMetrics({ lineCount: session.source.lineCount() });
       updateCaretStatus(session.source, session.caret);
+      session.dirty = true;
       await this.refreshUndoStatus();
       this.renderer.start();
     } catch (error) {
@@ -744,7 +865,7 @@ class DocumentController {
   }
 
   private async runHistory(action: "undo" | "redo"): Promise<void> {
-    const session = this.session;
+    const session = this.current;
     if (session === undefined) return;
     try {
       const state =
@@ -768,7 +889,7 @@ class DocumentController {
   }
 
   private async refreshUndoStatus(): Promise<void> {
-    const session = this.session;
+    const session = this.current;
     if (session === undefined) {
       setUndoStatus(false, false);
       return;
@@ -781,17 +902,14 @@ class DocumentController {
     }
   }
 
-  private detachSession(): void {
-    this.session?.dispose();
-    this.session = undefined;
-  }
-
   async save(): Promise<void> {
-    const session = this.session;
+    const session = this.current;
     if (session === undefined) return;
     try {
       await session.bridge.save(session.handle);
+      session.dirty = false;
       setDirtyStatus(false);
+      this.renderTabBar();
     } catch (error) {
       console.error("Scribe: falha ao salvar", error);
       setDocStatus(`erro ao salvar: ${error instanceof Error ? error.message : String(error)}`);
@@ -869,8 +987,9 @@ class ScribeRenderer {
   }
 
   resize(cssWidth: number, cssHeight: number): void {
+    const tabBarHeight = 32;
     this.viewportWidth = Math.max(1, Math.floor(cssWidth));
-    this.viewportHeight = Math.max(1, Math.floor(cssHeight));
+    this.viewportHeight = Math.max(1, Math.floor(cssHeight - tabBarHeight));
     this.canvas.width = Math.floor(this.viewportWidth * this.dpr);
     this.canvas.height = Math.floor(this.viewportHeight * this.dpr);
     if (this.pipeline instanceof Canvas2DBackend) {
@@ -1057,7 +1176,7 @@ export async function bootRenderer(): Promise<boolean> {
   const viewport = new ViewportImpl({
     lineCount: source.lineCount(),
     lineHeight: Math.ceil(TEXT_STYLE.sizePx * 1.4),
-    viewportHeight: surface.clientHeight || 1,
+    viewportHeight: Math.max(1, (surface.clientHeight || 1) - 32), // 32px da tab bar
     viewportWidth: surface.clientWidth || 1,
     overscan: 2,
     now: (): number => performance.now(),
@@ -1074,7 +1193,7 @@ export async function bootRenderer(): Promise<boolean> {
   const bridge = readBridge();
   const controller =
     bridge !== undefined
-      ? new DocumentController(bridge, source, viewport, renderer)
+      ? new DocumentController(bridge, viewport, renderer)
       : undefined;
 
   // Destaque de sintaxe: o main resolve a gramática e tokeniza; aqui só colorimos (ThemeResolver).
@@ -1508,6 +1627,20 @@ function attachInputListeners(
         event.preventDefault();
         return;
       }
+    }
+
+    // Ctrl+Tab / Ctrl+Shift+Tab: navega entre abas
+    if (event.key === "Tab" && (event.ctrlKey || event.metaKey)) {
+      event.preventDefault();
+      if (controller) {
+        const total = controller.openSessions.length;
+        if (total > 1) {
+          const dir = event.shiftKey ? -1 : 1;
+          const next = (controller.currentIndex() + dir + total) % total;
+          controller.activate(next);
+        }
+      }
+      return;
     }
 
     const page = Math.max(1, Math.floor(surface.clientHeight / lineHeight) - 1);
