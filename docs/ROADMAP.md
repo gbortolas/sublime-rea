@@ -64,7 +64,7 @@ Features legais mas não essenciais, ou que dependem de componentes ainda não p
 |---|---------|---------|-----------|
 | 16 | **LSP client** | G | Conectar a servidores LSP (tipo pyright/tsserver) pra diagnóstico, completação, go-to-definition |
 | 17 | **Git integration** (gutter blame/diff) | G | Mostrar diff na gutter, blame inline, stage/unstage |
-| 18 | **Snippets** | M | Expansão de snippet com tabstops, espelha o formato .sublime-snippet |
+| 18 | **Snippets** | M | Expansão de snippet com tabstops, espelha o formato .sublime-snippet | ✅ |
 | 19 | **Paleta de cores / temas customizáveis na UI** | M | Editor visual de tema, preview em tempo real |
 | 20 | **Modo vim (ex-mode)** | G | Plugável via extensão, emulação de modal editing |
 
