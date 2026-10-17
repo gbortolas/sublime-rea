@@ -79,6 +79,9 @@ function layout(): LineLayout {
     viewport: { x: 0, y: 0, w: 400, h: 100 },
     background: 0x1e1f22ff,
     defaultColor: DEFAULT_COLOR,
+    gutterWidth: 0,
+    gutterBackground: 0x2b2d30ff,
+    gutterColor: 0x6e6e6eff,
   };
 }
 

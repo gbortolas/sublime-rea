@@ -64,6 +64,7 @@ const COLORS = {
   text: 0xd4d4d4ff as RGBA,
   caret: 0x7fb3ffff as RGBA,
   gutter: 0x2b2d30ff as RGBA,
+  gutterFg: 0x6e6e6eff as RGBA,
 };
 
 // ---- rasterização/medição no renderer (fora da main thread seria o ideal — DEC-REN-3) ----------
@@ -869,15 +870,22 @@ class ScribeRenderer {
   private renderOnce(): void {
     const viewportRect = { x: 0, y: 0, w: this.viewportWidth, h: this.viewportHeight };
     const range = this.viewport.visibleLineRange();
+    // Largura dinâmica do gutter: número de dígitos do total de linhas + folga.
+    const lineCount = this.source.lineCount();
+    const gutterDigits = Math.max(1, Math.floor(Math.log10(Math.max(1, lineCount))) + 1);
+    const gutterWidth = gutterDigits * 9 + 16; // ~9px/dígito + 16px padding horizontal
     const layout: LineLayout = {
       lineHeight: this.lineHeight(),
-      paddingLeft: 12,
+      paddingLeft: gutterWidth + 8,
       paddingTop: 8,
       tabWidth: 4,
       scrollOffsetPx: this.viewport.scrollOffsetPx(),
       viewport: viewportRect,
       background: COLORS.background,
       defaultColor: COLORS.text,
+      gutterWidth,
+      gutterBackground: COLORS.gutter,
+      gutterColor: COLORS.gutterFg,
     };
     const scene = buildInstances(
       this.source,

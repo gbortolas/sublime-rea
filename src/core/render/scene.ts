@@ -48,6 +48,12 @@ export interface LineLayout {
   readonly viewport: Rect;
   readonly background: RGBA;
   readonly defaultColor: RGBA;
+  /** Largura do gutter (faixa de números de linha) em px. */
+  readonly gutterWidth: number;
+  /** Cor de fundo do gutter. */
+  readonly gutterBackground: RGBA;
+  /** Cor dos números de linha no gutter. */
+  readonly gutterColor: RGBA;
 }
 
 /** Cursor opcional desenhado como `RectInstance`. */
@@ -124,10 +130,65 @@ export function buildInstances(
   const first = Math.max(0, range.first);
   const end = Math.min(total, first + Math.max(0, range.count));
 
+  // Gutter: fundo + linha atual destacada + separador.
+  if (layout.gutterWidth > 0) {
+    rects.push({
+      rect: { x: 0, y: 0, w: layout.gutterWidth, h: layout.viewport.h },
+      color: layout.gutterBackground,
+    });
+    // Highlight da linha atual no gutter (se o caret estiver no range visível).
+    if (caret && caret.line >= first && caret.line < end) {
+      rects.push({
+        rect: {
+          x: 0,
+          y: layout.paddingTop + caret.line * layout.lineHeight - layout.scrollOffsetPx,
+          w: layout.gutterWidth,
+          h: layout.lineHeight,
+        },
+        color: lighten(layout.gutterBackground, 0.08),
+      });
+    }
+    // Separador vertical entre gutter e text area.
+    lines.push({
+      x0: layout.gutterWidth,
+      y0: 0,
+      x1: layout.gutterWidth,
+      y1: layout.viewport.h,
+      thickness: 1,
+      color: lighten(layout.gutterBackground, 0.15),
+    });
+  }
+
   for (let index = first; index < end; index++) {
     const text = source.line(index);
     const y = layout.paddingTop + index * layout.lineHeight - layout.scrollOffsetPx;
     const spans = highlight?.spansFor(index);
+
+    // Gutter: número da linha (1-based), direita-alinhado no gutter.
+    if (layout.gutterWidth > 0) {
+      const lineNumber = String(index + 1);
+      // Mede a largura total do número para posicionar à direita.
+      let numWidth = 0;
+      for (let ci = 0; ci < lineNumber.length; ci++) {
+        const g = atlas.resolveGlyph(lineNumber[ci] ?? " ", style);
+        numWidth += g.advance;
+      }
+      let nx = layout.gutterWidth - 8 - numWidth; // 8px padding direito
+      for (let ci = 0; ci < lineNumber.length; ci++) {
+        const g = atlas.resolveGlyph(lineNumber[ci] ?? " ", style);
+        glyphs.push({
+          atlasX: g.region.x,
+          atlasY: g.region.y,
+          atlasW: g.region.w,
+          atlasH: g.region.h,
+          x: nx,
+          y,
+          color: layout.gutterColor,
+        });
+        nx += g.advance;
+      }
+    }
+
     let x = layout.paddingLeft;
     let column = 0;
     let offset = 0;
@@ -285,6 +346,18 @@ function caretAdvance(atlas: GlyphAtlas, style: TextStyle, column: number, space
   if (column <= 0) return 0;
   const metrics = atlas.measure(" ".repeat(column), atlas.registerStyle(style));
   return metrics.advance === 0 ? column * spaceAdvance : metrics.advance;
+}
+
+/**
+ * Clareia uma cor RGBA por um fator (0 = sem mudança, 1 = branco). Cada canal é interpolado
+ * linearmente: `result = color + (255 - color) * factor`. Alpha não é alterado.
+ */
+function lighten(color: RGBA, factor: number): RGBA {
+  const r = Math.min(255, Math.round(((color >>> 24) & 0xff) + (255 - ((color >>> 24) & 0xff)) * factor));
+  const g = Math.min(255, Math.round(((color >>> 16) & 0xff) + (255 - ((color >>> 16) & 0xff)) * factor));
+  const b = Math.min(255, Math.round(((color >>> 8) & 0xff) + (255 - ((color >>> 8) & 0xff)) * factor));
+  const a = color & 0xff;
+  return ((r << 24) | (g << 16) | (b << 8) | a) >>> 0;
 }
 
 /**
