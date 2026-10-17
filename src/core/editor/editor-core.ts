@@ -24,15 +24,21 @@ import type {
   Disposable,
   DocumentChangedEvent,
   DocumentHandle,
+  DocumentHighlight,
   DocumentRegistry,
   DocumentUndoState,
   Edit,
   EditOrigin,
+  GrammarRegistry,
+  HighlightLine,
+  HighlightSpan,
   MainThreadBusy,
   PropertyDefinition,
   PropertySystem,
+  ResourceEntry,
   ResourceLayer,
   Scheduler,
+  SyntaxGrammar,
   TaskPool,
 } from "../../shared";
 import {
@@ -41,6 +47,7 @@ import {
   Emitter,
   PROPERTY_IO_WORKERS,
   RENDER_BACKEND_PROPERTY,
+  parseResourceUri,
 } from "../../shared";
 import { availableParallelism as osAvailableParallelism } from "node:os";
 
@@ -53,6 +60,7 @@ import type { FlushScheduler, SchedulerOptions, TaskPoolOptions } from "../concu
 import { PackageResolverImpl } from "../packages";
 import type { ResourceScanner } from "../packages";
 import { PropertySystemImpl } from "../properties";
+import { GrammarRegistryImpl } from "../syntax";
 
 /** Lane `index` (cold-start) — teto por propriedade (DEC-CON-6/9). */
 export const PROPERTY_INDEX_WORKERS = "index.indexWorkers";
@@ -122,8 +130,12 @@ export interface EditorCore {
   readonly pool: TaskPool;
   readonly packages: PackageResolverImpl;
   readonly properties: PropertySystem;
+  /** Registro de gramáticas alimentado pelos recursos `kind:"syntax"` (DEC-PKG-8). */
+  readonly grammars: GrammarRegistry;
   /** Resolve quando o índice de pacotes terminar (resolvido se não houve raízes). */
   readonly packagesReady: Promise<void>;
+  /** Resolve depois de `packagesReady`, quando as gramáticas `.sublime-syntax` forem registradas. */
+  readonly syntaxReady: Promise<void>;
 
   openDocument(path: string, signal?: AbortSignal): Promise<DocumentHandle>;
   documentText(handle: DocumentHandle): string;
@@ -134,6 +146,10 @@ export interface EditorCore {
     origin?: "plugin" | "user",
   ): Promise<number>;
   revisionOf(handle: DocumentHandle): number;
+  /** Gramática resolvida para a extensão do documento; `undefined` se não houver (DEC-PKG-8). */
+  grammarForDocument(handle: DocumentHandle): SyntaxGrammar | undefined;
+  /** Destaque por linha do range pedido (o renderer consome isto pelo IPC `syntax.highlight`). */
+  highlightDocument(handle: DocumentHandle, first: number, count: number): DocumentHighlight;
   /** Desfaz a última transação do documento (delega ao `CommandBus`/`UndoStack`). */
   undoDocument(handle: DocumentHandle): Promise<DocumentUndoState>;
   /** Refaz a última transação desfeita do documento (par simétrico de `undoDocument`). */
@@ -150,6 +166,47 @@ interface CoreState {
   activeHandle: DocumentHandle | undefined;
   pendingHandle: DocumentHandle | undefined;
   caret: number;
+}
+
+/** Cache de destaque por documento: linhas, estados de entrada e spans, tudo por revisão. */
+interface HighlightCacheEntry {
+  revision: number;
+  lines: string[];
+  states: unknown[];
+  spans: (readonly HighlightSpan[])[];
+}
+
+/** Extensão do documento (minúscula, sem ponto) a partir do caminho. */
+function extensionOfPath(path: string): string {
+  const base = path.slice(path.lastIndexOf("/") + 1);
+  const dot = base.lastIndexOf(".");
+  return dot <= 0 ? "" : base.slice(dot + 1).toLowerCase();
+}
+
+/** Nome lógico da gramática no namespace de recursos (o mesmo que `include`/`extends` usam). */
+function grammarLogicalName(entry: ResourceEntry): string {
+  const { packageName, path } = parseResourceUri(entry.uri);
+  return `Packages/${packageName}/${path}`;
+}
+
+/**
+ * Registra as gramáticas `.sublime-syntax` do índice na ordem do `PackageResolver`. Uma gramática
+ * malformada é **logada e ignorada** (degradação explícita — DEC-TR-7), nunca silenciosa; o `.tmlanguage`
+ * legado (plist) fica de fora (o adapter da DEC-PKG-12 não é escopo desta fatia).
+ */
+async function loadGrammars(
+  packages: PackageResolverImpl,
+  grammars: GrammarRegistryImpl,
+): Promise<void> {
+  for (const entry of packages.byKind("syntax")) {
+    if (!entry.uri.toLowerCase().endsWith(".sublime-syntax")) continue;
+    try {
+      const bytes = await packages.load(entry.uri);
+      grammars.register(grammarLogicalName(entry), new TextDecoder().decode(bytes));
+    } catch (error) {
+      console.error(`Scribe: gramática ignorada (${entry.uri})`, error);
+    }
+  }
 }
 
 interface InsertArgs {
@@ -222,6 +279,11 @@ export function createEditorCore(options: EditorCoreOptions = {}): EditorCore {
   const packagesReady: Promise<void> =
     roots !== undefined && Object.keys(roots).length > 0 ? packages.build(roots) : Promise.resolve();
 
+  const grammars = new GrammarRegistryImpl();
+  const documentExtensions = new Map<DocumentHandle, string>();
+  const highlightCache = new Map<DocumentHandle, HighlightCacheEntry>();
+  const syntaxReady: Promise<void> = packagesReady.then(() => loadGrammars(packages, grammars));
+
   const state: CoreState = { activeHandle: undefined, pendingHandle: undefined, caret: 0 };
   const emitter = new Emitter<DocumentChangedEvent>();
   const opened = new Set<DocumentHandle>();
@@ -279,6 +341,52 @@ export function createEditorCore(options: EditorCoreOptions = {}): EditorCore {
       emitter.fire({ handle, revision: event.revision });
     });
     subscriptions.set(handle, subscription);
+  }
+
+  /** Gramática da extensão do documento (resolve o handle antes — DEC-TR-1). */
+  function grammarForDocumentOf(handle: DocumentHandle): SyntaxGrammar | undefined {
+    resolveBuffer(handle);
+    const extension = documentExtensions.get(handle);
+    if (extension === undefined || extension.length === 0) return undefined;
+    return grammars.forExtension(extension);
+  }
+
+  /**
+   * Cache de destaque do documento. O estado de entrada de cada linha depende de **todas** as linhas
+   * anteriores, então tokenizamos do começo até o fim do range pedido e guardamos por revisão; um
+   * novo `revision` descarta o cache. (Limite conhecido: guardamos estados/spans até o range pedido,
+   * não o documento inteiro.)
+   */
+  function ensureHighlightCache(
+    handle: DocumentHandle,
+    revision: number,
+    text: string,
+  ): HighlightCacheEntry {
+    const existing = highlightCache.get(handle);
+    if (existing !== undefined && existing.revision === revision) return existing;
+    const entry: HighlightCacheEntry = { revision, lines: text.split("\n"), states: [], spans: [] };
+    highlightCache.set(handle, entry);
+    return entry;
+  }
+
+  function extendHighlightCache(
+    entry: HighlightCacheEntry,
+    end: number,
+    grammar: SyntaxGrammar | undefined,
+  ): void {
+    while (entry.states.length < end) {
+      const index = entry.states.length;
+      const previous = index === 0 ? undefined : entry.states[index - 1];
+      const line = entry.lines[index] ?? "";
+      if (grammar === undefined) {
+        entry.spans[index] = [];
+        entry.states.push(undefined);
+        continue;
+      }
+      const tokenized = grammar.tokenizeLine(line, previous);
+      entry.spans[index] = tokenized.spans;
+      entry.states.push(tokenized.state);
+    }
   }
 
   /** Fila de escrita única: garante que o alvo do bus aponte ao documento certo. */
@@ -366,7 +474,9 @@ export function createEditorCore(options: EditorCoreOptions = {}): EditorCore {
     pool,
     packages,
     properties,
+    grammars,
     packagesReady,
+    syntaxReady,
 
     async openDocument(path: string, signal?: AbortSignal): Promise<DocumentHandle> {
       assertNotDisposed();
@@ -380,6 +490,7 @@ export function createEditorCore(options: EditorCoreOptions = {}): EditorCore {
         throw new CancellationError(`abertura de "${path}" cancelada`);
       }
       opened.add(handle);
+      documentExtensions.set(handle, extensionOfPath(path));
       ensureSubscribed(handle);
       state.activeHandle = handle;
       return handle;
@@ -400,6 +511,26 @@ export function createEditorCore(options: EditorCoreOptions = {}): EditorCore {
 
     revisionOf(handle: DocumentHandle): number {
       return resolveBuffer(handle).revision;
+    },
+
+    grammarForDocument(handle: DocumentHandle): SyntaxGrammar | undefined {
+      return grammarForDocumentOf(handle);
+    },
+
+    highlightDocument(handle: DocumentHandle, first: number, count: number): DocumentHighlight {
+      const buffer = resolveBuffer(handle);
+      const start = Math.max(0, Math.trunc(first));
+      const take = Math.max(0, Math.trunc(count));
+      const revision = buffer.revision;
+      const grammar = grammarForDocumentOf(handle);
+      const entry = ensureHighlightCache(handle, revision, buffer.text());
+      const end = Math.min(entry.lines.length, start + take);
+      extendHighlightCache(entry, end, grammar);
+      const lines: HighlightLine[] = [];
+      for (let line = start; line < end; line++) {
+        lines.push({ line, spans: entry.spans[line] ?? [] });
+      }
+      return { revision, first: start, lines };
     },
 
     undoDocument(handle: DocumentHandle): Promise<DocumentUndoState> {
@@ -438,6 +569,9 @@ export function createEditorCore(options: EditorCoreOptions = {}): EditorCore {
       scheduler.dispose();
       properties.dispose();
       packages.dispose();
+      grammars.dispose();
+      documentExtensions.clear();
+      highlightCache.clear();
       void pool.shutdown().catch((error: unknown) => {
         console.error("Scribe: falha ao encerrar o TaskPool", error);
       });

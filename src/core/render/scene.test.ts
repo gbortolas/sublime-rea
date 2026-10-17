@@ -2,9 +2,21 @@
  * Testes do `scene.ts`: só linhas visíveis viram instâncias (virtualização), tabs e caret.
  */
 import { describe, expect, it } from "vitest";
-import type { TextStyle } from "../../shared";
+import type { RGBA, Scope, ScopeStyle, TextStyle, ThemeResolver } from "../../shared";
 import { GlyphAtlas } from "./atlas";
 import { buildInstances, type LineLayout, type LineSource } from "./scene";
+
+/** Resolvedor de tema mínimo local ao teste (evita import cruzado entre módulos de `core`). */
+function prefixTheme(rules: Readonly<Record<string, RGBA>>): ThemeResolver {
+  return {
+    styleFor(scope: Scope): ScopeStyle | undefined {
+      for (const [selector, color] of Object.entries(rules)) {
+        if (scope === selector || scope.startsWith(`${selector}.`)) return { color };
+      }
+      return undefined;
+    },
+  };
+}
 
 const style: TextStyle = { family: "mono", sizePx: 16, weight: 400, italic: false };
 
@@ -63,6 +75,54 @@ describe("buildInstances — virtualização", () => {
     expect(scene.glyphs).toHaveLength(1);
     const spaceAdvance = atlas.resolveGlyph(" ", style).advance;
     expect(scene.glyphs[0]?.x).toBeCloseTo(8 + 4 * spaceAdvance, 5);
+  });
+});
+
+describe("buildInstances — destaque por escopo", () => {
+  const theme = prefixTheme({ keyword: 0xff0000ff as RGBA, string: 0x00ff00ff as RGBA });
+
+  const spans = [
+    { start: 0, end: 3, scope: "keyword.control" },
+    { start: 3, end: 4, scope: "source.demo" },
+    { start: 4, end: 7, scope: "string.quoted" },
+  ];
+
+  it("colore cada glifo pela cor do escopo e cai no default quando não há regra", () => {
+    const atlas = new GlyphAtlas();
+    const scene = buildInstances(
+      sourceOf(["abc def"]),
+      layout(0),
+      atlas,
+      style,
+      { first: 0, count: 1 },
+      undefined,
+      { spansFor: (): typeof spans => spans, theme },
+    );
+    // "abc" (keyword) + "def" (string); o espaço em [3,4) não gera glifo.
+    const colors = scene.glyphs.map((glyph) => glyph.color);
+    expect(colors.slice(0, 3)).toEqual([0xff0000ff, 0xff0000ff, 0xff0000ff]);
+    expect(colors.slice(3)).toEqual([0x00ff00ff, 0x00ff00ff, 0x00ff00ff]);
+    expect(colors).not.toContain(layout(0).defaultColor);
+  });
+
+  it("sem highlighter, todos os glifos usam a cor default (retrocompatível)", () => {
+    const atlas = new GlyphAtlas();
+    const scene = buildInstances(sourceOf(["abc"]), layout(0), atlas, style, { first: 0, count: 1 });
+    expect(scene.glyphs.every((glyph) => glyph.color === layout(0).defaultColor)).toBe(true);
+  });
+
+  it("um escopo sem regra de tema cai na cor default", () => {
+    const atlas = new GlyphAtlas();
+    const scene = buildInstances(
+      sourceOf(["abc"]),
+      layout(0),
+      atlas,
+      style,
+      { first: 0, count: 1 },
+      undefined,
+      { spansFor: () => [{ start: 0, end: 3, scope: "text.plain" }], theme },
+    );
+    expect(scene.glyphs.every((glyph) => glyph.color === layout(0).defaultColor)).toBe(true);
   });
 });
 

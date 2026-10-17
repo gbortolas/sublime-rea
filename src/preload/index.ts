@@ -16,6 +16,7 @@ import { contextBridge, ipcRenderer } from "electron";
 import type {
   DocumentChangedEvent,
   DocumentHandle,
+  DocumentHighlight,
   DocumentUndoState,
   MainThreadBusy,
 } from "../shared";
@@ -46,6 +47,8 @@ export interface ScribePreloadApi {
   undo(handle: DocumentHandle): Promise<DocumentUndoState>;
   redo(handle: DocumentHandle): Promise<DocumentUndoState>;
   undoState(handle: DocumentHandle): Promise<DocumentUndoState>;
+  /** Destaque de sintaxe de um range de linhas (o main resolve a gramática e tokeniza). */
+  highlight(handle: DocumentHandle, first: number, count: number): Promise<DocumentHighlight>;
   /** Cancela a operação em voo identificada por `signalId` (envelope `IpcCancel`). */
   cancel(signalId: number): void;
   /** Gera um `signalId` novo para uma operação cancelável (evita colisão com outros chamadores). */
@@ -142,6 +145,8 @@ const api: ScribePreloadApi = {
     call<DocumentUndoState>("editor.redo", [handle]),
   undoState: (handle: DocumentHandle): Promise<DocumentUndoState> =>
     call<DocumentUndoState>("editor.undoState", [handle]),
+  highlight: (handle: DocumentHandle, first: number, count: number): Promise<DocumentHighlight> =>
+    call<DocumentHighlight>("syntax.highlight", [handle, first, count]),
   cancel: (signalId: number): void => {
     const envelope: CancelEnvelope = { v: IPC_VERSION, kind: "cancel", signalId };
     // Push: sem resposta correlacionada; engolir a rejeição da ponte é intencional.

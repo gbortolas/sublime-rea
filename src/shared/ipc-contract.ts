@@ -21,6 +21,7 @@
  */
 import type { ArgsOf, ResultOf } from "./extension-contract";
 import type { DocumentHandle } from "./handles";
+import type { DocumentHighlight } from "./syntax-contract";
 import type { MainThreadBusy } from "./concurrency-contract";
 
 /** Versão do contrato do canal — `"<major>.<minor>"` (DEC-IPC-11: handshake negocia). */
@@ -80,6 +81,12 @@ export interface IpcMethods {
   "editor.redo"(handle: DocumentHandle): DocumentUndoState;
   "editor.undoState"(handle: DocumentHandle): DocumentUndoState;
   "editor.snapshot"(): MainThreadBusy;
+  /**
+   * Destaque de sintaxe de um range de linhas — o main resolve a gramática pelo `PackageResolver`
+   * e tokeniza (DEC-PKG-8); o renderer só colore com o `ThemeResolver`. `first`/`count` são o range
+   * de linhas absolutas (a virtualização do `Viewport` já manda só o visível).
+   */
+  "syntax.highlight"(handle: DocumentHandle, first: number, count: number): DocumentHighlight;
 }
 
 export type IpcMethodName = keyof IpcMethods & string;
@@ -106,6 +113,7 @@ export const IPC_METHODS = [
   "editor.redo",
   "editor.undoState",
   "editor.snapshot",
+  "syntax.highlight",
 ] as const satisfies readonly IpcMethodName[];
 
 export const IPC_EVENT_NAMES = ["document.changed"] as const satisfies readonly IpcEventName[];

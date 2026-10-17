@@ -1,0 +1,48 @@
+%YAML 1.2
+---
+# Scribe Demo — gramática de brinquedo do Scribe.
+#
+# ⚠️ ESCOLHA NOSSA (não observada no alvo): este arquivo NÃO é uma gramática do Sublime Text nem
+# foi copiado de lugar nenhum. Existe só para provar o caminho de ponta a ponta
+# (`PackageResolver` → gramática → tokens → `RenderPipeline`). Cobre o mínimo: comentário de linha,
+# string com aspas (com escapes), palavra-chave, número, identificador e um `captures`.
+name: Scribe Demo
+scope: source.demo
+version: "1"
+file_extensions: [demo]
+variables:
+  ident: '[A-Za-z_][A-Za-z0-9_]*'
+  keyword: 'const|let|var|if|else|return|function'
+contexts:
+  main:
+    - match: '//.*$'
+      scope: comment.line.double-slash.demo
+    - match: '"'
+      scope: punctuation.definition.string.begin.demo
+      push: double_quoted_string
+    # `captures`: o nome vira `variable.other.assignment`, o `=` vira operador; o resto do
+    # casamento fica com o escopo da regra.
+    - match: '\b({{ident}})(\s*)(=)(?!=)'
+      scope: meta.assignment.demo
+      captures:
+        1: variable.other.assignment.demo
+        3: keyword.operator.assignment.demo
+    - include: keywords
+    - include: numbers
+  keywords:
+    - match: '\b({{keyword}})\b'
+      scope: keyword.control.demo
+  numbers:
+    - match: '\b[0-9]+(\.[0-9]+)?\b'
+      scope: constant.numeric.demo
+  double_quoted_string:
+    - include: escapes
+    - match: '"'
+      scope: punctuation.definition.string.end.demo
+      pop: true
+    - match: '[^"\\]+'
+      scope: string.quoted.double.demo
+  escapes:
+    - match: '\\.'
+      scope: constant.character.escape.demo
+...

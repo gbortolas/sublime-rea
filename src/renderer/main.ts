@@ -17,7 +17,15 @@ import {
   RENDER_BACKEND_PROPERTY,
   toDisposable,
 } from "../shared";
-import type { Disposable, RenderBackendKind, RGBA, RenderPipeline, TextStyle } from "../shared";
+import type {
+  Disposable,
+  DocumentHighlight,
+  HighlightSpan,
+  RenderBackendKind,
+  RGBA,
+  RenderPipeline,
+  TextStyle,
+} from "../shared";
 import {
   Canvas2DBackend,
   GlyphAtlas,
@@ -29,9 +37,11 @@ import {
   type GlyphRasterizer,
   type LineLayout,
   type LineSource,
+  type SceneHighlight,
   type TextMeasurer,
   buildInstances,
 } from "../core/render";
+import { createDefaultTheme } from "../core/syntax";
 
 const DEMO_LINE_COUNT = 200;
 const GLYPH_CHUNK = 2048;
@@ -219,6 +229,7 @@ interface ScribeBridge {
   undo(handle: number): Promise<UndoStateDto>;
   redo(handle: number): Promise<UndoStateDto>;
   undoState(handle: number): Promise<UndoStateDto>;
+  highlight(handle: number, first: number, count: number): Promise<DocumentHighlight>;
   cancel(signalId: number): void;
   nextSignalId(): number;
   snapshot(): Promise<unknown>;
@@ -235,7 +246,8 @@ function readBridge(): ScribeBridge | undefined {
     typeof candidate.undo === "function" &&
     typeof candidate.redo === "function" &&
     typeof candidate.openDialog === "function" &&
-    typeof candidate.onDocumentChanged === "function";
+    typeof candidate.onDocumentChanged === "function" &&
+    typeof candidate.highlight === "function";
   return ready ? (candidate as ScribeBridge) : undefined;
 }
 
@@ -245,6 +257,37 @@ interface DocumentSession {
   readonly source: DocumentLineSource;
   caret: number;
   dispose(): void;
+}
+
+/**
+ * Cache de spans por linha no renderer (a resposta do IPC `syntax.highlight`). Guarda por revisão e
+ * só serve o que cobriu o range pedido — quem não estiver coberto cai na cor default e um novo
+ * pedido é disparado (a resposta volta e redesenha).
+ */
+class HighlightStore {
+  private revision = -1;
+  private first = 0;
+  private count = 0;
+  private spans: (readonly HighlightSpan[] | undefined)[] = [];
+
+  set(highlight: DocumentHighlight): void {
+    if (this.revision !== -1 && highlight.revision < this.revision) return;
+    this.revision = highlight.revision;
+    this.first = highlight.first;
+    this.count = highlight.lines.length;
+    this.spans = [];
+    for (const line of highlight.lines) this.spans[line.line] = line.spans;
+  }
+
+  spansFor(line: number): readonly HighlightSpan[] | undefined {
+    return this.spans[line];
+  }
+
+  covers(revision: number, first: number, count: number): boolean {
+    return (
+      this.revision === revision && first >= this.first && first + count <= this.first + this.count
+    );
+  }
 }
 
 function documentPath(): string | undefined {
@@ -338,6 +381,19 @@ class DocumentController {
     return this.open(path);
   }
 
+  /** Pede o destaque de um range de linhas do documento atual (o main tokeniza e devolve spans). */
+  async loadHighlight(first: number, count: number): Promise<DocumentHighlight | null> {
+    const session = this.session;
+    if (session === undefined || count <= 0) return null;
+    try {
+      return await session.bridge.highlight(session.handle, first, count);
+    } catch (error) {
+      // Degradação explícita: sem destaque o renderer cai na cor default (DEC-TR-7).
+      console.warn("Scribe: falha ao obter destaque de sintaxe", error);
+      return null;
+    }
+  }
+
   async undo(): Promise<void> {
     await this.runHistory("undo");
   }
@@ -347,8 +403,7 @@ class DocumentController {
   }
 
   /** Digitação mínima: insere no caret e relê o documento. */
-  async insertText(text: string): Promise<void> {
-    const session = this.session;
+  async insertText(text: string): Promise<void> {    const session = this.session;
     if (session === undefined) return;
     try {
       const revision = await session.bridge.insert(session.handle, session.caret, text, "user");
@@ -426,6 +481,8 @@ class ScribeRenderer {
   private viewportHeight = 1;
   private rafHandle = 0;
   private running = false;
+  private highlighter: SceneHighlight | undefined;
+  private requestHighlight: ((first: number, count: number) => void) | undefined;
 
   constructor(
     private readonly canvas: HTMLCanvasElement,
@@ -436,6 +493,12 @@ class ScribeRenderer {
   ) {
     this.source = source;
     this.dpr = window.devicePixelRatio || 1;
+  }
+
+  /** Liga o destaque de sintaxe (spans por linha) e o gatilho para buscá-lo quando faltar. */
+  setHighlighter(highlighter: SceneHighlight, request: (first: number, count: number) => void): void {
+    this.highlighter = highlighter;
+    this.requestHighlight = request;
   }
 
   attachSource(source: LineSource): void {
@@ -486,12 +549,21 @@ class ScribeRenderer {
       background: COLORS.background,
       defaultColor: COLORS.text,
     };
-    const scene = buildInstances(this.source, layout, this.atlas, this.style, range, {
-      line: Math.floor(this.viewport.scrollOffsetPx() / layout.lineHeight),
-      column: 0,
-      color: COLORS.caret,
-      width: 2,
-    });
+    const scene = buildInstances(
+      this.source,
+      layout,
+      this.atlas,
+      this.style,
+      range,
+      {
+        line: Math.floor(this.viewport.scrollOffsetPx() / layout.lineHeight),
+        column: 0,
+        color: COLORS.caret,
+        width: 2,
+      },
+      this.highlighter,
+    );
+    this.requestHighlight?.(range.first, range.count);
 
     // Damage da viewport → limpeza seletiva no beginFrame → desenho → present (DEC-REN-4).
     const damage = this.viewport.takeDamage();
@@ -603,6 +675,22 @@ export async function bootRenderer(): Promise<boolean> {
     bridge !== undefined
       ? new DocumentController(bridge, source, viewport, renderer)
       : undefined;
+
+  // Destaque de sintaxe: o main resolve a gramática e tokeniza; aqui só colorimos (ThemeResolver).
+  const highlightStore = new HighlightStore();
+  const theme = createDefaultTheme();
+  renderer.setHighlighter(
+    { spansFor: (line) => highlightStore.spansFor(line), theme },
+    (first, count) => {
+      if (controller === undefined) return;
+      if (highlightStore.covers(source.revision, first, count)) return;
+      void controller.loadHighlight(first, count).then((highlight) => {
+        if (highlight === null) return;
+        highlightStore.set(highlight);
+        renderer.start();
+      });
+    },
+  );
 
   const initialPath = documentPath();
   let opened = false;

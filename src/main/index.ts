@@ -303,6 +303,12 @@ async function dispatchIpc(
       return core.undoStateOf(requireHandle(request.args[0], "editor.undoState"));
     case "editor.snapshot":
       return core.snapshot();
+    case "syntax.highlight": {
+      const handle = requireHandle(request.args[0], "syntax.highlight");
+      const first = requireNumber(request.args[1], "syntax.highlight", "first");
+      const count = requireNumber(request.args[2], "syntax.highlight", "count");
+      return core.highlightDocument(handle, first, count);
+    }
     default:
       // Inalcançável: `parseIpcRequest` já validou o método; guarda contra regressão.
       throw new IpcProtocolError("unknown-method", "método desconhecido");
@@ -356,7 +362,8 @@ function requireHandle(value: unknown, method: string): DocumentHandle {
 function packageRoots(appPath: string, userData: string): Partial<Record<ResourceLayer, readonly string[]>> {
   return {
     os: [join(__dirname, "..", "..", "res")],
-    app: [join(appPath, "res"), join(appPath, "packages")],
+    // `assets/grammars` é onde vive a gramática de brinquedo do Scribe (escolha nossa).
+    app: [join(appPath, "res"), join(appPath, "packages"), join(appPath, "assets", "grammars")],
     user: [join(userData, "Packages")],
   };
 }

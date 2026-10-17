@@ -12,6 +12,7 @@
  */
 
 import type { GlyphInstance, LineInstance, Rect, RectInstance, RGBA, TextStyle } from "../../shared";
+import type { HighlightSpan, Scope, ThemeResolver } from "../../shared";
 import type { GlyphAtlas } from "./atlas";
 import type { LineRange } from "./viewport";
 
@@ -19,6 +20,16 @@ import type { LineRange } from "./viewport";
 export interface LineSource {
   lineCount(): number;
   line(index: number): string;
+}
+
+/**
+ * Destaque por linha (a costura nova): spans por linha + resolução escopo → cor. Quem não tiver
+ * gramática passa `undefined` e todo glifo cai em `layout.defaultColor` (retrocompatível).
+ */
+export interface SceneHighlight {
+  /** Spans da linha (offsets em code units UTF-16) ou `undefined` se não houver destaque. */
+  spansFor(line: number): readonly HighlightSpan[] | undefined;
+  theme: ThemeResolver;
 }
 
 /** Layout do texto em px lógicos (tema + geometria do gutter). */
@@ -53,7 +64,11 @@ export interface SceneInstances {
 
 /**
  * Monta as instâncias do **range visível**. Determinístico e puro (não toca no pipeline): o mesmo
- * `(source, layout, atlas, style, range, caret)` produz sempre as mesmas instâncias.
+ * `(source, layout, atlas, style, range, caret, highlight)` produz sempre as mesmas instâncias.
+ *
+ * `highlight` é **opcional** (retrocompatível): quando presente, cada glifo é colorido pela cor do
+ * escopo que cobre o seu offset na linha (via `ThemeResolver`); sem span/tema, cai em
+ * `layout.defaultColor`.
  */
 export function buildInstances(
   source: LineSource,
@@ -62,6 +77,7 @@ export function buildInstances(
   style: TextStyle,
   range: LineRange,
   caret?: CaretPosition,
+  highlight?: SceneHighlight,
 ): SceneInstances {
   const rects: RectInstance[] = [
     { rect: layout.viewport, color: layout.background },
@@ -78,14 +94,21 @@ export function buildInstances(
   for (let index = first; index < end; index++) {
     const text = source.line(index);
     const y = layout.paddingTop + index * layout.lineHeight - layout.scrollOffsetPx;
+    const spans = highlight?.spansFor(index);
     let x = layout.paddingLeft;
     let column = 0;
+    let offset = 0;
 
-    for (const rune of text) {
+    while (offset < text.length) {
+      const code = text.codePointAt(offset);
+      if (code === undefined) break;
+      const rune = String.fromCodePoint(code);
+      const size = rune.length;
       if (rune === "\t") {
         const stop = layout.tabWidth - (column % layout.tabWidth);
         x += spaceAdvance * stop;
         column += stop;
+        offset += size;
         continue;
       }
       const placed = atlas.resolveGlyph(rune, style);
@@ -97,11 +120,12 @@ export function buildInstances(
           atlasH: placed.region.h,
           x,
           y,
-          color: layout.defaultColor,
+          color: glyphColor(spans, highlight?.theme, offset) ?? layout.defaultColor,
         });
       }
       x += placed.advance;
       column += 1;
+      offset += size;
     }
   }
 
@@ -124,4 +148,26 @@ function caretAdvance(atlas: GlyphAtlas, style: TextStyle, column: number, space
   if (column <= 0) return 0;
   const metrics = atlas.measure(" ".repeat(column), atlas.registerStyle(style));
   return metrics.advance === 0 ? column * spaceAdvance : metrics.advance;
+}
+
+/**
+ * Cor do glifo pelo escopo que cobre o offset. Os spans do tokenizador são não sobrepostos e
+ * ordenados, então o primeiro que contém o offset decide; sem span ou sem regra de tema → `undefined`
+ * (o chamador usa `layout.defaultColor`).
+ */
+function glyphColor(
+  spans: readonly HighlightSpan[] | undefined,
+  theme: ThemeResolver | undefined,
+  offset: number,
+): RGBA | undefined {
+  if (spans === undefined || theme === undefined) return undefined;
+  for (const span of spans) {
+    if (offset < span.start) return undefined;
+    if (offset < span.end) return styleColor(theme, span.scope);
+  }
+  return undefined;
+}
+
+function styleColor(theme: ThemeResolver, scope: Scope): RGBA | undefined {
+  return theme.styleFor(scope)?.color;
 }
