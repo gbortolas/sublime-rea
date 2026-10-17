@@ -171,6 +171,14 @@ interface CoreState {
 /** Cache de destaque por documento: linhas, estados de entrada e spans, tudo por revisão. */
 interface HighlightCacheEntry {
   revision: number;
+  /**
+   * Identidade da gramática que produziu os spans (`undefined` = documento sem gramática na hora).
+   * Faz parte da **chave** do cache: o `highlightDocument` pode rodar **antes** de `syntaxReady`
+   * resolver (grava spans vazios) e, sem isto, a mesma `revision` serviria a entrada vazia para
+   * sempre. Com a identidade, a chegada da gramática (ou um re-registro, que recompila) invalida a
+   * entrada e o texto é retokenizado.
+   */
+  grammar: SyntaxGrammar | undefined;
   lines: string[];
   states: unknown[];
   spans: (readonly HighlightSpan[])[];
@@ -356,15 +364,29 @@ export function createEditorCore(options: EditorCoreOptions = {}): EditorCore {
    * anteriores, então tokenizamos do começo até o fim do range pedido e guardamos por revisão; um
    * novo `revision` descarta o cache. (Limite conhecido: guardamos estados/spans até o range pedido,
    * não o documento inteiro.)
+   *
+   * A chave é o par (**revisão**, **identidade da gramática**): só a revisão não basta, porque o
+   * destaque pode ser pedido antes de as gramáticas carregarem (spans vazios) e esse resultado
+   * ficaria preso à mesma revisão. Mesma revisão com gramática diferente (chegou depois, ou foi
+   * re-registrada e recompilou) ⇒ entrada nova, texto retokenizado.
    */
   function ensureHighlightCache(
     handle: DocumentHandle,
     revision: number,
     text: string,
+    grammar: SyntaxGrammar | undefined,
   ): HighlightCacheEntry {
     const existing = highlightCache.get(handle);
-    if (existing !== undefined && existing.revision === revision) return existing;
-    const entry: HighlightCacheEntry = { revision, lines: text.split("\n"), states: [], spans: [] };
+    if (existing !== undefined && existing.revision === revision && existing.grammar === grammar) {
+      return existing;
+    }
+    const entry: HighlightCacheEntry = {
+      revision,
+      grammar,
+      lines: text.split("\n"),
+      states: [],
+      spans: [],
+    };
     highlightCache.set(handle, entry);
     return entry;
   }
@@ -385,6 +407,8 @@ export function createEditorCore(options: EditorCoreOptions = {}): EditorCore {
       }
       const tokenized = grammar.tokenizeLine(line, previous);
       entry.spans[index] = tokenized.spans;
+      // Estado opaco do tokenizer: para uma linha acima do teto por linha ele volta **neutralizado**
+      // (o prefixo cortado não propaga estado parcial — ver `tokenizer.ts`).
       entry.states.push(tokenized.state);
     }
   }
@@ -523,7 +547,10 @@ export function createEditorCore(options: EditorCoreOptions = {}): EditorCore {
       const take = Math.max(0, Math.trunc(count));
       const revision = buffer.revision;
       const grammar = grammarForDocumentOf(handle);
-      const entry = ensureHighlightCache(handle, revision, buffer.text());
+      const entry = ensureHighlightCache(handle, revision, buffer.text(), grammar);
+      // Custo O(`end`): tokenizamos de `states.length = 0` até a linha visível **absoluta** `end` (o
+      // estado de cada linha depende de todas as anteriores). O teto do tokenizer é **por linha**,
+      // não por documento — o vetor residual está em `docs/BACKLOG.md` §P2.4b.
       const end = Math.min(entry.lines.length, start + take);
       extendHighlightCache(entry, end, grammar);
       const lines: HighlightLine[] = [];

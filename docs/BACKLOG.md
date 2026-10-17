@@ -146,8 +146,9 @@ IDs). Cada item vira uma seção da spec técnica abstrata. **Fase 1 FECHADA** �
       **Scribe**; aplicado em `TECHNICAL_SPECIFICATION.md` ("Scribe / High-Performance Electron Text
       Editor Core"), em [`docs/architecture/`](architecture/) e no `README.md`. O repositório segue
       **`sublime-rea`** (nome do repo, não do produto).
-- [~] **P2.4 — Fase 3.2: primeira fatia vertical end-to-end** ← **em andamento** (3 de 4 frentes já
-      provadas ponta a ponta):
+- [~] **P2.4 — Fase 3.2: primeira fatia vertical end-to-end** ← **em andamento**; falta **1 frente**
+      (busca/substituição) — as outras **4** estão provadas ponta a ponta (abrir arquivo, cancelamento,
+      undo/redo, realce de sintaxe):
       - [x] **Abrir arquivo real** sem `?file=` ✅ — arg de linha de comando + `dialog.showOpenDialog`
             (IPC `document.openDialog`); `Ctrl/Cmd+O` abre **pós-boot** também. (`04096ae`)
       - [x] **Fiar o cancelamento** ✅ — registro `signalId → AbortController` no `main`, `IpcCancel` no
@@ -159,29 +160,36 @@ IDs). Cada item vira uma seção da spec técnica abstrata. **Fase 1 FECHADA** �
       - [x] **Realce de sintaxe** ponta a ponta ✅ — `src/core/syntax/**` (YAML de subconjunto +
             gramática + tokenizer + theme + registry), `syntax.highlight` no IPC e coloração por escopo
             em `buildInstances`; fixture **nossa** `assets/grammars/scribe-demo.sublime-syntax`.
-            **MAS** com achados de revisão pendentes → ver **P2.4b**. (`2a169be`)
+            Achados de revisão → **corrigidos** em **P2.4b** ✅. (`2a169be` + P2.4b)
       - [ ] **Busca/substituição** na lane `background` (primeiro uso real de lane não-`input`) —
-            **única frente restante**. Ainda **não** existe API de busca (`TaskResultMap` não tem kind
+            **única frente restante** ← **próximo**. Ainda **não** existe API de busca (`TaskResultMap`
+            não tem kind
             `search`); precisa de novo `TaskKind` + worker em `worker-entry.ts` + contrato IPC + serviço
             de busca no `core/editor` consumindo `pool.run`/`scheduler.post("background", …)`.
 
-- [ ] **P2.4b — Corrigir achados de revisão da Slice D** ← **próximo**. Um reviewer independente achou
-      **2 blockers baratos + 1 risco de segurança** que ficaram **sem correção** (o `fixer` foi
-      interrompido). Por severidade:
-      - **ALTO** — cache de destaque chaveado **só por `revision`**: se `highlightDocument` roda antes de
-            `syntaxReady`, grava spans vazios e **nunca recomputa** (`src/core/editor/editor-core.ts`).
-            → incluir identidade/versão da gramática na chave (ou invalidar quando `syntaxReady` mudar).
-      - **ALTO** — **sem guarda de falha**: gramática que registra mas não compila devolve `null` → um
-            IPC + `console.warn` **por frame** (`src/renderer/main.ts`). → guardar "falhou nesta
-            revision" + limitar tentativas.
-      - **ALTO** — tokenização **síncrona no `main`** sem teto: regex com quantificador aninhado +
-            texto do usuário = freeze da app (`src/core/syntax/grammar.ts`). → mitigação *bounded*:
-            teto de tamanho de linha/documento com **degradação explícita** (cair em cor default).
-      - **MÉDIO/BAIXO** — `HighlightStore` aceita resposta de mesmo `revision` cobrindo range diferente
-            (fora de ordem); `readBridge` passou a **exigir** `highlight` (quebra preload antigo);
-            `visiting` não é limpo no tokenizer; trecho sem regra usa `grammar.scope` em vez do escopo do
-            contexto do topo; captura com grupo inexistente ignorada em silêncio; re-registro não limpa
-            `byExtension` obsoleto; formatação quebrada em `src/renderer/main.ts`.
+- [x] **P2.4b — Corrigir achados de revisão da Slice D** ✅ **fechado** (2026-10-17). Os **2 blockers +
+      1 risco** do reviewer **foram corrigidos** (4 rodadas de `fixer` + re-revisões independentes que
+      acharam e fecharam 1 bug **alto** adicional). Gates finais: `typecheck`/`lint`/`build` exit 0 e
+      **348 testes / 40 arquivos** (baseline da Slice D: 319). O que foi feito:
+      - **cache de destaque** — chave = `revision` + **identidade da gramática** (`editor-core.ts`);
+            resposta vazia (pré-`syntaxReady`) **não** conta como cobertura.
+      - **guarda de falha** — `blocked`/`failed` por revisão com **1 warn** (não 1 por frame), dedupe de
+            requisição **em voo** e timeout do slot (10 s).
+      - **tokenização** — teto por linha `MAX_TOKENIZE_LINE_LENGTH = 4096` com marcador explícito
+            `text.unparsed.syntax-limit` (sem selector no tema ⇒ cor default, degradação visível);
+            prefixo truncado **neutraliza** o estado (não propaga construto cortado).
+      - **renderer** — `HighlightStore` chaveado por **documento + revisão** (invalida na troca; `revision`
+            reinicia em 1 por documento — *bug alto* pego na re-revisão), teto de retentativas
+            (4, backoff 250/500/1000 ms) e `highlight` **opcional** no `readBridge`.
+      - **sintaxe** — `visiting` copiado por ramo (corte de ciclo preservado), escopo do **contexto do
+            topo** no fallback, captura para grupo inexistente vira `warn` único, re-registro recomputa
+            `byExtension` na ordem de registro, warn de teto por **instância** de gramática.
+      - **ABERTO (residual declarado)** — o teto é **por linha**, não por documento: `highlightDocument`
+            tokeniza do estado inicial até a linha visível **absoluta** (custo O(`end`)), então *deep
+            scroll* + keystroke em documento grande re-tokeniza o prefixo inteiro a cada revisão, e regex
+            catastrófica **dentro** do prefixo de 4096 code units segue um vetor de *freeze*
+            (`src/core/editor/editor-core.ts`, `MAX_TOKENIZE_LINE_LENGTH` em `src/core/syntax/tokenizer.ts`).
+            Correção de verdade = cap de `end` **ou** tokenização em worker com prazo (novo `TaskKind`).
 
 ---
 

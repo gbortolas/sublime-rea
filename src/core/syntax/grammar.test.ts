@@ -2,10 +2,10 @@
  * Testes do compilador (`grammar.ts`): normalização, `main` obrigatório, `prototype`, `include`,
  * `extends`, `variables` e erros tipados.
  */
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 
 import { GrammarIncludeError, GrammarParseError } from "../../shared";
-import type { GrammarDefinition } from "../../shared";
+import type { GrammarDefinition, HighlightSpan, SyntaxGrammar } from "../../shared";
 import {
   compileGrammar,
   normalizeGrammarDocument,
@@ -15,6 +15,10 @@ import { parseYamlSubset } from "./yaml";
 
 function definition(source: string, logicalName = "Packages/Test/Test.sublime-syntax"): GrammarDefinition {
   return normalizeGrammarDocument(parseYamlSubset(source, logicalName), logicalName);
+}
+
+function spansOf(grammar: SyntaxGrammar, line: string): readonly HighlightSpan[] {
+  return grammar.tokenizeLine(line, undefined).spans;
 }
 
 /** Resolvedor stub: mapa de nome lógico → definição. */
@@ -255,5 +259,60 @@ describe("compileGrammar — regras estruturais", () => {
       ].join("\n"),
     );
     expect(() => compileGrammar(def, EMPTY_RESOLVER)).toThrow(GrammarIncludeError);
+  });
+
+  it("capture para grupo inexistente avisa uma vez (gramática continua utilizável)", () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      const def = definition(
+        [
+          "name: N",
+          "scope: source.n",
+          "contexts:",
+          "  main:",
+          "    - match: '(a)(b)'",
+          "      scope: meta.n",
+          "      captures:",
+          "        1: keyword.a.n",
+          "        7: keyword.nao-existe.n",
+          "",
+        ].join("\n"),
+      );
+      const grammar = compileGrammar(def, EMPTY_RESOLVER);
+      expect(warn).toHaveBeenCalledTimes(1);
+      expect(String(warn.mock.calls[0]?.[0])).toContain('capture "7"');
+      expect(spansOf(grammar, "ab")).toEqual([
+        { start: 0, end: 1, scope: "keyword.a.n" },
+        { start: 1, end: 2, scope: "meta.n" },
+      ]);
+    } finally {
+      warn.mockRestore();
+    }
+  });
+
+  it("capture nomeada inexistente avisa; a que existe (grupo nomeado) não avisa", () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      const def = definition(
+        [
+          "name: N",
+          "scope: source.n",
+          "contexts:",
+          "  main:",
+          "    - match: '(?<existe>x)'",
+          "      scope: meta.n",
+          "      captures:",
+          "        existe: keyword.ok.n",
+          "        faltando: keyword.faltando.n",
+          "",
+        ].join("\n"),
+      );
+      const grammar = compileGrammar(def, EMPTY_RESOLVER);
+      expect(warn).toHaveBeenCalledTimes(1);
+      expect(String(warn.mock.calls[0]?.[0])).toContain('capture "faltando"');
+      expect(spansOf(grammar, "x")).toEqual([{ start: 0, end: 1, scope: "keyword.ok.n" }]);
+    } finally {
+      warn.mockRestore();
+    }
   });
 });

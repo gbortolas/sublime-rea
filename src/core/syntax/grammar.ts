@@ -15,6 +15,9 @@
  *   local vence em colisão de nome) — evita um segundo namespace de contextos;
  * - `include: "scope:…"` (selector de escopo) **não** é suportado → `GrammarIncludeError`;
  * - `push`/`set`/`include` que não resolvem → `GrammarIncludeError` (nunca silencioso);
+ * - cada contexto guarda o **escopo da gramática que o definiu** (`contextScopes`): o trecho sem
+ *   regra usa o escopo da gramática do contexto do topo, não o da gramática-raiz;
+ * - `captures` que aponta para grupo inexistente no regex → **aviso único** (não é erro fatal);
  * - regexes são `RegExp` com as flags `d`+`y` (posições de grupo + casamento ancorado em `lastIndex`).
  */
 import { GrammarIncludeError, GrammarParseError } from "../../shared";
@@ -77,7 +80,13 @@ export function normalizeGrammarDocument(raw: unknown, logicalName: string): Gra
   };
 }
 
-/** Compila uma definição normalizada em gramática executável. */
+/**
+ * Compila uma definição normalizada em gramática executável.
+ *
+ * Limites conhecidos (mitigação de custo em `tokenizer.ts`): gramática é **dado não confiável**
+ * aplicado a texto do usuário, então o motor tem teto de linha e degradação explícita; capturas que
+ * apontam para grupo inexistente geram **um aviso por gramática/regra** (ver `validateCaptures`).
+ */
 export function compileGrammar(
   definition: GrammarDefinition,
   resolver: GrammarDefinitionResolver,
@@ -90,6 +99,7 @@ export function compileGrammar(
     scope: definition.scope,
     fileExtensions: definition.fileExtensions,
     contexts: compiledContexts,
+    contextScopes: collected.contextScopes,
   };
   return {
     logicalName: definition.logicalName,
@@ -105,11 +115,14 @@ export function compileGrammar(
 interface CollectedDefinitions {
   readonly contexts: ReadonlyMap<string, readonly GrammarPattern[]>;
   readonly variables: ReadonlyMap<string, string>;
+  /** Escopo-base da gramática **dona** de cada contexto (o dono é quem primeiro o definiu). */
+  readonly contextScopes: ReadonlyMap<string, Scope>;
 }
 
 class DefinitionCollector {
   private readonly contexts = new Map<string, readonly GrammarPattern[]>();
   private readonly variables = new Map<string, string>();
+  private readonly contextScopes = new Map<string, Scope>();
   private readonly visited = new Set<string>();
 
   constructor(
@@ -136,7 +149,7 @@ class DefinitionCollector {
     if (!this.contexts.has(INITIAL_CONTEXT)) {
       throw new GrammarParseError(this.root.logicalName, `contexto inicial '${INITIAL_CONTEXT}' obrigatório`);
     }
-    return { contexts: this.contexts, variables: this.variables };
+    return { contexts: this.contexts, variables: this.variables, contextScopes: this.contextScopes };
   }
 
   private merge(definition: GrammarDefinition, overwrite: boolean): void {
@@ -150,7 +163,10 @@ class DefinitionCollector {
       this.merge(parent, overwrite);
     }
     for (const context of definition.contexts) {
-      if (overwrite || !this.contexts.has(context.name)) this.contexts.set(context.name, context.patterns);
+      if (overwrite || !this.contexts.has(context.name)) {
+        this.contexts.set(context.name, context.patterns);
+        this.contextScopes.set(context.name, definition.scope);
+      }
     }
     for (const [key, value] of Object.entries(definition.variables)) {
       if (overwrite || !this.variables.has(key)) this.variables.set(key, value);
@@ -211,6 +227,9 @@ function compileContexts(
 }
 
 class PatternCompiler {
+  /** Chaves já avisadas nesta compilação — o aviso é **único** por gramática/contexto/regra. */
+  private readonly warnedCaptures = new Set<string>();
+
   constructor(
     private readonly definition: GrammarDefinition,
     private readonly collected: CollectedDefinitions,
@@ -221,14 +240,14 @@ class PatternCompiler {
     if (patterns === undefined) {
       throw new GrammarIncludeError(this.definition.logicalName, name, "contexto não existe");
     }
-    const compiled = patterns.map((pattern) => this.compilePattern(pattern));
+    const compiled = patterns.map((pattern, index) => this.compilePattern(pattern, name, index));
     if (name !== PROTOTYPE_CONTEXT && this.collected.contexts.has(PROTOTYPE_CONTEXT)) {
       compiled.push(includeRule(PROTOTYPE_CONTEXT));
     }
     return compiled;
   }
 
-  private compilePattern(pattern: GrammarPattern): CompiledPattern {
+  private compilePattern(pattern: GrammarPattern, contextName: string, index: number): CompiledPattern {
     const scope = pattern.scope !== undefined ? this.expand(pattern.scope) : null;
     const captures = this.compileCaptures(pattern.captures);
     if (pattern.include !== undefined) {
@@ -246,11 +265,43 @@ class PatternCompiler {
       return { matcher: null, scope, captures, include: null, push: null, set: null, pop: false };
     }
     const matcher = this.compileRegex(source);
+    this.validateCaptures(captures, source, contextName, index);
     const push = pattern.push !== undefined ? this.expand(pattern.push) : null;
     const set = pattern.set !== undefined ? this.expand(pattern.set) : null;
     if (push !== null) this.requireContext(push, push);
     if (set !== null) this.requireContext(set, set);
     return { matcher, scope, captures, include: null, push, set, pop: pattern.pop ?? false };
+  }
+
+  /**
+   * Captura que aponta para grupo que não existe no regex **não** é silenciosa: avisamos (uma vez)
+   * nomeando gramática, contexto, índice da regra e chave. Escolha nossa (a spec deixava em aberto):
+   * **aviso, não erro de compilação** — é o caminho mais barato e não derruba a gramática inteira
+   * por um `captures` errado; o efeito no motor é nenhum (a captura não casa nenhum range).
+   */
+  private validateCaptures(
+    captures: readonly CompiledCapture[],
+    source: string,
+    contextName: string,
+    index: number,
+  ): void {
+    if (captures.length === 0) return;
+    const info = captureGroupInfo(source);
+    for (const capture of captures) {
+      const key = capture.name ?? String(capture.group);
+      const exists =
+        capture.name !== null
+          ? info.names.has(capture.name)
+          : capture.group >= 0 && capture.group <= info.count;
+      if (exists) continue;
+      const warning = `${contextName}#${index}:${key}`;
+      if (this.warnedCaptures.has(warning)) continue;
+      this.warnedCaptures.add(warning);
+      console.warn(
+        `Scribe: capture "${key}" de "${this.definition.logicalName}" (contexto "${contextName}", regra #${index}) ` +
+          `aponta para grupo inexistente em /${source}/ — captura ignorada no motor`,
+      );
+    }
   }
 
   private compileCaptures(captures: Readonly<Record<string, Scope>> | undefined): CompiledCapture[] {
@@ -298,6 +349,42 @@ function includeRule(
   captures: readonly CompiledCapture[] = [],
 ): CompiledPattern {
   return { matcher: null, scope, captures, include: context, push: null, set: null, pop: false };
+}
+
+/**
+ * Conta grupos **capturantes** e nomes de grupo de um regex-fonte, sem o motor: varredura linear que
+ * respeita `\` de escape e classes `[...]`. Suficiente para saber se um `captures` aponta para grupo
+ * existente (grupo `0` = casamento inteiro; numéricos válidos: `1..count`).
+ */
+function captureGroupInfo(source: string): { readonly count: number; readonly names: ReadonlySet<string> } {
+  let count = 0;
+  const names = new Set<string>();
+  let inClass = false;
+  for (let index = 0; index < source.length; index++) {
+    const char = source[index];
+    if (char === "\\") {
+      index += 1;
+      continue;
+    }
+    if (inClass) {
+      if (char === "]") inClass = false;
+      continue;
+    }
+    if (char === "[") {
+      inClass = true;
+      continue;
+    }
+    if (char !== "(") continue;
+    if (source[index + 1] === "?") {
+      const named = /^\(\?<([A-Za-z_$][A-Za-z0-9_$]*)>/.exec(source.slice(index));
+      if (named === null) continue; // grupo não-capturante (`(?:`, lookaround, etc.)
+      count += 1;
+      names.add(named[1] as string);
+      continue;
+    }
+    count += 1;
+  }
+  return { count, names };
 }
 
 // ---- normalização dos campos do documento ---------------------------------------------------------

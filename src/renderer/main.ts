@@ -229,7 +229,11 @@ interface ScribeBridge {
   undo(handle: number): Promise<UndoStateDto>;
   redo(handle: number): Promise<UndoStateDto>;
   undoState(handle: number): Promise<UndoStateDto>;
-  highlight(handle: number, first: number, count: number): Promise<DocumentHighlight>;
+  /**
+   * Destaque de sintaxe de um range (opcional de propósito): um preload **mais antigo** que o
+   * contrato atual simplesmente não a expõe — o renderer degrada para a cor default, sem crash.
+   */
+  highlight?(handle: number, first: number, count: number): Promise<DocumentHighlight>;
   cancel(signalId: number): void;
   nextSignalId(): number;
   snapshot(): Promise<unknown>;
@@ -239,6 +243,8 @@ interface ScribeBridge {
 function readBridge(): ScribeBridge | undefined {
   const candidate = (globalThis as { scribe?: Partial<ScribeBridge> }).scribe;
   if (candidate === undefined) return undefined;
+  // `highlight` **não** entra na guarda: exigir o método quebraria um preload antigo (achado de
+  // revisão da Slice D). Quem não tiver o método só não ganha destaque (ver `bootRenderer`).
   const ready =
     typeof candidate.open === "function" &&
     typeof candidate.text === "function" &&
@@ -246,8 +252,7 @@ function readBridge(): ScribeBridge | undefined {
     typeof candidate.undo === "function" &&
     typeof candidate.redo === "function" &&
     typeof candidate.openDialog === "function" &&
-    typeof candidate.onDocumentChanged === "function" &&
-    typeof candidate.highlight === "function";
+    typeof candidate.onDocumentChanged === "function";
   return ready ? (candidate as ScribeBridge) : undefined;
 }
 
@@ -259,34 +264,298 @@ interface DocumentSession {
   dispose(): void;
 }
 
+/** Requisição de destaque em voo: o que o renderer pediu (a resposta tem de cobrir exatamente isto). */
+export interface HighlightRequest {
+  /** Identidade do documento do pedido (ver `HighlightDocumentKey`). */
+  readonly docKey: HighlightDocumentKey;
+  readonly revision: number;
+  readonly first: number;
+  readonly count: number;
+}
+
 /**
- * Cache de spans por linha no renderer (a resposta do IPC `syntax.highlight`). Guarda por revisão e
- * só serve o que cobriu o range pedido — quem não estiver coberto cai na cor default e um novo
- * pedido é disparado (a resposta volta e redesenha).
+ * Identidade do **documento ativo** no renderer: o `handle` da sessão aberta (`handle:<n>`) ou
+ * `"demo"` quando não há ponte. É `string` opaca para o `HighlightStore` (só compara igualdade).
+ *
+ * Por que a identidade é obrigatória (achado ALTO de revisão): `revision` **reinicia em 1 por
+ * documento** (`src/core/buffer/store.ts`), então chavear o realce só por revisão fazia o 2º arquivo
+ * aberto casar com os spans do 1º (`covers(1, …)` verdadeiro, `blocked(1)` verdadeiro) — cores
+ * erradas até o 1º edit.
  */
-class HighlightStore {
+export type HighlightDocumentKey = string;
+
+/** Chave do documento sem sessão (o texto de demonstração). */
+export const DEMO_DOCUMENT_KEY: HighlightDocumentKey = "demo";
+
+/** Chave derivada de um `handle` de documento da ponte. */
+export function documentHighlightKey(handle: number): HighlightDocumentKey {
+  return `handle:${handle}`;
+}
+
+/**
+ * Intervalo mínimo entre **retentativas** de uma revisão cuja resposta veio vazia (sem gramática
+ * pronta ainda). Curto de propósito: as gramáticas costumam carregar em poucos milissegundos, e o
+ * intervalo impede que "resposta vazia não é cobertura" vire uma requisição (que relê o documento
+ * inteiro no `main`) **por frame**.
+ */
+export const EMPTY_HIGHLIGHT_RETRY_MS = 250;
+
+/**
+ * Teto de **tentativas** por documento+revisão depois de respostas vazias (achado MÉDIO de revisão).
+ * "Sem nenhum span" **não** é o mesmo que "sem gramática": um range visível todo em branco (arquivo
+ * sem tokens, `start >= lines.length` ⇒ `lines: []`) também devolve zero spans — e aí a retentativa
+ * disparava a cada `EMPTY_HIGHLIGHT_RETRY_MS` **para sempre**, cada uma com um `text()` do documento
+ * inteiro no `main`. Esgotado o teto, a revisão entra em `blocked` **definitivo** (degrada à cor
+ * default, com **um** `console.warn`): custo explicitamente limitado. Um edit muda a revisão e
+ * reabre a tentativa.
+ */
+export const EMPTY_HIGHLIGHT_MAX_ATTEMPTS = 4;
+
+/**
+ * Corte **defensivo** do backoff das retentativas (dobra por tentativa). Com
+ * `EMPTY_HIGHLIGHT_MAX_ATTEMPTS = 4` este corte é **inalcançável**: a 4ª resposta vazia já chama
+ * `markFailed` **antes** de agendar o retry, então o backoff efetivo é `250 → 500 → 1000` ms
+ * (`backoffMs` só é chamado com `attempts` ∈ {1, 2, 3}) — ver teste de backoff efetivo. Mantido como
+ * guarda para o caso de o teto de tentativas subir.
+ */
+export const EMPTY_HIGHLIGHT_RETRY_MAX_MS = 2_000;
+
+/**
+ * Timeout do slot de requisição **em voo** (achado BAIXO de revisão): uma promise da ponte que nunca
+ * resolve deixaria aquela revisão deduplicada para sempre (realce desligado em silêncio). Passado o
+ * timeout o slot é liberado e a revisão é tratada como **falha** (mesma degradação explícita acima).
+ * Folgado de propósito: uma resposta lenta de verdade (tokenização de um arquivo grande no `main`)
+ * não deve virar falha — ver risco aberto de teto de tokenização em `docs/BACKLOG.md` §P2.4b.
+ */
+export const IN_FLIGHT_HIGHLIGHT_TIMEOUT_MS = 10_000;
+
+/**
+ * Resposta "vazia" = nenhum span em nenhuma linha. Cobre tanto `lines` com `spans: []` (o `main`
+ * tokeniza antes de as gramáticas carregarem) quanto `lines: []` (range fora do documento).
+ */
+function isEmptyHighlight(highlight: DocumentHighlight): boolean {
+  for (const line of highlight.lines) {
+    if (line.spans.length > 0) return false;
+  }
+  return true;
+}
+
+/**
+ * Cache de spans por linha no renderer (a resposta do IPC `syntax.highlight`). Guarda o realce do
+ * **documento ativo** (`docKey`) **na revisão** dele e só serve o que cobriu o range pedido — quem
+ * não estiver coberto cai na cor default e um novo pedido é disparado (a resposta volta e redesenha).
+ *
+ * Guardas (achados de revisão):
+ * - **identidade do documento** (achado ALTO): todo estado é chaveado por `docKey` + `revision`.
+ *   Trocar de documento (`activate` com chave nova) **descarta** spans, `failed`, `warned`, `inFlight`
+ *   e o estado de retentativa — o `revision` do arquivo novo reinicia em 1 e não pode herdar nada do
+ *   anterior. `spansFor` é uma leitura **pura** e devolve `undefined` para chave alheia (nem um frame
+ *   do documento novo pinta com os spans do antigo);
+ * - `set` só aceita a resposta que **casa com a requisição** que a originou (mesmo documento, mesma
+ *   revisão e range cobrindo o pedido): resposta fora de ordem — ou de um documento já trocado — é
+ *   descartada em vez de virar cobertura inválida;
+ * - `markFailed` lembra a falha **daquele documento+revisão** (`blocked`) e loga **no máximo uma
+ *   vez** — gramática que registra e não compila não dispara IPC + `console.warn` por frame;
+ * - resposta **sem nenhum span** **não** vira cobertura (senão a tela ficaria sem realce para
+ *   sempre), mas a retentativa tem **teto**: `EMPTY_HIGHLIGHT_MAX_ATTEMPTS` com backoff exponencial
+ *   de `250/500/1000` ms (o corte `EMPTY_HIGHLIGHT_RETRY_MAX_MS` não chega a agir; ver a constante),
+ *   e depois disso a revisão fica `blocked` de forma definitiva —
+ *   "sem span" também acontece em range em branco, que nunca vai virar realce;
+ * - requisição **em voo** deduplica por documento+revisão (N frames antes da 1ª resposta geram **1**
+ *   IPC) com `IN_FLIGHT_HIGHLIGHT_TIMEOUT_MS`: promise que nunca resolve não deduplica para sempre.
+ */
+export class HighlightStore {
+  private docKey: HighlightDocumentKey | undefined;
   private revision = -1;
   private first = 0;
   private count = 0;
   private spans: (readonly HighlightSpan[] | undefined)[] = [];
+  private failedRevision = -1;
+  private warnedRevision = -1;
+  private inFlightRevision = -1;
+  private inFlightSince = 0;
+  private emptyRevision = -1;
+  private emptyAttempts = 0;
+  private emptyRetryAt = 0;
 
-  set(highlight: DocumentHighlight): void {
-    if (this.revision !== -1 && highlight.revision < this.revision) return;
+  /** `now` é injetável para os testes de retentativa/timeout (`EMPTY_HIGHLIGHT_*`, `IN_FLIGHT_*`). */
+  constructor(private readonly now: () => number = () => Date.now()) {}
+
+  /**
+   * Fixa o documento ativo em `docKey`; se a identidade mudou, **descarta todo o estado** do
+   * documento anterior (spans, falha, aviso já dado, requisição em voo e retentativas).
+   */
+  private activate(docKey: HighlightDocumentKey): void {
+    if (this.docKey === docKey) return;
+    this.docKey = docKey;
+    this.resetState();
+  }
+
+  /**
+   * Descarta **todo** o estado e volta a "nenhum documento ativo" (a próxima resposta decide o dono:
+   * `set` adota a requisição). Usado quando a `LineSource` é trocada no dev-seam: a identidade do
+   * documento vem do `controller`, não da fonte anexada, então os spans do documento anterior não
+   * podem pintar o texto novo.
+   */
+  invalidate(): void {
+    this.docKey = undefined;
+    this.resetState();
+  }
+
+  private resetState(): void {
+    this.revision = -1;
+    this.first = 0;
+    this.count = 0;
+    this.spans = [];
+    this.failedRevision = -1;
+    this.warnedRevision = -1;
+    this.inFlightRevision = -1;
+    this.inFlightSince = 0;
+    this.emptyRevision = -1;
+    this.emptyAttempts = 0;
+    this.emptyRetryAt = 0;
+  }
+
+  /**
+   * Armazena a resposta **se** ela casar com `request`; devolve `false` quando descarta (documento
+   * já trocado, revisão diferente, resposta fora de ordem, range que não cobre o pedido ou resposta
+   * sem nenhum span).
+   */
+  set(highlight: DocumentHighlight, request: HighlightRequest): boolean {
+    // Store novo (nenhum documento ativo ainda) adota a requisição; store já ligado a **outro**
+    // documento descarta — resposta atrasada do arquivo anterior não reativa o estado dele.
+    if (this.docKey === undefined) this.activate(request.docKey);
+    if (this.docKey !== request.docKey) return false;
+    if (highlight.revision !== request.revision) return false;
+    const responseEnd = highlight.first + highlight.lines.length;
+    const requestEnd = request.first + request.count;
+    if (highlight.first > request.first || responseEnd < requestEnd) return false;
+    if (this.revision !== -1 && highlight.revision < this.revision) return false;
+    if (isEmptyHighlight(highlight)) {
+      // Sem gramática pronta o main devolve o range pedido com `spans` vazios: registra a janela de
+      // retentativa e **não** marca cobertura, para uma resposta posterior (já com gramática) valer.
+      // A contagem é **por revisão**: um edit recomeça o teto (evita bloquear a revisão nova pelo
+      // histórico da antiga).
+      if (this.emptyRevision !== highlight.revision) {
+        this.emptyRevision = highlight.revision;
+        this.emptyAttempts = 0;
+      }
+      this.emptyAttempts += 1;
+      if (this.emptyAttempts >= EMPTY_HIGHLIGHT_MAX_ATTEMPTS) {
+        // Degradação explícita e definitiva: sem span depois do teto, parar de reler o documento.
+        this.markFailed(
+          request.docKey,
+          highlight.revision,
+          `sem spans após ${this.emptyAttempts} tentativas`,
+        );
+        return false;
+      }
+      this.emptyRetryAt = this.now() + this.backoffMs(this.emptyAttempts);
+      return false;
+    }
     this.revision = highlight.revision;
     this.first = highlight.first;
     this.count = highlight.lines.length;
     this.spans = [];
     for (const line of highlight.lines) this.spans[line.line] = line.spans;
+    // Resposta boa da mesma revisão: se ela estava marcada como falha (ex.: timeout do slot), o
+    // realce voltou a funcionar — libera a revisão para pedir os ranges seguintes.
+    if (this.failedRevision === highlight.revision) this.failedRevision = -1;
+    this.emptyRevision = -1;
+    this.emptyAttempts = 0;
+    this.emptyRetryAt = 0;
+    return true;
   }
 
-  spansFor(line: number): readonly HighlightSpan[] | undefined {
+  /**
+   * Spans da linha **se** forem do documento `docKey` (leitura pura, sem efeito colateral: é o que o
+   * desenho chama a cada frame — não pode ativar/invalidar nada).
+   */
+  spansFor(docKey: HighlightDocumentKey, line: number): readonly HighlightSpan[] | undefined {
+    if (this.docKey !== docKey) return undefined;
     return this.spans[line];
   }
 
-  covers(revision: number, first: number, count: number): boolean {
+  covers(docKey: HighlightDocumentKey, revision: number, first: number, count: number): boolean {
+    this.activate(docKey);
     return (
       this.revision === revision && first >= this.first && first + count <= this.first + this.count
     );
+  }
+
+  /** Já falhou nesta revisão (deste documento)? Então nem tenta de novo (nada de IPC em loop). */
+  blocked(docKey: HighlightDocumentKey, revision: number): boolean {
+    this.activate(docKey);
+    return this.failedRevision === revision;
+  }
+
+  /**
+   * Vale a pena pedir este range? `false` = bloqueado (falhou ou esgotou o teto de retentativas), já
+   * coberto, com requisição **em voo** para a mesma revisão (dedupe) ou dentro da janela de
+   * retentativa pós-resposta-vazia. O slot em voo vencido (`IN_FLIGHT_HIGHLIGHT_TIMEOUT_MS`) é
+   * liberado aqui e a revisão é marcada como falha.
+   */
+  needsRequest(
+    docKey: HighlightDocumentKey,
+    revision: number,
+    first: number,
+    count: number,
+  ): boolean {
+    this.activate(docKey);
+    if (this.failedRevision === revision) return false;
+    if (this.inFlightRevision === revision) {
+      if (this.now() - this.inFlightSince < IN_FLIGHT_HIGHLIGHT_TIMEOUT_MS) return false;
+      // Promise da ponte que não resolveu: libera o slot/dedupe e degrada explicitamente.
+      this.inFlightRevision = -1;
+      this.inFlightSince = 0;
+      this.markFailed(
+        docKey,
+        revision,
+        `requisição em voo sem resposta após ${IN_FLIGHT_HIGHLIGHT_TIMEOUT_MS} ms`,
+      );
+      return false;
+    }
+    if (this.covers(docKey, revision, first, count)) return false;
+    if (this.emptyRevision === revision && this.now() < this.emptyRetryAt) return false;
+    return true;
+  }
+
+  /** Marca a requisição da revisão como **em voo** (ver `needsRequest`). */
+  beginRequest(docKey: HighlightDocumentKey, revision: number): void {
+    this.activate(docKey);
+    this.inFlightRevision = revision;
+    this.inFlightSince = this.now();
+  }
+
+  /** Libera a requisição em voo (sucesso, falha ou resposta descartada). */
+  endRequest(docKey: HighlightDocumentKey, revision: number): void {
+    // Sem `activate`: a resolução atrasada do documento anterior não pode retomar o estado dele.
+    if (this.docKey !== docKey) return;
+    if (this.inFlightRevision === revision) {
+      this.inFlightRevision = -1;
+      this.inFlightSince = 0;
+    }
+  }
+
+  /**
+   * Marca a falha da revisão e loga **uma única vez** por documento+revisão (degradação explícita,
+   * DEC-TR-7).
+   */
+  markFailed(docKey: HighlightDocumentKey, revision: number, error?: unknown): void {
+    this.activate(docKey);
+    this.failedRevision = revision;
+    if (this.warnedRevision === revision) return;
+    this.warnedRevision = revision;
+    console.warn("Scribe: destaque de sintaxe indisponível (degradando à cor default)", error);
+  }
+
+  /**
+   * Backoff exponencial das retentativas (dobra por tentativa, cortado em
+   * `EMPTY_HIGHLIGHT_RETRY_MAX_MS`). Com `EMPTY_HIGHLIGHT_MAX_ATTEMPTS = 4` só `attempts` ∈ {1, 2, 3}
+   * chegam aqui ⇒ backoff efetivo `250/500/1000` ms.
+   */
+  private backoffMs(attempts: number): number {
+    return Math.min(EMPTY_HIGHLIGHT_RETRY_MS * 2 ** (attempts - 1), EMPTY_HIGHLIGHT_RETRY_MAX_MS);
   }
 }
 
@@ -381,17 +650,19 @@ class DocumentController {
     return this.open(path);
   }
 
-  /** Pede o destaque de um range de linhas do documento atual (o main tokeniza e devolve spans). */
+  /**
+   * Pede o destaque de um range de linhas do documento atual (o main tokeniza e devolve spans).
+   * `null` = sem sessão, sem suporte na ponte (preload antigo) ou falha — nesse caso o renderer
+   * degrada para a cor default; o log é consolidado no `HighlightStore` (**um** por revisão).
+   * Rejeita se a ponte falhar (quem chama trata e marca a revisão como falha).
+   */
   async loadHighlight(first: number, count: number): Promise<DocumentHighlight | null> {
     const session = this.session;
     if (session === undefined || count <= 0) return null;
-    try {
-      return await session.bridge.highlight(session.handle, first, count);
-    } catch (error) {
-      // Degradação explícita: sem destaque o renderer cai na cor default (DEC-TR-7).
-      console.warn("Scribe: falha ao obter destaque de sintaxe", error);
-      return null;
-    }
+    const highlight = session.bridge.highlight;
+    // Preload antigo (sem `syntax.highlight`): degrada explicitamente, sem crash (DEC-TR-7).
+    if (highlight === undefined) return null;
+    return highlight.call(session.bridge, session.handle, first, count);
   }
 
   async undo(): Promise<void> {
@@ -403,7 +674,8 @@ class DocumentController {
   }
 
   /** Digitação mínima: insere no caret e relê o documento. */
-  async insertText(text: string): Promise<void> {    const session = this.session;
+  async insertText(text: string): Promise<void> {
+    const session = this.session;
     if (session === undefined) return;
     try {
       const revision = await session.bridge.insert(session.handle, session.caret, text, "user");
@@ -679,16 +951,43 @@ export async function bootRenderer(): Promise<boolean> {
   // Destaque de sintaxe: o main resolve a gramática e tokeniza; aqui só colorimos (ThemeResolver).
   const highlightStore = new HighlightStore();
   const theme = createDefaultTheme();
+  // Preload antigo sem `syntax.highlight`: realce desligado de forma explícita (uma linha de log).
+  const canHighlight = bridge?.highlight !== undefined;
+  if (bridge !== undefined && !canHighlight) {
+    console.info("Scribe: ponte sem `syntax.highlight` — realce desligado (cor default)");
+  }
+  /**
+   * Identidade do documento ativo: o `handle` da sessão aberta (muda a cada abertura) ou a chave de
+   * demo sem ponte. Sem ela o realce do arquivo anterior casaria com a revisão 1 do arquivo novo.
+   */
+  const activeDocumentKey = (): HighlightDocumentKey =>
+    controller?.current === undefined
+      ? DEMO_DOCUMENT_KEY
+      : documentHighlightKey(controller.current.handle);
+
   renderer.setHighlighter(
-    { spansFor: (line) => highlightStore.spansFor(line), theme },
+    { spansFor: (line) => highlightStore.spansFor(activeDocumentKey(), line), theme },
     (first, count) => {
-      if (controller === undefined) return;
-      if (highlightStore.covers(source.revision, first, count)) return;
-      void controller.loadHighlight(first, count).then((highlight) => {
-        if (highlight === null) return;
-        highlightStore.set(highlight);
-        renderer.start();
-      });
+      if (controller === undefined || !canHighlight) return;
+      const docKey = activeDocumentKey();
+      const revision = source.revision;
+      // Falhou nesta revisão, já coberto, requisição **em voo** para a mesma revisão (dedupe), teto de
+      // retentativas esgotado ou janela pós-resposta-vazia: não dispara IPC.
+      if (!highlightStore.needsRequest(docKey, revision, first, count)) return;
+      const request: HighlightRequest = { docKey, revision, first, count };
+      highlightStore.beginRequest(docKey, revision);
+      void controller.loadHighlight(first, count).then(
+        (highlight) => {
+          highlightStore.endRequest(docKey, revision);
+          if (highlight === null || !highlightStore.set(highlight, request)) return;
+          renderer.start();
+        },
+        // Falha (ex.: gramática que registra e não compila): marca a revisão e loga uma vez.
+        (error: unknown) => {
+          highlightStore.endRequest(docKey, revision);
+          highlightStore.markFailed(docKey, revision, error);
+        },
+      );
     },
   );
 
@@ -708,7 +1007,12 @@ export async function bootRenderer(): Promise<boolean> {
   }
 
   const globalScope = globalThis as { attachLineSource?: (source: LineSource) => void };
-  globalScope.attachLineSource = (next: LineSource): void => renderer.attachSource(next);
+  globalScope.attachLineSource = (next: LineSource): void => {
+    // Dev-seam: a identidade do documento ativo vem do `controller` (não da fonte anexada), então
+    // trocar a fonte sem invalidar o store pintaria os spans do documento anterior no texto novo.
+    highlightStore.invalidate();
+    renderer.attachSource(next);
+  };
 
   attachInputListeners(surface, viewport, renderer, controller);
   window.addEventListener("resize", () => renderer.resize(surface.clientWidth, surface.clientHeight));

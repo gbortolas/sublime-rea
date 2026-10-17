@@ -20,8 +20,9 @@ P1.5 ledger consolidado ✅ · P1.6 empacotamento ✅) · **FASE 2 FECHADA** (P2
 Electron/TS — 6 módulos de core + costura main↔core↔renderer + build, `docs/scaffold/`) — codinome
 decidido: **Scribe** (**P2.3** ✅) · **P2.4 EM ANDAMENTO** (fatia vertical end-to-end) — ✅ **Slices
 A/B/C** (`04096ae`: abrir arquivo CLI+`dialog` · undo/redo visível · cancelamento e2e) · ✅ **Slice D**
-(`2a169be`: realce de sintaxe e2e — **gates verdes, mas com achados de revisão PENDENTES**) · ⏳ **Slice
-E** (busca na lane `background`) não iniciada.
+(`2a169be`: realce de sintaxe e2e) · ✅ **P2.4b FECHADO** (2026-10-17: os 2 blockers + 1 risco do
+reviewer **corrigidos**, mais um bug **alto** extra pego em re-revisão; **348 testes / 40 arquivos**)
+· ⏳ **falta só** a frente de **busca/substituição** na lane `background`.
 
 **✅ Passo operacional resolvido (2026-10-16).** O `setup.py` foi rodado e o MCP `rea` foi relançado
 **já com `REA_GHIDRA_STARTUP_TIMEOUT_MS=900000`** (confirmado em `/proc/*/environ`) — **não** é mais
@@ -35,18 +36,23 @@ python3 setup/setup.py        # idempotente: reescreve setup/env.sh + environmen
 Sem o deadline maior, `open_binary`/`analyze` **via MCP** volta a estourar os 330 s (a análise leva
 ~355 s).
 
-**Próxima tarefa recomendada:** **corrigir os achados de revisão da Slice D** (realce de sintaxe) e
-depois fechar o **P2.4** (ver [`BACKLOG.md`](BACKLOG.md) §P2.4). A fatia vertical já provou o caminho
-ponta a ponta em 3 das 4 frentes — **abrir arquivo real** (CLI + `dialog`), **undo/redo visível**
-(teclas + status bar) e **cancelamento** (`AbortSignal`/`IpcCancel` fiados) ✅ — e o **realce de
-sintaxe** entrou ✅, mas um reviewer independente achou **2 blockers baratos + 1 risco** que ficaram
-**sem correção** (o `fixer` foi interrompido): chave do cache de destaque por `revision` sem identidade
-de gramática; retry em tempestade quando a gramática registra mas não compila; e tokenização síncrona
-no main (risco de DoS por regex). Ver a lista priorizada em [`BACKLOG.md`](BACKLOG.md) §P2.4b. **Depois**
-disso, a única frente restante é a **busca/substituição na lane `background`**. O código está em
-`src/`; as convenções e as costuras congeladas estão em
+**Próxima tarefa recomendada:** **implementar a busca/substituição na lane `background`** — é a **única
+frente restante** do **P2.4** (ver [`BACKLOG.md`](BACKLOG.md) §P2.4). Hoje **não** existe API de busca:
+precisa de um novo `TaskKind` (o `TaskResultMap` não tem `search`) + worker em
+`src/core/concurrency/worker-entry.ts` + contrato IPC + serviço de busca no `src/core/editor` consumindo
+`pool.run`/`scheduler.post("background", …)`. É o **primeiro uso real de uma lane não-`input`** — vale
+para provar a lane `background` do `Scheduler` (o resto da fatia vertical já está provado ponta a ponta:
+abrir arquivo real, undo/redo visível, cancelamento e **realce de sintaxe**, este último com os achados
+de revisão **corrigidos** em **P2.4b** ✅ — 348 testes verdes). O código está em `src/`; as convenções e
+as costuras congeladas estão em
 [`docs/scaffold/00-convencoes-e-costuras.md`](scaffold/00-convencoes-e-costuras.md) — **leia esse doc
 antes de mexer em `src/`**.
+⚠️ **Risco residual declarado (P2.4b, não corrigido de propósito):** o teto de tokenização é **por
+linha** (`MAX_TOKENIZE_LINE_LENGTH = 4096`), não por documento — `highlightDocument` tokeniza do estado
+inicial até a linha visível **absoluta**, então *deep scroll* + keystroke em documento grande re-tokeniza
+o prefixo inteiro a cada revisão e regex catastrófica dentro do prefixo ainda é vetor de *freeze*. A
+correção de verdade (cap de `end` **ou** tokenização em worker com prazo) **casa** com a frente de busca
+— se der, ataque as duas juntas.
 
 > ✅ **Pegadinha resolvida (2026-10-16, P3.9):** o `setup.py` agora **detecta** um JDK ≥ 21
 > compatível (`JAVA_HOME`, PATH, sdkman, `/usr/lib/jvm`) e escreve um **`export JAVA_HOME=…` ativo**
@@ -377,8 +383,24 @@ compilador de gramática com `main`/`prototype`/`include`/`extends`, tokenizer d
 (`src/core/render/scene.ts`) + `EditorCore.highlightDocument` (cache por revisão); IPC `syntax.highlight`
 (`ipc-contract.ts`/`main`/`preload`); fixture **nossa** em `assets/grammars/scribe-demo.sublime-syntax`.
 Gates: typecheck/test/lint/build verdes (**319 testes / 39 arquivos**).
-⚠️ **Pendente:** um reviewer independente achou **2 blockers baratos + 1 risco** que **não** foram
-corrigidos (o `fixer` foi interrompido) — lista priorizada em [`BACKLOG.md`](BACKLOG.md) §P2.4b.
+
+**Slice D — correções de revisão (`P2.4b`)** — ✅ **fechado em 2026-10-17**, em **4 rodadas de `fixer`
+com re-revisões independentes** (a re-revisão pegou um **bug alto** que os fixers anteriores não viram).
+Entregue: cache de destaque com **identidade da gramática** + resposta vazia não conta como cobertura;
+guarda de falha com **1 warn** por revisão, dedupe de requisição em voo e timeout de 10 s;
+**teto por linha** na tokenização (`MAX_TOKENIZE_LINE_LENGTH = 4096`) com marcador explícito
+`text.unparsed.syntax-limit` (degrada em cor default) e **estado neutralizado** após truncamento;
+`HighlightStore` do renderer chaveado por **documento + revisão** (o *bug alto*: `revision` reinicia em 1
+por documento, então spans do arquivo anterior eram servidos ao novo) com teto de retentativas
+(4, backoff 250/500/1000 ms) e `highlight` **opcional** no `readBridge`; no `syntax/**`, `visiting`
+copiado por ramo, escopo do **contexto do topo** no fallback, captura para grupo inexistente vira `warn`
+único, re-registro recomputa `byExtension` na ordem de registro e warn de teto por **instância**.
+Gates finais: typecheck/lint/build exit 0 · **348 testes / 40 arquivos** (baseline 319).
+⚠️ **Residual declarado e aberto:** o teto é **por linha**, não por documento — `highlightDocument`
+tokeniza do estado inicial até a linha visível **absoluta** (O(`end`)), então *deep scroll* + keystroke em
+documento grande re-tokeniza o prefixo inteiro a cada revisão e regex catastrófica **dentro** do prefixo
+segue vetor de *freeze*. Correção real = cap de `end` **ou** tokenização em worker com prazo (casa com a
+frente de busca — ver [`BACKLOG.md`](BACKLOG.md) §P2.4b, último bullet).
 
 ---
 

@@ -92,6 +92,28 @@ describe("realce de sintaxe de ponta a ponta (PackageResolver → gramática →
     }
   });
 
+  it("recomputa o destaque quando a gramática chega depois (cache não fica preso na revisão)", async () => {
+    const core = coreWithDemoGrammar("const z = 3;\n");
+    try {
+      // Pede o destaque **antes** de `syntaxReady`: ainda não há gramática (spans vazios).
+      const handle = await core.openDocument("/notas.demo");
+      const revision = core.revisionOf(handle);
+      const before = core.highlightDocument(handle, 0, 1);
+      expect(before.revision).toBe(revision);
+      expect(before.lines[0]?.spans).toEqual([]);
+
+      await core.syntaxReady;
+
+      // Mesma revisão, mas a gramática agora existe: a chave do cache inclui a identidade dela,
+      // então o texto é retokenizado (sem isto, os spans vazios ficariam presos para sempre).
+      const after = core.highlightDocument(handle, 0, 1);
+      expect(after.revision).toBe(revision);
+      expect(after.lines[0]?.spans.some((span) => span.scope === "keyword.control.demo")).toBe(true);
+    } finally {
+      core.dispose();
+    }
+  });
+
   it("tokeniza as linhas e colore os glifos por escopo (≠ cor default)", async () => {
     const core = coreWithDemoGrammar('const total = 1;\n// fim\n');
     try {
