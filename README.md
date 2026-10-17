@@ -368,7 +368,7 @@ ver [`docs/BACKLOG.md`](docs/BACKLOG.md).
 ## 📍 Onde estamos agora
 
 **Estado em uma linha:** ambiente ✅ (`healthy: true`) · binário-alvo **100% analisável** ✅ ·
-Track A (API Python + IPC) ✅ · **Fase 1 FECHADA** (P1.1–P1.6 ✅) · **Fase 2 ✅** (P2.1: 6 docs de arquitetura, 61 decisões) · **Fase 3 ✅** (P2.2: scaffold `src/` do **Scribe** — compila, testa e sobe) · **P2.4 ✅ fechada** (fatia vertical end-to-end: abrir · editar · undo/redo · cancelamento · realce · **busca/replace** em lane de background) · **próximo: P2.5** (salvar arquivo).
+Track A (API Python + IPC) ✅ · **Fase 1 FECHADA** (P1.1–P1.6 ✅) · **Fase 2 ✅** (P2.1: 6 docs de arquitetura, 61 decisões) · **Fase 3 ✅** (P2.2: scaffold `src/` do **Scribe** — compila, testa e sobe) · **P2.4 ✅ fechada** (fatia vertical end-to-end: abrir · editar · undo/redo · cancelamento · realce · busca/replace em lane de background) · **P2.5 ✅** (salvar arquivo) · **P3 fechado** (P3.7/10/11/12) · **próximo: P1#1 — Seleção de texto** ([ver Roadmap](docs/ROADMAP.md)).
 
 | Frente | Status |
 |---|---|
@@ -400,6 +400,7 @@ Track A (API Python + IPC) ✅ · **Fase 1 FECHADA** (P1.1–P1.6 ✅) · **Fase
 | [`AGENTS.md`](AGENTS.md) | **Instruções do projeto / bootstrap de sessão** — o gatilho "pode continuar os trabalhos!" manda ler o HANDOFF e pegar o próximo item do BACKLOG |
 | [`docs/SPECIFICATION.md`](docs/SPECIFICATION.md) | **Visão de pesquisa** (pt-BR): objetivos, ferramentas, requisitos técnicos e diretrizes éticas/legais |
 | [`docs/TECHNICAL_SPECIFICATION.md`](docs/TECHNICAL_SPECIFICATION.md) | **Spec técnica** (en): metodologia clean-room, componentes-núcleo, arquitetura-alvo no Electron. É a spec que nomeia o produto como **Scribe** |
+| [`docs/ROADMAP.md`](docs/ROADMAP.md) | **Roadmap de features**: 20 funcionalidades priorizadas em P1–P4, com esforço, dependências e descrição |
 | [`docs/HANDOFF.md`](docs/HANDOFF.md) | **Como retomar**: estado atual, pegadinhas operacionais, timeout do Ghidra, fatos observados do alvo |
 | [`docs/BACKLOG.md`](docs/BACKLOG.md) | **Placar vivo**: itens P0 (destravar), P1 (Fase 1), P2 (Fases 2–3), P3 (housekeeping) |
 | [`setup/README.md`](setup/README.md) | O **instalador reproduzível**: 10 etapas, flags, variáveis, troubleshooting, códigos de saída |

@@ -35,7 +35,7 @@ python3 setup/setup.py        # idempotente: reescreve setup/env.sh + environmen
 Sem o deadline maior, `open_binary`/`analyze` **via MCP** volta a estourar os 330 s (a análise leva
 ~355 s).
 
-**Próxima tarefa recomendada:** **nenhuma dívida P3 urgente.** Todos os itens de dívida técnica do editor foram fechados nesta sessão: **P3.11** (pintar ocorrências no canvas), **P3.10** (bundlar worker), **P3.12** (ciclo de vida das assinaturas) e **P3.7** (symlink `~/sr-tools` no `setup.py`). O residual opcional (P3.5 Rizin, P3.6 snapshot) pode esperar. O editor Scribe já tem o mínimo inegociável: abrir/editar/salvar/undo/realce/busca com destaques visuais. Próximo passo: pensar em features reais (múltiplos documentos, guias/guias, gutter com numeração de linhas) ou partir para a parte acadêmica do trabalho (paper/documentação).
+**Próxima tarefa recomendada:** **P1#1 — Seleção de texto** ([`docs/ROADMAP.md`](ROADMAP.md)). É a feature mais sentida (sem seleção não dá pra copiar/recortar/deletar um bloco) e mexe só no renderer/caret — sem tocar em IPC. Depois dela: gutter, scrollbar e find bar visual (todos independentes, paralelizáveis). O `docs/ROADMAP.md` foi criado nesta sessão com **20 features organizadas em 4 quadrantes** (P1–P4) — consulte-o para visão geral.
 
 > ✅ **Pegadinha resolvida (2026-10-16, P3.9):** o `setup.py` agora **detecta** um JDK ≥ 21
 > compatível (`JAVA_HOME`, PATH, sdkman, `/usr/lib/jvm`) e escreve um **`export JAVA_HOME=…` ativo**
