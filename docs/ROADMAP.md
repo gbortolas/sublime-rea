@@ -54,7 +54,7 @@ Funcionalidades de editor "profissional" — muitas dependem de arquitetura já 
 | 12 | **Go to line** (Ctrl+G) | P | caret existe | Diálogo minimalista, navega pra linha digitada |
 | 13 | **Auto-pair** (aspas/chaves/colchetes) | P | inserção existe | Fechamento automático, pular fechamento existente, backspace inteligente |
 | 14 | **Bracket matching** | P | buffer scanning | Highlight do par correspondente quando cursor está em bracket |
-| 15 | **Wrap de linha (soft wrap)** | G | render pipeline | Quebra visual sem quebrar o texto, métrica do viewport adaptada |
+| 15 | **Wrap de linha (soft wrap)** | G | render pipeline | Quebra visual sem quebrar o texto, métrica do viewport adaptada. **Indentation guides ✅** |
 
 ## 🟤 P4 — Sonhos (se sobrar tempo)
 
