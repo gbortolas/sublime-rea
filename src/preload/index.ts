@@ -50,6 +50,7 @@ export interface ScribePreloadApi {
     text: string,
     origin?: InsertOrigin,
   ): Promise<number>;
+  replaceOne(handle: DocumentHandle, at: number, remove: number, insert: string): Promise<number>;
   undo(handle: DocumentHandle): Promise<DocumentUndoState>;
   redo(handle: DocumentHandle): Promise<DocumentUndoState>;
   undoState(handle: DocumentHandle): Promise<DocumentUndoState>;
@@ -164,6 +165,8 @@ const api: ScribePreloadApi = {
     text: string,
     origin: InsertOrigin = "user",
   ): Promise<number> => call<number>("document.insert", [handle, at, text, origin]),
+  replaceOne: (handle: DocumentHandle, at: number, remove: number, insert: string): Promise<number> =>
+    call<number>("document.replaceOne", [handle, at, remove, insert]),
   undo: (handle: DocumentHandle): Promise<DocumentUndoState> =>
     call<DocumentUndoState>("editor.undo", [handle]),
   redo: (handle: DocumentHandle): Promise<DocumentUndoState> =>

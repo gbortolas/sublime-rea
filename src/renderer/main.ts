@@ -303,6 +303,7 @@ interface ScribeBridge {
   text(handle: number): Promise<string>;
   revision(handle: number): Promise<number>;
   insert(handle: number, at: number, text: string, origin?: "plugin" | "user"): Promise<number>;
+  replaceOne(handle: number, at: number, remove: number, insert: string): Promise<number>;
   undo(handle: number): Promise<UndoStateDto>;
   redo(handle: number): Promise<UndoStateDto>;
   undoState(handle: number): Promise<UndoStateDto>;
@@ -902,7 +903,13 @@ class DocumentController {
     if (session === undefined) return;
     try {
       const s = session.selection;
-      const insertAt = SelectionOps.isCollapsed(s) ? session.caret : SelectionOps.normalized(s).start;
+      if (!SelectionOps.isCollapsed(s)) {
+        const { start, end } = SelectionOps.normalized(s);
+        await this.replaceText(start, end - start, text);
+        return;
+      }
+      // Seleção colapsada: insere normalmente
+      const insertAt = session.caret;
       const revision = await session.bridge.insert(session.handle, insertAt, text, "user");
       session.caret = insertAt + text.length;
       session.selection = SelectionOps.collapsed(session.caret);
@@ -918,6 +925,32 @@ class DocumentController {
       this.renderer.start();
     } catch (error) {
       console.error("Scribe: falha ao inserir texto no documento", error);
+    }
+  }
+
+  /**
+   * Substitui um range do documento: remove `remove` caracteres de `at` e insere `insert`.
+   * Atualiza o caret, seleção, viewport e estado dirty — sem refreshUndoStatus (útil para
+   * operações internas como snippet expansion).
+   */
+  async replaceText(at: number, remove: number, insert: string): Promise<void> {
+    const session = this.current;
+    if (session === undefined) return;
+    try {
+      const revision = await session.bridge.replaceOne(session.handle, at, remove, insert);
+      const next = await session.bridge.text(session.handle);
+      session.source.setText(next, revision);
+      session.caret = at + insert.length;
+      session.selection = SelectionOps.collapsed(session.caret);
+      session.selections = SelectionSetOps.singular(session.caret);
+      this.renderer.setSelection(session.selection);
+      this.renderer.setSelections(session.selections);
+      this.viewport.setMetrics({ lineCount: session.source.lineCount() });
+      updateCaretStatus(session.source, session.caret);
+      session.dirty = true;
+      this.renderer.start();
+    } catch (error) {
+      console.error("Scribe: falha ao substituir texto no documento", error);
     }
   }
 
@@ -1938,13 +1971,11 @@ function attachInputListeners(
           event.preventDefault();
           const expansion = parseSnippet(snippet.template);
           void (async () => {
-            // Deleta a palavra-gatilho
-            await session.bridge.insert(session.handle, wordStart, "", "user");
-            // Insere o texto expandido
-            const revision = await session.bridge.insert(
-              session.handle, wordStart, expansion.text, "user",
+            // Usa replaceOne para deletar o trigger + inserir o template
+            const triggerLen = word.length;
+            const revision = await session.bridge.replaceOne(
+              session.handle, wordStart, triggerLen, expansion.text,
             );
-            // Relê o texto completo da ponte
             const next = await session.bridge.text(session.handle);
             session.source.setText(next, revision);
             viewport.setMetrics({ lineCount: session.source.lineCount() });
@@ -1994,12 +2025,9 @@ function attachInputListeners(
       const session = controller.current;
       const s = session.selection;
       if (!SelectionOps.isCollapsed(s)) {
-        const { start } = SelectionOps.normalized(s);
-        session.caret = start;
-        session.selection = SelectionOps.collapsed(start);
-        session.selections = SelectionSetOps.singular(start);
         void controller.insertText("");
         renderer.start();
+        return;
       } else {
         const text = session.source.text;
         const pos = session.caret;
@@ -2046,12 +2074,9 @@ function attachInputListeners(
       const session = controller.current;
       const s = session.selection;
       if (!SelectionOps.isCollapsed(s)) {
-        const { start } = SelectionOps.normalized(s);
-        session.caret = start;
-        session.selection = SelectionOps.collapsed(start);
-        session.selections = SelectionSetOps.singular(start);
         void controller.insertText("");
         renderer.start();
+        return;
       }
       return;
     }

@@ -85,6 +85,7 @@ export interface IpcMethods {
     text: string,
     origin: "plugin" | "user",
   ): number;
+  "document.replaceOne"(handle: DocumentHandle, at: number, remove: number, insert: string): number;
   "editor.undo"(handle: DocumentHandle): DocumentUndoState;
   "editor.redo"(handle: DocumentHandle): DocumentUndoState;
   "editor.undoState"(handle: DocumentHandle): DocumentUndoState;
@@ -131,6 +132,7 @@ export const IPC_METHODS = [
   "document.save",
   "document.isDirty",
   "document.insert",
+  "document.replaceOne",
   "editor.undo",
   "editor.redo",
   "editor.undoState",

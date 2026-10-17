@@ -305,6 +305,13 @@ async function dispatchIpc(
       const origin = request.args[3] === "plugin" ? "plugin" : "user";
       return core.insertText(handle, at, text, origin);
     }
+    case "document.replaceOne": {
+      const handle = requireHandle(request.args[0], "document.replaceOne");
+      const at = requireNumber(request.args[1], "document.replaceOne", "at");
+      const remove = requireNumber(request.args[2], "document.replaceOne", "remove");
+      const insert = requireString(request.args[3], "document.replaceOne", "insert");
+      return core.replaceOne(handle, at, remove, insert);
+    }
     case "editor.undo":
       return core.undoDocument(requireHandle(request.args[0], "editor.undo"));
     case "editor.redo":

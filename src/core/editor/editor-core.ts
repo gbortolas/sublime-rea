@@ -159,6 +159,10 @@ export interface EditorCore {
     text: string,
     origin?: "plugin" | "user",
   ): Promise<number>;
+  /**
+   * Substitui `remove` caracteres a partir de `at` por `insert`. Retorna a nova revisão.
+   */
+  replaceOne(handle: DocumentHandle, at: number, remove: number, insert: string): Promise<number>;
   revisionOf(handle: DocumentHandle): number;
   saveDocument(handle: DocumentHandle, signal?: AbortSignal): Promise<void>;
   isDirty(handle: DocumentHandle): boolean;
@@ -680,6 +684,40 @@ export function createEditorCore(options: EditorCoreOptions = {}): EditorCore {
   }
 
   /**
+   * Substitui `remove` caracteres a partir de `at` por `insert` no documento.
+   * Extrai o texto removido do buffer e usa o mesmo comando `INSERT_COMMAND_ID`
+   * com a opção `remove` para que a substituição seja registrada como uma única
+   * transação de undo.
+   */
+  async function runReplaceOne(
+    handle: DocumentHandle,
+    at: number,
+    remove: number,
+    insert: string,
+  ): Promise<number> {
+    assertNotDisposed();
+    const buffer = resolveBuffer(handle);
+    state.pendingHandle = handle;
+    const removeText = buffer.text().slice(at, at + remove);
+    const result = await commands.run(
+      INSERT_COMMAND_ID,
+      { handle, at, text: insert, remove: removeText },
+      { origin: "user", group: `type:${handle}` },
+    );
+    if (!result.handled) {
+      throw new EditorArgumentError(
+        "command-missing",
+        `comando não registrado: ${INSERT_COMMAND_ID}`,
+      );
+    }
+    state.caret = at + insert.length;
+    state.selection = SelectionOps.collapsed(state.caret);
+    state.selections = SelectionSetOps.singular(state.caret);
+    registry.setDirty(handle, true);
+    return buffer.revision;
+  }
+
+  /**
    * Estado de undo/redo do documento + cursor. A pilha (`UndoStack`) é do `CommandBus`; aqui só
    * lemos as profundidades (não inventamos API que o núcleo não suporta).
    */
@@ -765,6 +803,15 @@ export function createEditorCore(options: EditorCoreOptions = {}): EditorCore {
       origin: "plugin" | "user" = "user",
     ): Promise<number> {
       return enqueue(() => runInsert(handle, at, text, origin));
+    },
+
+    replaceOne(
+      handle: DocumentHandle,
+      at: number,
+      remove: number,
+      insert: string,
+    ): Promise<number> {
+      return enqueue(() => runReplaceOne(handle, at, remove, insert));
     },
 
     revisionOf(handle: DocumentHandle): number {
