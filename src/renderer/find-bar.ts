@@ -113,6 +113,16 @@ export class FindBarModel {
     return this.matches[this.currentIndex];
   }
 
+  /** Todas as ocorrências da última busca (para o renderer pintar no canvas). */
+  get allMatches(): readonly SearchMatch[] {
+    return this.matches;
+  }
+
+  /** Índice (`0`-based) da ocorrência atual em `allMatches`, ou `-1` se não houver. */
+  get currentMatchIndex(): number {
+    return this.matches.length === 0 ? -1 : this.currentIndex;
+  }
+
   /** Abre o find bar (Ctrl/Cmd+F) e dispara a busca se já houver padrão. */
   open(): void {
     if (this.openFlag) return;

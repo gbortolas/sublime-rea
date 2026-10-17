@@ -1,8 +1,7 @@
 # HANDOFF — sublime-rea
 
 > **Documento de handoff entre sessões** (leia antes de retomar). Atualizado em **2026-10-17**.
-> Specs do projeto: [`SPECIFICATION.md`](SPECIFICATION.md) · [`TECHNICAL_SPECIFICATION.md`](TECHNICAL_SPECIFICATION.md)
-> Backlog vivo: [`BACKLOG.md`](BACKLOG.md)
+> Status: P3.11 concluído, próxima tarefa: P3.10.
 
 ---
 
@@ -22,7 +21,7 @@ decidido: **Scribe** (**P2.3** ✅) · **P2.4 FECHADO** (fatia vertical end-to-e
 A/B/C** (`04096ae`: abrir arquivo CLI+`dialog` · undo/redo visível · cancelamento e2e) · ✅ **Slice D**
 (`2a169be`: realce de sintaxe e2e) · ✅ **P2.4b** (achados de revisão do realce corrigidos, mais um bug
 **alto** extra) · ✅ **P2.4c** (busca/substituição na lane `background` — **primeiro uso real** do
-`TaskPool`/`Scheduler`; **423 testes / 43 arquivos**) · ✅ **P2.5** (salvar arquivo `Ctrl/Cmd+S` + dirty tracking — lane `io` finalmente usada; escrita atômica tmp+rename; guarda dirty para evitar I/O fútil) · ⏳ **próximo: P3.11 — pintar ocorrências da busca no canvas**
+`TaskPool`/`Scheduler`; **423 testes / 43 arquivos**) · ✅ **P2.5** (salvar arquivo `Ctrl/Cmd+S` + dirty tracking — lane `io` finalmente usada; escrita atômica tmp+rename; guarda dirty para evitar I/O fútil) · ✅ **P3.11** (pintar ocorrências da busca no canvas — overlay de rects, match atual em magenta, demais em amarelo; 430 testes / 43 arquivos) · ⏳ **próximo: P3.10 — bundlar o worker do TaskPool no build**
 
 **✅ Passo operacional resolvido (2026-10-16).** O `setup.py` foi rodado e o MCP `rea` foi relançado
 **já com `REA_GHIDRA_STARTUP_TIMEOUT_MS=900000`** (confirmado em `/proc/*/environ`) — **não** é mais
@@ -36,7 +35,7 @@ python3 setup/setup.py        # idempotente: reescreve setup/env.sh + environmen
 Sem o deadline maior, `open_binary`/`analyze` **via MCP** volta a estourar os 330 s (a análise leva
 ~355 s).
 
-**Próxima tarefa recomendada:** **P3.11 — pintar as ocorrências da busca no canvas** (BACKLOG.md §P3.11). Hoje a navegação só move caret + scroll para o match; pintar os spans (e destacar o match "atual") no canvas exige passar as faixas ao `buildInstances`/`RenderPipeline`. O P2.5 fechou o item #1 do README ("abrir / editar / **salvar** — o mínimo inegociável"). O residual do P2.4b (teto de tokenização por documento) continua aberto.
+**Próxima tarefa recomendada:** **P3.10 — bundlar o worker de `TaskPool` no build** (BACKLOG.md §P3.10). O `worker-entry.ts` roda por `path.join(__dirname, "worker-entry.js")` e o `eval` do vitest não resolve `../../shared`, então a varredura de busca foi **replicada** dentro dele. Usar `esbuild` para o worker (como já se faz para renderer/preload) permite importar `scanText` do `shared` sem duplicação. O **P3.11** recém-fechado fez o realce visual das ocorrências da busca; agora o próximo passo natural é matar a dívida técnica da duplicação.
 
 > ✅ **Pegadinha resolvida (2026-10-16, P3.9):** o `setup.py` agora **detecta** um JDK ≥ 21
 > compatível (`JAVA_HOME`, PATH, sdkman, `/usr/lib/jvm`) e escreve um **`export JAVA_HOME=…` ativo**

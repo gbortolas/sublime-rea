@@ -47,6 +47,7 @@ import {
   type LineLayout,
   type LineSource,
   type SceneHighlight,
+  type SearchHighlight,
   type TextMeasurer,
   buildInstances,
 } from "../core/render";
@@ -784,6 +785,7 @@ class ScribeRenderer {
   private running = false;
   private highlighter: SceneHighlight | undefined;
   private requestHighlight: ((first: number, count: number) => void) | undefined;
+  private searchHighlightValue: SearchHighlight | undefined;
 
   constructor(
     private readonly canvas: HTMLCanvasElement,
@@ -800,6 +802,11 @@ class ScribeRenderer {
   setHighlighter(highlighter: SceneHighlight, request: (first: number, count: number) => void): void {
     this.highlighter = highlighter;
     this.requestHighlight = request;
+  }
+
+  /** Define as ocorrências de busca a destacar no canvas (P3.11). */
+  setSearchMatches(highlight: SearchHighlight | undefined): void {
+    this.searchHighlightValue = highlight;
   }
 
   attachSource(source: LineSource): void {
@@ -863,6 +870,7 @@ class ScribeRenderer {
         width: 2,
       },
       this.highlighter,
+      this.searchHighlightValue,
     );
     this.requestHighlight?.(range.first, range.count);
 
@@ -1140,6 +1148,17 @@ export function attachFindBar(deps: FindBarDeps): FindBarBinding | undefined {
     bar.hidden = !state.open;
     count.textContent = `${state.current}/${state.total}${state.truncated ? "+" : ""}`;
     status.textContent = state.status ?? "";
+    // Empurra os matches pro renderer pintar no canvas (P3.11).
+    if (state.open && model.allMatches.length > 0) {
+      deps.renderer.setSearchMatches({
+        matches: model.allMatches,
+        currentIndex: model.currentMatchIndex,
+      });
+    } else {
+      deps.renderer.setSearchMatches(undefined);
+    }
+    // Dispara um novo frame pra pintar os destaques.
+    deps.renderer.start();
   };
 
   // Selecionar uma ocorrência move o caret (coluna do início) e rola até a linha dela.

@@ -11,7 +11,7 @@
  * vira uma `GlyphInstance` posicionada em px lógicos.
  */
 
-import type { GlyphInstance, LineInstance, Rect, RectInstance, RGBA, TextStyle } from "../../shared";
+import type { GlyphInstance, LineInstance, Rect, RectInstance, RGBA, SearchMatch, TextStyle } from "../../shared";
 import type { HighlightSpan, Scope, ThemeResolver } from "../../shared";
 import type { GlyphAtlas } from "./atlas";
 import type { LineRange } from "./viewport";
@@ -55,6 +55,23 @@ export interface CaretPosition {
   readonly width: number;
 }
 
+/**
+ * Destaque das ocorrências de busca no canvas.
+ * O find bar sabe os matches; aqui só os posicionamos em px e colorimos.
+ * O match "atual" ganha cor diferente do restante.
+ */
+export interface SearchHighlight {
+  /** Ocorrências a destacar (só as do range visível, pré-filtradas ou não). */
+  readonly matches: readonly SearchMatch[];
+  /** Índice em `matches` do match atual (navegação), ou `-1` se sem match. */
+  readonly currentIndex: number;
+}
+
+/** @internal exported only for tests. */
+export const SEARCH_MATCH_COLOR: RGBA = 0xffff0044;
+/** @internal exported only for tests. */
+export const SEARCH_CURRENT_COLOR: RGBA = 0xff880088;
+
 /** Instâncias de um frame — entradas diretas do `RenderPipeline`. */
 export interface SceneInstances {
   readonly rects: RectInstance[];
@@ -64,11 +81,16 @@ export interface SceneInstances {
 
 /**
  * Monta as instâncias do **range visível**. Determinístico e puro (não toca no pipeline): o mesmo
- * `(source, layout, atlas, style, range, caret, highlight)` produz sempre as mesmas instâncias.
+ * `(source, layout, atlas, style, range, caret, highlight, searchHighlight)` produz sempre as
+ * mesmas instâncias.
  *
  * `highlight` é **opcional** (retrocompatível): quando presente, cada glifo é colorido pela cor do
  * escopo que cobre o seu offset na linha (via `ThemeResolver`); sem span/tema, cai em
  * `layout.defaultColor`.
+ *
+ * `searchHighlight` é **opcional**: quando presente, pinta retângulos de fundo nas posições das
+ * ocorrências da busca — o match "atual" (`currentIndex`) ganha a cor `SEARCH_CURRENT_COLOR`;
+ * os demais, `SEARCH_MATCH_COLOR`.
  */
 export function buildInstances(
   source: LineSource,
@@ -78,6 +100,7 @@ export function buildInstances(
   range: LineRange,
   caret?: CaretPosition,
   highlight?: SceneHighlight,
+  searchHighlight?: SearchHighlight,
 ): SceneInstances {
   const rects: RectInstance[] = [
     { rect: layout.viewport, color: layout.background },
@@ -126,6 +149,54 @@ export function buildInstances(
       x += placed.advance;
       column += 1;
       offset += size;
+    }
+  }
+
+  // Search highlight: pinta retângulos de fundo nas posições das ocorrências.
+  if (searchHighlight) {
+    for (let mi = 0; mi < searchHighlight.matches.length; mi++) {
+      const match = searchHighlight.matches[mi]!;
+      if (match.line < first || match.line >= end) continue;
+      const text = source.line(match.line);
+      const isCurrent = mi === searchHighlight.currentIndex;
+      // Caminha pelo texto para achar o x do início e do fim do match.
+      let mx = layout.paddingLeft;
+      let mcol = 0;
+      let moff = 0;
+      let matchStartX = mx;
+      let matchEndX = mx;
+      const targetEnd = Math.min(match.index + match.length, text.length);
+      while (moff < targetEnd) {
+        if (moff === match.index) matchStartX = mx;
+        const code = text.codePointAt(moff);
+        if (code === undefined) break;
+        const rune = String.fromCodePoint(code);
+        const size = rune.length;
+        if (rune === "\t") {
+          const stop = layout.tabWidth - (mcol % layout.tabWidth);
+          mx += spaceAdvance * stop;
+          mcol += stop;
+          moff += size;
+          continue;
+        }
+        const placed = atlas.resolveGlyph(rune, style);
+        mx += placed.advance;
+        mcol += 1;
+        moff += size;
+      }
+      matchEndX = mx;
+      // Se o match está após o fim da linha (linha vazia ou truncada),
+      // `matchStartX === matchEndX` e a largura será 0 — pulamos.
+      if (matchEndX - matchStartX <= 0) continue;
+      rects.push({
+        rect: {
+          x: matchStartX,
+          y: layout.paddingTop + match.line * layout.lineHeight - layout.scrollOffsetPx,
+          w: Math.max(matchEndX - matchStartX, 0),
+          h: layout.lineHeight,
+        },
+        color: isCurrent ? SEARCH_CURRENT_COLOR : SEARCH_MATCH_COLOR,
+      });
     }
   }
 

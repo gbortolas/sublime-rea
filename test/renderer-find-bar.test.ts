@@ -391,3 +391,43 @@ describe("FindBarModel — replace-all", () => {
     expect(h.model.state().status).toBe("boom");
   });
 });
+
+// ---- getters de matches (P3.11) -------------------------------------------------------------------
+
+describe("FindBarModel — allMatches / currentMatchIndex", () => {
+  it("expõe os matches e o índice atual", async () => {
+    const h = harness();
+    h.model.open();
+    h.model.setPattern("foo");
+    h.fire();
+    last(h.findDeferreds).resolve(findResult(1, [0, 4, 8]));
+    await drain();
+
+    expect(h.model.allMatches).toHaveLength(3);
+    expect(h.model.allMatches[0]).toEqual({ index: 0, length: 3, line: 0, column: 0 });
+    expect(h.model.currentMatchIndex).toBe(0);
+
+    h.model.next();
+    expect(h.model.currentMatchIndex).toBe(1);
+    h.model.next();
+    expect(h.model.currentMatchIndex).toBe(2);
+  });
+
+  it("sem ocorrências, currentMatchIndex é -1", () => {
+    const h = harness();
+    h.model.open();
+    expect(h.model.allMatches).toHaveLength(0);
+    expect(h.model.currentMatchIndex).toBe(-1);
+  });
+
+  it("padrão vazio zera os matches e o índice", () => {
+    const h = harness();
+    h.model.open();
+    h.model.setPattern("foo");
+    h.fire();
+    last(h.findDeferreds).resolve(findResult(1, [0, 4, 8]));
+    h.model.setPattern("");
+    expect(h.model.allMatches).toHaveLength(0);
+    expect(h.model.currentMatchIndex).toBe(-1);
+  });
+});

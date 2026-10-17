@@ -250,10 +250,21 @@ IDs). Cada item vira uma seção da spec técnica abstrata. **Fase 1 FECHADA** �
       travada por teste, ver §P2.4c). O build já usa `esbuild` para renderer/preload — fazer o mesmo com
       o worker permitiria `import { scanText } from "../../shared"` sem duplicação. Ver o comentário em
       `src/core/concurrency/worker-entry.ts` (~`:227`).
-- [ ] **P3.11 — Pintar as ocorrências da busca no canvas**: hoje a navegação só **move o caret + scroll**
-      para o match (o find bar sabe os `index/length` da janela visível). Fazer o realce visual das
-      ocorrências (e do match "atual") exige passar as faixas ao `buildInstances`/`RenderPipeline`
-      (`src/core/render/scene.ts`) — decidir se entra como parâmetro novo ou como camada de *overlay*.
+- [x] **P3.11 — Pintar as ocorrências da busca no canvas** ✅ **fechado** (2026-10-17): agora o
+      canvas destaca visualmente as ocorrências (rects de fundo amarelo) e o match "atual" ganha cor
+      magenta. Implementação:
+      - **`SearchHighlight`** interface em `src/core/render/scene.ts` com `matches` + `currentIndex`
+      - `buildInstances` recebe parâmetro opcional `searchHighlight?` e pinta `RectInstance` para cada
+        match no range visível — posicionamento exato (incluindo tabs) calculado pelo mesmo walk do
+        texto que o loop de glifos
+      - `ScribeRenderer.setSearchMatches()` recebe os matches do find bar e repassa ao render loop
+      - `FindBarModel` expõe `allMatches` (getter) e `currentMatchIndex` (getter) para o renderer
+      - **Fiação completa**: `attachFindBar` empurra `SearchHighlight` pro renderer via `onChange`
+        + `renderer.start()` — ao fechar a barra os destaques somem
+      - Gates: typecheck/lint/build exit 0 · **430 testes / 43 arquivos** (baseline 423)
+      - Decisões de design: overlay de rects em vez de modificar a cor de glifos (retrocompatível com
+        sintaxe highlight); posicionamento exato (não aproximado por coluna) para lidar com tabs;
+        cores exportadas para testes
 - [ ] **P3.12 — Ciclo de vida das assinaturas do renderer**: a assinatura `bridge.onDocumentChanged`
       fiada pelo find bar (`src/renderer/find-bar.ts`) não é amarrada a `dispose()` do modelo (o boot
       atual não tem teardown, então não há efeito prático hoje). Amarrar quando o renderer ganhar

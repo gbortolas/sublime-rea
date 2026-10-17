@@ -2,9 +2,9 @@
  * Testes do `scene.ts`: só linhas visíveis viram instâncias (virtualização), tabs e caret.
  */
 import { describe, expect, it } from "vitest";
-import type { RGBA, Scope, ScopeStyle, TextStyle, ThemeResolver } from "../../shared";
+import type { RGBA, Scope, ScopeStyle, SearchMatch, TextStyle, ThemeResolver } from "../../shared";
 import { GlyphAtlas } from "./atlas";
-import { buildInstances, type LineLayout, type LineSource } from "./scene";
+import { buildInstances, type LineLayout, type LineSource, SEARCH_MATCH_COLOR, SEARCH_CURRENT_COLOR } from "./scene";
 
 /** Resolvedor de tema mínimo local ao teste (evita import cruzado entre módulos de `core`). */
 function prefixTheme(rules: Readonly<Record<string, RGBA>>): ThemeResolver {
@@ -150,5 +150,91 @@ describe("buildInstances — caret", () => {
       width: 2,
     });
     expect(scene.rects).toHaveLength(1);
+  });
+});
+
+describe("buildInstances — destaque de busca (P3.11)", () => {
+  const atlas = new GlyphAtlas();
+  const spaceAdvance = atlas.resolveGlyph(" ", style).advance;
+
+  it("pinta rects nas posições dos matches e destaca o atual", () => {
+    const matches: SearchMatch[] = [
+      { index: 0, length: 3, line: 0, column: 0 },
+      { index: 8, length: 3, line: 0, column: 8 },
+      { index: 2, length: 5, line: 1, column: 2 },
+    ];
+    const scene = buildInstances(
+      sourceOf(["abc def ghi", "0123456789"]),
+      layout(0),
+      atlas,
+      style,
+      { first: 0, count: 2 },
+      undefined,
+      undefined,
+      { matches, currentIndex: 1 },
+    );
+    // Fundo (1) + 2 matches na linha 0 + 1 match na linha 1 = 4 rects
+    expect(scene.rects).toHaveLength(4);
+    // Match 0 (linha 0, offset 0-3): amarelo
+    expect(scene.rects[1]?.color).toBe(SEARCH_MATCH_COLOR);
+    expect(scene.rects[1]?.rect.y).toBe(4);
+    expect(scene.rects[1]?.rect.x).toBeCloseTo(8, 5);
+    // Match 1 (linha 0, offset 8-11): atual → magenta
+    expect(scene.rects[2]?.color).toBe(SEARCH_CURRENT_COLOR);
+    // Match 2 (linha 1, offset 2-7): amarelo
+    expect(scene.rects[3]?.color).toBe(SEARCH_MATCH_COLOR);
+    expect(scene.rects[3]?.rect.y).toBe(24);
+  });
+
+  it("ignora matches fora do range visível", () => {
+    const matches: SearchMatch[] = [
+      { index: 0, length: 1, line: 0, column: 0 },
+      { index: 0, length: 1, line: 50, column: 0 },
+    ];
+    const scene = buildInstances(
+      sourceOf(Array.from({ length: 100 }, (_, i) => `L${i}`)),
+      layout(0),
+      atlas,
+      style,
+      { first: 10, count: 3 },
+      undefined,
+      undefined,
+      { matches, currentIndex: 0 },
+    );
+    // Fundo (1) + 0 matches visíveis (linha 0 e 50 estão fora do range [10,13))
+    expect(scene.rects).toHaveLength(1);
+  });
+
+  it("posiciona match em linha com tab corretamente", () => {
+    const matches: SearchMatch[] = [
+      { index: 1, length: 1, line: 0, column: 1 },
+    ];
+    const scene = buildInstances(
+      sourceOf(["\ta"]),
+      layout(0),
+      atlas,
+      style,
+      { first: 0, count: 1 },
+      undefined,
+      undefined,
+      { matches, currentIndex: -1 },
+    );
+    // Tab expandido: paddingLeft(8) + 4 * spaceAdvance(4 tabs)
+    const expectedX = 8 + 4 * spaceAdvance;
+    expect(scene.rects).toHaveLength(2); // fundo + match
+    expect(scene.rects[1]?.rect.x).toBeCloseTo(expectedX, 5);
+    expect(scene.rects[1]?.rect.w).toBeCloseTo(atlas.resolveGlyph("a", style).advance, 5);
+  });
+
+  it("sem searchHighlight é retrocompatível (rects só com fundo)", () => {
+    const scene = buildInstances(
+      sourceOf(["abc"]),
+      layout(0),
+      atlas,
+      style,
+      { first: 0, count: 1 },
+    );
+    expect(scene.rects).toHaveLength(1);
+    expect(scene.rects[0]?.color).toBe(0x1e1f22ff);
   });
 });
