@@ -47,6 +47,7 @@ import { attachCommandPalette } from "./command-palette";
 import type { CommandPaletteApi, CommandPaletteBinding } from "./command-palette";
 import { attachMinimap } from "./minimap";
 import type { MinimapBinding } from "./minimap";
+import { findSnippet, parseSnippet } from "./snippets";
 import {
   Canvas2DBackend,
   GlyphAtlas,
@@ -839,7 +840,7 @@ class DocumentController {
 
       const label = document.createElement("span");
       label.className = "tab-label";
-      label.textContent = s.label;
+      label.textContent = (s.dirty ? "\u25cf " : "") + s.label;
       tab.appendChild(label);
 
       const close = document.createElement("span");
@@ -1874,6 +1875,55 @@ function attachInputListeners(
         event.preventDefault();
         return;
       }
+    }
+
+    // Snippet expansion (P4#18): Tab sem modificador → dispara snippet se
+    // o cursor estiver no fim de um trigger.
+    if (!event.ctrlKey && !event.metaKey && !event.shiftKey && !event.altKey && event.key === "Tab") {
+      const session = controller?.current;
+      if (session !== undefined && session.caret > 0) {
+        const text = session.source.text;
+        // Pega a palavra antes do cursor
+        let wordStart = session.caret - 1;
+        while (wordStart >= 0 && /[a-zA-Z0-9_]/.test(text[wordStart]!)) wordStart--;
+        wordStart++; // first char of word
+        const word = text.slice(wordStart, session.caret);
+        const snippet = findSnippet(word);
+        if (snippet !== undefined) {
+          event.preventDefault();
+          const expansion = parseSnippet(snippet.template);
+          void (async () => {
+            // Deleta a palavra-gatilho
+            await session.bridge.insert(session.handle, wordStart, "", "user");
+            // Insere o texto expandido
+            const revision = await session.bridge.insert(
+              session.handle, wordStart, expansion.text, "user",
+            );
+            // Relê o texto completo da ponte
+            const next = await session.bridge.text(session.handle);
+            session.source.setText(next, revision);
+            viewport.setMetrics({ lineCount: session.source.lineCount() });
+            session.dirty = true;
+            setDirtyStatus(true);
+            // Posiciona cursor no primeiro tabstop (se houver)
+            if (expansion.tabStops.length > 0) {
+              const first = expansion.tabStops[0]!.start;
+              session.caret = wordStart + first;
+            } else {
+              session.caret = wordStart + expansion.text.length;
+            }
+            session.selection = SelectionOps.collapsed(session.caret);
+            session.selections = SelectionSetOps.singular(session.caret);
+            renderer.setSelection(session.selection);
+            renderer.setSelections(session.selections);
+            updateCaretStatus(session.source, session.caret);
+            renderer.start();
+          })();
+          return;
+        }
+      }
+      // Fall through: Tab normal (indentação) — se nenhum snippet
+      // casou, o Tab indent padrão segue aqui
     }
 
     // Ctrl+Tab / Ctrl+Shift+Tab: navega entre abas
