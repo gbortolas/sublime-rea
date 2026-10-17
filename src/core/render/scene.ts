@@ -66,6 +66,8 @@ export interface LineLayout {
   readonly searchCurrentColor: RGBA;
   /** Cor de fundo da seleção de texto. */
   readonly selectionColor: RGBA;
+  /** Cor do highlight do bracket correspondente (P3#14). */
+  readonly bracketMatchColor: RGBA;
 }
 
 /** Cursor opcional desenhado como `RectInstance`. */
@@ -74,6 +76,12 @@ export interface CaretPosition {
   readonly column: number;
   readonly color: RGBA;
   readonly width: number;
+}
+
+/** Posição de um bracket (linha/coluna, 0-based). */
+export interface BracketPos {
+  readonly line: number;
+  readonly column: number;
 }
 
 /**
@@ -127,6 +135,8 @@ export function buildInstances(
   extraCarets?: readonly CaretPosition[],
   /** Seleções extras para múltiplos cursores (P2#5). */
   extraSelections?: readonly Selection[],
+  /** Par de brackets a destacar (P3#14). */
+  bracketMatch?: readonly [BracketPos, BracketPos] | undefined,
 ): SceneInstances {
   const rects: RectInstance[] = [
     { rect: layout.viewport, color: layout.background },
@@ -252,6 +262,41 @@ export function buildInstances(
       x += placed.advance;
       column += 1;
       offset += size;
+    }
+
+    // Bracket matching (P3#14): destaca o par com um retângulo fino (underline-like).
+    if (bracketMatch && layout.bracketMatchColor) {
+      const [open, close] = bracketMatch;
+      for (const bp of [open, close]) {
+        if (bp.line === index) {
+          let bx = layout.paddingLeft;
+          let bcol = 0;
+          let boff = 0;
+          const targetCol = Math.min(bp.column, text.length);
+          while (boff < targetCol) {
+            const code = text.codePointAt(boff);
+            if (code === undefined) break;
+            const rune = String.fromCodePoint(code);
+            const size = rune.length;
+            if (rune === "\t") {
+              const stop = layout.tabWidth - (bcol % layout.tabWidth);
+              bx += spaceAdvance * stop;
+              bcol += stop;
+            } else {
+              const placed = atlas.resolveGlyph(rune, style);
+              bx += placed.advance;
+              bcol += 1;
+            }
+            boff += size;
+          }
+          const bracketChar = text[bp.column] ?? "";
+          const charW = atlas.resolveGlyph(bracketChar, style).advance;
+          rects.push({
+            rect: { x: bx, y: y + layout.lineHeight - 3, w: Math.max(charW, 4), h: 2 },
+            color: layout.bracketMatchColor,
+          });
+        }
+      }
     }
   }
 

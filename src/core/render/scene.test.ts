@@ -54,6 +54,7 @@ function layout(scrollOffsetPx = 0): LineLayout {
     searchMatchColor: 0xffff0044,
     searchCurrentColor: 0xff880088,
     selectionColor: 0x264f78ff,
+    bracketMatchColor: 0xffffffff,
   };
 }
 

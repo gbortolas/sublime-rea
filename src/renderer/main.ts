@@ -49,6 +49,7 @@ import {
   WebGPUBackend,
   WebGPUUnavailableError,
   type AtlasSurface,
+  type BracketPos,
   type CaretPosition,
   type GlyphBitmap,
   type GlyphRasterizer,
@@ -64,7 +65,45 @@ import { createDefaultTheme } from "../core/syntax";
 const DEMO_LINE_COUNT = 200;
 const GLYPH_CHUNK = 2048;
 
+/**
+ * Encontra o bracket correspondente ao bracket na posicao offset.
+ * Devolve undefined se nao for bracket ou nao tiver par.
+ */
+function findMatchingBracket(text: string, offset: number): number | undefined {
+  if (offset < 0 || offset >= text.length) return undefined;
+  const char = text[offset];
+  if (char === undefined) return undefined;
+
+  const openers: Record<string, string> = { "(": ")", "[": "]", "{": "}" };
+  const closers: Record<string, string> = { ")": "(", "]": "[", "}": "{" };
+
+  const match = openers[char] ?? closers[char];
+  if (match === undefined) return undefined;
+
+  const isForward = char in openers;
+  const step = isForward ? 1 : -1;
+  let depth = 0;
+  let pos = offset + step;
+
+  while (pos >= 0 && pos < text.length) {
+    const c = text[pos]!;
+    if (c === char) depth++;
+    else if (c === match) {
+      if (depth === 0) return pos;
+      depth--;
+    }
+    pos += step;
+  }
+  return undefined;
+}
+
 const TEXT_STYLE: TextStyle = { family: "monospace", sizePx: 15, weight: 400, italic: false };
+
+const AUTO_PAIRS: Record<string, string> = {
+  "(": ")", "[": "]", "{": "}",
+  "\"": "\"", "'": "'", "`": "`",
+};
+const CLOSING = new Set(Object.values(AUTO_PAIRS));
 
 /** Tema ativo do editor (default: escuro). Guardado em sessionStorage para persistência entre pageloads. */
 function loadTheme(): EditorTheme {
@@ -1049,6 +1088,7 @@ class ScribeRenderer {
       searchMatchColor: colors.searchMatch,
       searchCurrentColor: colors.searchCurrent,
       selectionColor: colors.selection,
+      bracketMatchColor: colors.caret,
     };
 
     // Computa carets e seleções extras para multi-cursor (P2#5)
@@ -1074,6 +1114,28 @@ class ScribeRenderer {
       if (es.length > 0) extraSelections = es;
     }
 
+    // Bracket matching (P3#14): destaca o par quando cursor esta num bracket.
+    let bracketMatch: readonly [BracketPos, BracketPos] | undefined;
+    if (this.currentSelection && !SelectionOps.isCollapsed(this.currentSelection)) {
+      // So match quando cursor nao esta selecionando
+    } else {
+      const primaryOffset = this.currentSelection?.active ?? 0;
+      if (this.source.lineCount() > 0) {
+        // Materializa o texto completo da source para o scan
+        let fullText = "";
+        for (let i = 0; i < this.source.lineCount(); i++) {
+          if (i > 0) fullText += "\n";
+          fullText += this.source.line(i);
+        }
+        const matchOffset = findMatchingBracket(fullText, primaryOffset);
+        if (matchOffset !== undefined) {
+          const openPos = this.source.positionAt(Math.min(primaryOffset, matchOffset));
+          const closePos = this.source.positionAt(Math.max(primaryOffset, matchOffset));
+          bracketMatch = [openPos, closePos] as const;
+        }
+      }
+    }
+
     const scene = buildInstances(
       this.source,
       layout,
@@ -1086,6 +1148,7 @@ class ScribeRenderer {
       this.currentSelection,
       extraCarets,
       extraSelections,
+      bracketMatch,
     );
     this.requestHighlight?.(range.first, range.count);
 
@@ -1653,6 +1716,31 @@ function attachInputListeners(
       void controller?.save();
       return;
     }
+    // Ctrl+G: ir para linha (P3#12)
+    if (primary && !event.altKey && !event.shiftKey && (event.key === "g" || event.key === "G")) {
+      event.preventDefault();
+      const session = controller?.current;
+      if (session === undefined) return;
+      const input = window.prompt("Ir para a linha:", "");
+      if (input === null || input.trim().length === 0) return;
+      const lineNum = parseInt(input.trim(), 10);
+      if (isNaN(lineNum) || lineNum < 1 || lineNum > session.source.lineCount()) {
+        setDocStatus(`linha inválida: ${input.trim()}`);
+        return;
+      }
+      const targetLine = lineNum - 1; // 0-based
+      const offset = session.source.offsetOf(targetLine, 0);
+      session.caret = offset;
+      session.selection = SelectionOps.collapsed(offset);
+      session.selections = SelectionSetOps.singular(offset);
+      renderer.setSelection(session.selection);
+      renderer.setSelections(session.selections);
+      updateCaretStatus(session.source, offset);
+      viewport.scrollTo(targetLine);
+      setDocStatus(`linha ${lineNum}`);
+      renderer.start();
+      return;
+    }
     if (event.key === "Escape") {
       // Esc fecha a find bar primeiro (se aberta); só depois é que cancela uma abertura em curso.
       if (findBar !== undefined && findBar.model.isOpen) {
@@ -1683,8 +1771,8 @@ function attachInputListeners(
     const page = Math.max(1, Math.floor(surface.clientHeight / lineHeight) - 1);
     const line = viewport.visibleLineRange();
 
-    // Backspace/Delete com seleção (P1#1)
-    if ((event.key === "Backspace" || event.key === "Delete") && controller?.current) {
+    // Backspace inteligente (P3#13): deleta seleção, par vazio ou caractere anterior
+    if (event.key === "Backspace" && controller?.current) {
       event.preventDefault();
       const session = controller.current;
       const s = session.selection;
@@ -1693,9 +1781,59 @@ function attachInputListeners(
         session.caret = start;
         session.selection = SelectionOps.collapsed(start);
         session.selections = SelectionSetOps.singular(start);
-        renderer.setSelection(session.selection);
-        renderer.setSelections(session.selections);
-        void controller.insertText(""); // insert vazio no start = delete o texto selecionado
+        void controller.insertText("");
+        renderer.start();
+      } else {
+        const text = session.source.text;
+        const pos = session.caret;
+        if (pos > 0 && pos < text.length) {
+          const prev = text[pos - 1]!;
+          const next = text[pos]!;
+          if (AUTO_PAIRS[prev] === next) {
+            // Deleta ambos (par vazio)
+            session.caret = pos - 1;
+            session.selection = SelectionOps.collapsed(pos - 1);
+            session.selections = SelectionSetOps.singular(pos - 1);
+            void (async () => {
+              await session.bridge.insert(session.handle, pos - 1, "", "user");
+              updateCaretStatus(session.source, session.caret);
+              renderer.start();
+            })();
+          } else {
+            void (async () => {
+              await session.bridge.insert(session.handle, pos - 1, "", "user");
+              session.caret = pos - 1;
+              session.selection = SelectionOps.collapsed(pos - 1);
+              session.selections = SelectionSetOps.singular(pos - 1);
+              updateCaretStatus(session.source, session.caret);
+              renderer.start();
+            })();
+          }
+        } else if (pos > 0) {
+          void (async () => {
+            await session.bridge.insert(session.handle, pos - 1, "", "user");
+            session.caret = pos - 1;
+            session.selection = SelectionOps.collapsed(pos - 1);
+            session.selections = SelectionSetOps.singular(pos - 1);
+            updateCaretStatus(session.source, session.caret);
+            renderer.start();
+          })();
+        }
+      }
+      return;
+    }
+
+    // Delete: deleta seleção ou caractere à frente
+    if (event.key === "Delete" && controller?.current) {
+      event.preventDefault();
+      const session = controller.current;
+      const s = session.selection;
+      if (!SelectionOps.isCollapsed(s)) {
+        const { start } = SelectionOps.normalized(s);
+        session.caret = start;
+        session.selection = SelectionOps.collapsed(start);
+        session.selections = SelectionSetOps.singular(start);
+        void controller.insertText("");
         renderer.start();
       }
       return;
@@ -1762,7 +1900,37 @@ function attachInputListeners(
     else if (event.key === "End") viewport.scrollTo(line.first + 1_000_000, { animate: true });
     else if (controller !== undefined && controller.current !== undefined && isPrintable(event)) {
       event.preventDefault();
-      void controller.insertText(event.key);
+      void (async () => {
+        const session = controller.current!;
+        const key = event.key;
+        const close = AUTO_PAIRS[key];
+
+        if (close !== undefined) {
+          // Auto-pair: insere par + volta pro meio
+          await session.bridge.insert(session.handle, session.caret, key + close, "user");
+          session.caret += 1; // fica entre os pares
+          session.selection = SelectionOps.collapsed(session.caret);
+          session.selections = SelectionSetOps.singular(session.caret);
+        } else if (CLOSING.has(key)) {
+          // Se o próximo caractere é o fechamento, só pula (não insere duplicado)
+          const text = session.source.text;
+          if (session.caret < text.length && text[session.caret] === key) {
+            session.caret += 1;
+            session.selection = SelectionOps.collapsed(session.caret);
+            session.selections = SelectionSetOps.singular(session.caret);
+          } else {
+            await session.bridge.insert(session.handle, session.caret, key, "user");
+          }
+        } else {
+          // Caractere normal
+          await session.bridge.insert(session.handle, session.caret, key, "user");
+          session.caret += key.length;
+          session.selection = SelectionOps.collapsed(session.caret);
+          session.selections = SelectionSetOps.singular(session.caret);
+        }
+        updateCaretStatus(session.source, session.caret);
+        renderer.start();
+      })();
       return;
     } else return;
     event.preventDefault();
