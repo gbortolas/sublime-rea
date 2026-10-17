@@ -66,3 +66,64 @@ body {
 #status-bar .disabled {
   opacity: 0.35;
 }
+
+/*
+ * Find bar: flutua no topo à direita do overlay. `pointer-events: auto` reativa o mouse (o overlay
+ * é `pointer-events: none`). O atributo `hidden` esconde — o seletor de atributo vence `display:flex`.
+ */
+#find-bar {
+  pointer-events: auto;
+  position: absolute;
+  top: 0.5rem;
+  right: 0.5rem;
+  display: flex;
+  gap: 0.35rem;
+  align-items: center;
+  padding: 0.35rem 0.5rem;
+  background: var(--scribe-status-bg);
+  border: 1px solid #3a3d41;
+  border-radius: 4px;
+  font-size: 0.8rem;
+}
+
+#find-bar[hidden] {
+  display: none;
+}
+
+#find-bar input {
+  width: 12rem;
+  padding: 0.2rem 0.35rem;
+  color: var(--scribe-fg);
+  background: var(--scribe-bg);
+  border: 1px solid #3a3d41;
+  border-radius: 3px;
+  font: inherit;
+}
+
+#find-bar input:focus {
+  outline: 1px solid var(--scribe-caret, #7fb3ff);
+}
+
+#find-count,
+#find-status {
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+#find-status {
+  color: #9aa0a6;
+}
+
+#find-bar button {
+  padding: 0.2rem 0.4rem;
+  color: var(--scribe-fg);
+  background: #3a3d41;
+  border: 1px solid #4a4d51;
+  border-radius: 3px;
+  font: inherit;
+  cursor: pointer;
+}
+
+#find-bar button:hover {
+  background: #4a4d51;
+}

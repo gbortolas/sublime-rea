@@ -2,6 +2,10 @@
 #
 # setup.sh — instalador idempotente do ambiente do projeto sublime-rea.
 #
+# [DEPRECATED/LEGACY] NÃO use este script: o instalador canônico é
+#   `python3 setup/setup.py` (10 etapas, detecta JAVA_HOME). Este legacy (9 etapas)
+#   só roda com SCRIBE_ALLOW_LEGACY_SETUP=1.
+#
 # Instala/pina: REA (rea-agents), Ghidra (provider de análise), extrai o alvo
 # Sublime Text, registra o MCP no opencode e valida tudo com `rea doctor`.
 #
@@ -105,6 +109,28 @@ GHIDRA_ZIP_PATH="${REA_TOOLS_DIR}/${GHIDRA_ZIP_FILENAME}"
 GHIDRA_INSTALL_DIR="${REA_TOOLS_DIR}/${GHIDRA_EXTRACTED_DIRNAME}"
 TARBALL="${REPO_ROOT}/${SUBLIME_TARBALL}"
 TARGET_BIN="${REPO_ROOT}/${SUBLIME_TARGET_BIN}"
+
+# ---------------------------------------------------------------------------
+# Trava de segurança: setup.sh é LEGACY (deprecated) — bloqueia por padrão
+# ---------------------------------------------------------------------------
+if [ "${SCRIBE_ALLOW_LEGACY_SETUP:-0}" != "1" ]; then
+  err "setup/setup.sh é LEGACY e está DESATIVADO (deprecated)."
+  cat >&2 <<'EOF'
+
+Este script tem apenas 9 etapas e NÃO detecta o JAVA_HOME, podendo gerar um
+setup/env.sh desatualizado (com isso o `rea doctor` fica healthy: false).
+
+Use o instalador canônico (10 etapas, idempotente, detecta JAVA_HOME):
+
+    python3 setup/setup.py
+
+Se você realmente precisa rodar o legacy, force explicitamente:
+
+    SCRIBE_ALLOW_LEGACY_SETUP=1 bash setup/setup.sh
+
+EOF
+  exit 2
+fi
 
 if [ "${DRY_RUN}" = 1 ]; then
   printf '%s\n' "${C_YELLOW}${C_BOLD}== MODO DRY-RUN: nada será baixado, instalado ou alterado ==${C_RESET}"

@@ -146,9 +146,9 @@ IDs). Cada item vira uma seção da spec técnica abstrata. **Fase 1 FECHADA** �
       **Scribe**; aplicado em `TECHNICAL_SPECIFICATION.md` ("Scribe / High-Performance Electron Text
       Editor Core"), em [`docs/architecture/`](architecture/) e no `README.md`. O repositório segue
       **`sublime-rea`** (nome do repo, não do produto).
-- [~] **P2.4 — Fase 3.2: primeira fatia vertical end-to-end** ← **em andamento**; falta **1 frente**
-      (busca/substituição) — as outras **4** estão provadas ponta a ponta (abrir arquivo, cancelamento,
-      undo/redo, realce de sintaxe):
+- [x] **P2.4 — Fase 3.2: primeira fatia vertical end-to-end** ✅ **fechada** (2026-10-17) — as **5
+      frentes** estão provadas ponta a ponta (abrir arquivo, cancelamento, undo/redo, realce de sintaxe
+      e **busca/substituição** em lane de background):
       - [x] **Abrir arquivo real** sem `?file=` ✅ — arg de linha de comando + `dialog.showOpenDialog`
             (IPC `document.openDialog`); `Ctrl/Cmd+O` abre **pós-boot** também. (`04096ae`)
       - [x] **Fiar o cancelamento** ✅ — registro `signalId → AbortController` no `main`, `IpcCancel` no
@@ -161,11 +161,10 @@ IDs). Cada item vira uma seção da spec técnica abstrata. **Fase 1 FECHADA** �
             gramática + tokenizer + theme + registry), `syntax.highlight` no IPC e coloração por escopo
             em `buildInstances`; fixture **nossa** `assets/grammars/scribe-demo.sublime-syntax`.
             Achados de revisão → **corrigidos** em **P2.4b** ✅. (`2a169be` + P2.4b)
-      - [ ] **Busca/substituição** na lane `background` (primeiro uso real de lane não-`input`) —
-            **única frente restante** ← **próximo**. Ainda **não** existe API de busca (`TaskResultMap`
-            não tem kind
-            `search`); precisa de novo `TaskKind` + worker em `worker-entry.ts` + contrato IPC + serviço
-            de busca no `core/editor` consumindo `pool.run`/`scheduler.post("background", …)`.
+      - [x] **Busca/substituição** na lane `background` ✅ — `TaskKind` novo `search` no `TaskPool` (lane
+            `index`) disparado por `scheduler.post("background", …)` (**primeiro uso real** da lane de
+            fundo), contrato novo `src/shared/search-contract.ts`, IPC `search.find`/`search.replaceAll` e
+            **find bar** no renderer (`Ctrl/Cmd+F`). Detalhes, decisões e follow-ups em **P2.4c** (abaixo).
 
 - [x] **P2.4b — Corrigir achados de revisão da Slice D** ✅ **fechado** (2026-10-17). Os **2 blockers +
       1 risco** do reviewer **foram corrigidos** (4 rodadas de `fixer` + re-revisões independentes que
@@ -191,19 +190,92 @@ IDs). Cada item vira uma seção da spec técnica abstrata. **Fase 1 FECHADA** �
             (`src/core/editor/editor-core.ts`, `MAX_TOKENIZE_LINE_LENGTH` em `src/core/syntax/tokenizer.ts`).
             Correção de verdade = cap de `end` **ou** tokenização em worker com prazo (novo `TaskKind`).
 
+- [x] **P2.4c — Busca/substituição na lane `background`** ✅ **fechado** (2026-10-17). Primeira fatia a
+      exercitar o `TaskPool` e a lane `background` do `Scheduler` de verdade. Gates finais:
+      `typecheck`/`lint`/`build` exit 0 e **423 testes / 43 arquivos** (baseline anterior: 348). Entregue:
+      - **contrato** — `src/shared/search-contract.ts`: `SearchQuery`/`SearchMatch`/`SearchResult`,
+        caps (`SEARCH_DEFAULT_MAX_MATCHES = 2000`, `SEARCH_MAX_MATCHES = 20000`,
+        `SEARCH_MAX_PATTERN_LENGTH = 512`, `SEARCH_MAX_TEXT_LENGTH = 64 MiB`), `SearchInputError` com
+        `code ∈ {search.pattern, search.tooLarge, search.tooManyMatches, search.emptyPattern}`,
+        `normalizeSearchQuery` e `scanText` (varredura **linear**, `index/length/line/column` em
+        **UTF-16**, `truncated`, matches de comprimento zero descartados). **Regex é opt-in**
+        (`regex=false` ⇒ padrão literal escapado) — sem ReDoS por acidente.
+      - **task** — `TaskKind: "search"` (`TaskResultMap`/`TaskSpecByKind`), lane padrão `index`; o texto
+        chega ao worker pelo idioma existente `pool.registerText(handle, revision, text)`; geração
+        obsoleta ⇒ `StaleGenerationError`; `TaskError` genérico preserva `name`/`code` até o IPC. Teto de
+        texto checado **antes** de registrar/enviar (e de novo no worker, defesa em profundidade).
+      - **serviço** — `EditorCore.searchDocument` (via `scheduler.post("background", () => pool.run(…))`)
+        e `EditorCore.replaceAll`, que **recusa** resultado `truncated` (nada de substituição parcial
+        silenciosa), aplica tudo num **único `EditScope`** (um Ctrl+Z desfaz o replace-all inteiro) com
+        substituição **literal**, em ordem crescente com delta acumulado, e **coalesce** o fan-out de
+        `document.changed` (1 evento por lote em vez de 1 por delta — sem isso, 2000 substituições
+        geravam GB de IPC; insert/undo/redo seguem notificando a cada mudança).
+      - **IPC + UI** — `search.find` / `search.replaceAll` no padrão de `syntax.highlight`; **find bar**
+        (`Ctrl/Cmd+F`, `Enter`/`Shift+Enter` com wrap, `Esc` fecha antes do Esc de cancelar abertura,
+        contador `atual/total`, replace-all) com `FindBarModel` puro (debounce injetado, descarte por
+        documento+revisão+seq) + fiação DOM em `src/renderer/main.ts`.
+      - **paridade do worker** — o `worker-entry.ts` **replica** a varredura (o `eval` do vitest não
+        resolve `../../shared`); a equivalência é travada por teste de paridade contra o **worker real**
+        (25 casos + 2 de erro) **verificado por mutação** (mutar `wholeWord`, o escape do literal ou o
+        default de `maxMatches` no worker **quebra** a paridade). → **P3.10** elimina a duplicação.
+      - **follow-ups declarados** — **P3.11** (pintar as ocorrências no canvas; hoje só move caret +
+        scroll) · **P3.10** (bundlar o worker no build) · **P3.12** (assinatura
+        `bridge.onDocumentChanged` do find bar não amarrada a `dispose`) · o guard de geração do pool é
+        **por consistência** (a garantia de "resultado fresco" é do chamador comparar `revision`) — a doc
+        foi corrigida para não prometer mais do que ele entrega.
+
+- [ ] **P2.5 — Salvar arquivo (`Ctrl/Cmd+S` + estado *dirty*)** ← **próximo**. Fecha o item #1 do README
+      ("abrir / editar / **salvar** — o mínimo inegociável"), que hoje **não existe**: o `TaskKind:
+      "writeFile"` já está no pool (lane `io`) mas **ninguém o chama**. Plano: `document.save` no IPC →
+      `EditorCore.saveDocument(handle, signal?)` que materializa o texto (`documentText`, O(n)) e grava
+      via `pool.run({kind:"writeFile", …}, {lane:"io"})` — **segundo** uso real de lane (`io`, hoje
+      também intocada); marcar `dirty: false` no buffer/registry (o contrato já expõe `dirty`) e zerar na
+      revisão gravada; `Ctrl/Cmd+S` e indicador na status bar (padrão de `#status-undo`/`#status-redo`);
+      atalho "salvar se sujo" e aviso de perda (trocar de documento com edições não salvas) ficam como
+      decisão da fatia. Cuidado com: `dirty` correto após undo que volta ao texto original (comparar com
+      a revisão salva, não só o flag), escrita **atômica** no worker (tmp + rename) para não truncar o
+      arquivo em caso de falha, e erro tipado de I/O no IPC.
+
 ---
 
 ## 🧹 P3 — Housekeeping / dívidas
 
-- [~] **P3.1 — `bin/` versionado**: o `.deb` (redundante) **já foi removido e commitado**. Falta
-      decidir o `.tar.xz` (22 MB, é a fonte do alvo): `git rm --cached` + download sob demanda com
-      SHA pinado no `setup.py`, ou Git LFS.
+- [ ] **P3.10 — Bundlar o worker de `TaskPool` no build (matar a duplicação do scanner de busca)**: o
+      `worker-entry.ts` roda por `path.join(__dirname, "worker-entry.js")` e o **`eval` do vitest não
+      resolve `../../shared`**, então a varredura de busca foi **replicada** dentro dele (paridade
+      travada por teste, ver §P2.4c). O build já usa `esbuild` para renderer/preload — fazer o mesmo com
+      o worker permitiria `import { scanText } from "../../shared"` sem duplicação. Ver o comentário em
+      `src/core/concurrency/worker-entry.ts` (~`:227`).
+- [ ] **P3.11 — Pintar as ocorrências da busca no canvas**: hoje a navegação só **move o caret + scroll**
+      para o match (o find bar sabe os `index/length` da janela visível). Fazer o realce visual das
+      ocorrências (e do match "atual") exige passar as faixas ao `buildInstances`/`RenderPipeline`
+      (`src/core/render/scene.ts`) — decidir se entra como parâmetro novo ou como camada de *overlay*.
+- [ ] **P3.12 — Ciclo de vida das assinaturas do renderer**: a assinatura `bridge.onDocumentChanged`
+      fiada pelo find bar (`src/renderer/find-bar.ts`) não é amarrada a `dispose()` do modelo (o boot
+      atual não tem teardown, então não há efeito prático hoje). Amarrar quando o renderer ganhar
+      desmontagem/reload.
+
+- [x] **P3.1 — `bin/` versionado** ✅ **resolvido** (2026-10-17) — o `.deb` (redundante) já tinha sido
+      removido; o **`.tar.xz` do alvo (22 MB) saiu do git** (`git rm --cached`, arquivo preservado no
+      disco) e o `setup.py` agora **baixa sob demanda** com **SHA-256 pinado** (`setup/versions.env`):
+      download atômico (`.part` → valida → `os.replace`), **fail-closed** (hash divergente = erro fatal
+      `code=4`, sem extrair e sem sobrescrever), e **sem rede** quando o arquivo já está presente com
+      hash correto. `.gitignore` ganhou a entrada explícita (sem ignorar `bin/` inteiro — o
+      `ghidra-preanalyze.sh` segue versionado); `setup/README.md` documenta rede/exit codes/troubleshooting.
+      Evidência: URL oficial `HTTP 200` com `content-length: 22300732` e SHA `c153f418…43e88d9` batendo
+      1:1 com o arquivo local; verificado nos 3 cenários (ausente, pin adulterado, offline).
 - [x] **P3.2 — Documentar em destaque** que o `rea` CLI exige `source setup/env.sh` em shells
       não-interativos ✅ **resolvido**: o `README.md` da raiz existe (10 passos, do zero ao MVP) e
       cobre isso em três lugares (pré-requisitos, Passo 3 e pegadinhas).
-- [ ] **P3.3 — `setup/setup.sh` (bash) legacy**: decidir entre remover ou congelar; está com 9
-      etapas (desatualizado em relação ao `setup.py` de 10). Risco de divergência.
-- [ ] **P3.4 — `main.py`**: boilerplate do PyCharm na raiz; remover ou repurpor.
+- [x] **P3.3 — `setup/setup.sh` (bash) legacy** ✅ **resolvido** (2026-10-17) — **congelado com trava**: o
+      script agora **recusa** rodar sem `SCRIBE_ALLOW_LEGACY_SETUP=1` (aviso em stderr explicando que o
+      canônico é `python3 setup/setup.py` e que o legacy tem 9 etapas / não detecta `JAVA_HOME` ⇒
+      `env.sh` sem o export ⇒ `rea doctor` = `healthy: false`), header marcado **DEPRECATED** e
+      `setup/README.md` atualizado. Verificado: `bash setup/setup.sh` → **exit 2** + aviso ·
+      `SCRIBE_ALLOW_LEGACY_SETUP=1 bash -n setup/setup.sh` → sintaxe ok · `--help` segue funcionando.
+- [x] **P3.4 — `main.py`** ✅ **resolvido** (2026-10-17): boilerplate do PyCharm **removido**
+      (`git rm main.py`); grep confirmou **zero** referências em código/setup/scripts (só o texto desta
+      linha do BACKLOG e um `.idea/workspace.xml` gitignored).
 - [ ] **P3.5 — Provisionar Rizin** (só se P0.4 voltar à mesa): o REA faz `spawn("rizin")` do PATH e
       não há nenhum instalado.
 - [ ] **P3.6 — Snapshot de análise do REA**: baixa prioridade. O `snapshot_path=<*.json>` só faz

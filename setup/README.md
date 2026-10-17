@@ -7,19 +7,23 @@ com a ferramenta **REA** (MCP) + **Ghidra**:
 - **REA** (`rea-agents@6.5.0`) — cliente MCP de engenharia reversa.
 - **Ghidra 12.1.4** — provider de análise profunda exigido pelo REA (pinado).
 - **pwntools-elf** — provider offline (venv Python dedicado) usado por `inspect_binary_layout`.
-- **Alvo** Sublime Text build 4215 — extraído do bundle local `bin/`.
+- **Alvo** Sublime Text build 4215 — tarball baixado **sob demanda** (URL + SHA-256
+  pinados em `versions.env`) e extraído para `target/`.
 - **Registro MCP** no client `opencode` (inclui `REA_PWNTOOLS_PYTHON`).
 - **Verificação** final com `rea doctor`.
 
 O instalador canônico é **`setup/setup.py`**. O antigo `setup/setup.sh` (bash) permanece
-no disco apenas como **legacy** — não é mais o recomendado.
+no disco apenas como **legacy** — não é mais o recomendado e **recusa rodar** por padrão.
+Ele só tem **9 etapas** e **não detecta o `JAVA_HOME`** (o `env.sh` gerado pode sair sem
+esse export, deixando o `rea doctor` em `healthy: false`); para executá-lo de todo é
+**obrigatório** definir a variável de escape `SCRIBE_ALLOW_LEGACY_SETUP=1`.
 
 ## Arquivos
 
 | Arquivo | Papel |
 |---|---|
 | `setup.py` | Instalador Python idempotente (**o único que você executa**). |
-| `setup.sh` | Instalador bash antigo — **legacy**, mantido só por referência. |
+| `setup.sh` | Instalador bash antigo — **legacy/deprecated**, mantido só por referência. **Recusa rodar** sem `SCRIBE_ALLOW_LEGACY_SETUP=1` (9 etapas; sem detecção de `JAVA_HOME`). |
 | `versions.env` | Versões, URLs e SHA-256 pinados (fonte única de verdade). |
 | `env.sh` | **Gerado** pelo `setup.py`; `source` para exportar o ambiente. Ignorado pelo git. |
 | `.venv/` | **Gerado** pelo bootstrap do `rich` (só quando o `rich` falta no `python3`). Ignorado pelo git. |
@@ -36,7 +40,9 @@ no disco apenas como **legacy** — não é mais o recomendado.
 - **Python:** 3.10+ (o próprio `python3` das deps base). O `rich` é opcional — o script
   se vira para obtê-lo (ver *Bootstrap do `rich`*).
 - **Java:** JDK **>= 21** (ver seção *Java/JDK*). O script **não** instala JDK.
-- **Rede:** acesso a `github.com` (~543 MiB de download do Ghidra) e ao registry npm.
+- **Rede:** acesso a `github.com` (~543 MiB de download do Ghidra), a
+  `download.sublimetext.com` (~22 MiB do tarball do alvo — só na 1ª vez, ver
+  *Alvo (tarball)*) e ao registry npm.
 - **Disco:** ~1,5 GiB livres para o Ghidra extraído em `$REA_TOOLS_DIR`.
 - **pwntools (offline):** a etapa 6 cria um venv Python em `$REA_TOOLS_DIR/pwntools-venv`
   e instala `pwntools`/`pyelftools`/`unicorn` (pinados). Precisa do módulo `venv` do Python;
@@ -118,10 +124,16 @@ colaterais" inclui **não** criar o `setup/.venv`.
    (com `REA_TOOLS_DIR`, `GHIDRA_INSTALL_DIR`, `REA_PWNTOOLS_PYTHON` e
    `REA_GHIDRA_STARTUP_TIMEOUT_MS`); o `~/.bashrc` só
    com `--write-rc`, num bloco idempotente (não duplica se o bloco já existir).
-8. **Alvo** — extrai `bin/sublime_text_build_4215_x64.tar.xz` **num diretório temporário**
-   e só então faz o `mv` para `target/` (extração atômica: um `tar` interrompido não
-   sobrescreve o alvo válido). Valida o binário (`target/sublime_text/sublime_text`):
-   tamanho > 1 MiB e magic **ELF** (`\x7fELF`). Idempotente por essa validação.
+8. **Alvo** — garante o tarball `bin/sublime_text_build_4215_x64.tar.xz`: se **já
+   existir** com o SHA-256 pinado, usa direto (**não** toca na rede — funciona
+   offline); se **ausente** (ou com SHA-256 divergente), baixa da `SUBLIME_TARBALL_URL`
+   para `bin/….tar.xz.part` (urllib, retry/backoff, valida o tamanho vs
+   `Content-Length`/pin) e **verifica o SHA-256 ANTES de promover** o `.part` (SHA
+   divergente ⇒ erro fatal, **nada** é extraído nem o arquivo existente é
+   sobrescrito). Depois extrai **num diretório temporário** e só então faz o `mv` para
+   `target/` (extração atômica: um `tar` interrompido não sobrescreve o alvo válido).
+   Valida o binário (`target/sublime_text/sublime_text`): tamanho > 1 MiB e magic
+   **ELF** (`\x7fELF`). Idempotente por essa validação.
 9. **MCP** — `rea setup --client opencode --yes` (repassa `--dry-run`) e, em seguida,
    garante `REA_PWNTOOLS_PYTHON` e `REA_GHIDRA_STARTUP_TIMEOUT_MS` no bloco `environment`
    do servidor `rea` do
@@ -148,10 +160,32 @@ colaterais" inclui **não** criar o `setup/.venv`.
 | `1` | `rea doctor` com `healthy: false` (escopo pedido não saudável) ou erro inesperado. |
 | `2` | Uso/config: `versions.env` ausente, ilegível ou com pin faltando/**vazio** (`CHAVE=`). |
 | `3` | Ghidra: lock em uso, falha de download, SHA-256 divergente, extração inválida. |
-| `4` | Alvo: tarball ausente, `tar`/`xz` ausentes ou extração sem o binário ELF esperado. |
+| `4` | Alvo: falha/hash errado no **download** do tarball, tarball inválido, `tar`/`xz` ausentes ou extração sem o binário ELF esperado. |
 | `5` | `rea setup --client opencode` falhou. |
 | `6` | pwntools: falha ao criar o venv, obter o `pip` ou instalar os pacotes pinados. |
 | `130` | Interrompido com Ctrl-C. |
+
+## Alvo (tarball do Sublime Text)
+
+O tarball do alvo (`bin/sublime_text_build_4215_x64.tar.xz`, ~22 MiB) **não é mais
+versionado no git**. Ele é baixado **sob demanda** pela etapa 8, com a URL e o SHA-256
+**pinados** em `setup/versions.env` (`SUBLIME_TARBALL_URL`, `SUBLIME_TARBALL_SHA256`,
+`SUBLIME_TARBALL_SIZE_BYTES`) — a mesma disciplina do Ghidra.
+
+- **1ª execução / arquivo ausente:** baixa da URL oficial para `bin/….tar.xz.part`
+  (atômico), valida o SHA-256 e **só então** promove para `bin/….tar.xz`.
+- **Execuções seguintes:** com o arquivo já presente e o SHA-256 correto, **nenhum
+  download** é feito (idempotente).
+- **Offline:** se você já tem `bin/….tar.xz` com o SHA-256 correto, o setup **não**
+  acessa a rede. Sem o arquivo e sem rede, a etapa 8 falha com exit `4` e uma dica para
+  colocá-lo manualmente em `bin/`.
+- **Fail-closed:** SHA-256 divergente (arquivo corrompido **ou** pin adulterado) ⇒ erro
+  fatal (exit `4`): **nada** é extraído e o arquivo existente **não** é sobrescrito.
+- `--install-deps` **não** muda nada disso (ele só trata deps de sistema via apt/sudo);
+  o download do alvo **nunca** usa `sudo` e só depende de `urllib` (stdlib).
+
+> O deb do Sublime (`bin/sublime-text_build-4215_amd64.deb`) também está no `.gitignore`
+> — nenhuma etapa do setup o baixa; é apenas um pin residual em `versions.env`.
 
 ## Diretórios e variáveis
 
@@ -206,9 +240,9 @@ instrui — nunca instala JDK.
 ## Como reproduzir numa máquina nova
 
 ```bash
-git clone <repo> sublime-rea && cd sublime-rea        # bin/ já traz o alvo
+git clone <repo> sublime-rea && cd sublime-rea        # alvo NÃO vem no repo (é baixado)
 python3 setup/setup.py --dry-run                      # confira o plano
-python3 setup/setup.py --install-deps --write-rc      # instala
+python3 setup/setup.py --install-deps --write-rc      # instala (baixa o alvo na 1ª vez)
 source setup/env.sh                                   # (ou abra um shell novo)
 ```
 
@@ -217,6 +251,7 @@ source setup/env.sh                                   # (ou abra um shell novo)
 ```bash
 python3 setup/setup.py --dry-run                      # exit 0; mostra mkdir → lock → .part → mv
 sha256sum "$REA_TOOLS_DIR"/ghidra_12.1.4_PUBLIC_*.zip # bate com versions.env
+sha256sum bin/sublime_text_build_4215_x64.tar.xz      # bate com SUBLIME_TARBALL_SHA256
 rea doctor --client opencode --provider ghidra --format json | python3 -m json.tool
 ls -l target/sublime_text/sublime_text                # ELF do alvo extraído
 source setup/env.sh                                   # exporta REA_PWNTOOLS_PYTHON
@@ -250,8 +285,16 @@ não é usado como gate — veja a etapa 10 acima).
 - **`npm prefix` não gravável** — o script usa `npx -y rea-agents@6.5.0` automaticamente;
   para instalar global, ajuste o prefix (`npm config set prefix ~/.local`) ou use nvm.
 - **`node < 20`** — prefira nvm/nodesource; o `nodejs` do apt em distros antigas costuma ser antigo.
-- **Extraído mas não achou o alvo** — confirme `bin/sublime_text_build_4215_x64.tar.xz`
-  presente; o tarball contém `sublime_text/sublime_text`.
+- **Extraído mas não achou o alvo** — o setup baixa `bin/sublime_text_build_4215_x64.tar.xz`
+  sozinho se faltar (confira o SHA-256 nas mensagens); o tarball contém
+  `sublime_text/sublime_text`.
+- **`SHA-256 do tarball do alvo não confere`** — o arquivo baixado (ou o local) não bate
+  com `SUBLIME_TARBALL_SHA256`. O setup **não** extrai nada: apague o arquivo (ou o
+  `.part`) e rode de novo; se persistir, o pin ou o arquivo estão adulterados — confira
+  contra `versions.env` / a URL oficial antes de prosseguir.
+- **Sem rede na 1ª execução** — baixe o tarball oficial manualmente
+  (`SUBLIME_TARBALL_URL`) para `bin/sublime_text_build_4215_x64.tar.xz`, confira o
+  SHA-256 contra `versions.env` e rode o setup (ele **não** tentará baixar de novo).
 - **Rebaixar/reextrair Ghidra à força** — remova `$GHIDRA_INSTALL_DIR` (ou o zip) e rode de novo.
 - **Saída feia/sem cor** — o `rich` não foi obtido e o script caiu no fallback plain.
   Confira `python3 -c "import rich"`; se preferir instalar à mão: `python3 -m pip install rich`.
@@ -259,11 +302,13 @@ não é usado como gate — veja a etapa 10 acima).
 ## Notas de design
 
 - **Idempotência:** cada etapa detecta o estado atual e só age se preciso (SHA válido,
-  `launch.properties` presente, `rea --version` correto, alvo já extraído, bloco do rc presente).
+  `launch.properties` presente, `rea --version` correto, tarball do alvo presente com
+  SHA-256 correto, alvo já extraído, bloco do rc presente).
 - **Segurança por padrão:** sem flags, zero `sudo` e zero alteração de rc; `--dry-run` não
   tem efeitos colaterais.
-- **Downloads atômicos e verificados:** `.part` → `mv`; SHA-256 do Ghidra conferido **antes**
-  da extração; lock de instalação e cleanup garantido por `try/finally`. `setup/env.sh` é
+- **Downloads atômicos e verificados:** `.part` → `mv`; SHA-256 do Ghidra **e** do tarball
+  do alvo conferidos **antes** de extrair (fail-closed); lock de instalação e cleanup
+  garantido por `try/finally`. `setup/env.sh` é
   escrito atomicamente (temp + `rename`) e o Ghidra antigo só é removido após o novo dir
   estar no lugar.
 - **`rich` opcional:** dependência de *conforto* (UI), nunca de corretude — se faltar, o

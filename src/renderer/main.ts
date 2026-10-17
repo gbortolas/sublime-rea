@@ -23,9 +23,18 @@ import type {
   HighlightSpan,
   RenderBackendKind,
   RGBA,
+  ReplaceAllResult,
   RenderPipeline,
+  SearchDocumentResult,
+  SearchMatch,
+  SearchQuery,
   TextStyle,
 } from "../shared";
+import {
+  FindBarModel,
+  createDebounceScheduler,
+} from "./find-bar";
+import type { FindBarApi, FindBarState } from "./find-bar";
 import {
   Canvas2DBackend,
   GlyphAtlas,
@@ -234,6 +243,12 @@ interface ScribeBridge {
    * contrato atual simplesmente não a expõe — o renderer degrada para a cor default, sem crash.
    */
   highlight?(handle: number, first: number, count: number): Promise<DocumentHighlight>;
+  /**
+   * Busca/substituição numa lane de fundo (opcionais pelo mesmo motivo de `highlight`: um preload
+   * antigo simplesmente não as expõe e o renderer desliga a find bar, sem crash).
+   */
+  find?(handle: number, query: SearchQuery): Promise<SearchDocumentResult>;
+  replaceAll?(handle: number, query: SearchQuery, replacement: string): Promise<ReplaceAllResult>;
   cancel(signalId: number): void;
   nextSignalId(): number;
   snapshot(): Promise<unknown>;
@@ -1014,7 +1029,12 @@ export async function bootRenderer(): Promise<boolean> {
     renderer.attachSource(next);
   };
 
-  attachInputListeners(surface, viewport, renderer, controller);
+  const findBar =
+    bridge !== undefined && controller !== undefined
+      ? attachFindBar({ bridge, controller, source, viewport, renderer, surface })
+      : undefined;
+
+  attachInputListeners(surface, viewport, renderer, controller, findBar);
   window.addEventListener("resize", () => renderer.resize(surface.clientWidth, surface.clientHeight));
   renderer.start();
   return true;
@@ -1026,11 +1046,158 @@ function assertiveContext(canvas: HTMLCanvasElement): CanvasRenderingContext2D {
   return ctx;
 }
 
+/**
+ * Ligação find bar ↔ renderer: o modelo puro + a sincronização de documento ativo (abrir um
+ * arquivo troca o alvo; o modelo precisa saber para descartar respostas do documento anterior).
+ */
+export interface FindBarBinding {
+  readonly model: FindBarModel;
+  /** Re-sincroniza documento/revisão ativos (após abrir arquivo e antes de buscar). */
+  syncDocument(): void;
+}
+
+interface FindBarDeps {
+  readonly bridge: ScribeBridge;
+  readonly controller: DocumentController;
+  readonly source: DocumentLineSource;
+  readonly viewport: ViewportImpl;
+  readonly renderer: ScribeRenderer;
+  readonly surface: HTMLCanvasElement;
+}
+
+/**
+ * Liga o `FindBarModel` ao DOM. Devolve `undefined` quando a ponte não expõe `find`/`replaceAll`
+ * (preload antigo) ou falta markup — degradação **explícita** (um log), nunca crash (DEC-TR-7).
+ * Toda a lógica (debounce injetado, navegação, descarte de resposta obsoleta) vive no modelo puro.
+ */
+export function attachFindBar(deps: FindBarDeps): FindBarBinding | undefined {
+  const find = deps.bridge.find;
+  const replaceAll = deps.bridge.replaceAll;
+  const bar = document.getElementById("find-bar");
+  const input = document.getElementById("find-input");
+  const count = document.getElementById("find-count");
+  const replaceInput = document.getElementById("find-replace-input");
+  const replaceButton = document.getElementById("find-replace-all");
+  const status = document.getElementById("find-status");
+  const closeButton = document.getElementById("find-close");
+  if (
+    find === undefined ||
+    replaceAll === undefined ||
+    bar === null ||
+    !(input instanceof HTMLInputElement) ||
+    count === null ||
+    !(replaceInput instanceof HTMLInputElement) ||
+    !(replaceButton instanceof HTMLButtonElement) ||
+    status === null ||
+    !(closeButton instanceof HTMLButtonElement)
+  ) {
+    console.info("Scribe: find bar desligada (ponte sem busca ou markup ausente)");
+    return undefined;
+  }
+
+  const currentHandle = (): number | undefined => deps.controller.current?.handle;
+
+  const api: FindBarApi = {
+    find: (query: SearchQuery): Promise<SearchDocumentResult> => {
+      const handle = currentHandle();
+      if (handle === undefined) {
+        return Promise.reject(new Error("Scribe: nenhum documento aberto para buscar"));
+      }
+      return find.call(deps.bridge, handle, query);
+    },
+    replaceAll: (query: SearchQuery, replacement: string): Promise<ReplaceAllResult> => {
+      const handle = currentHandle();
+      if (handle === undefined) {
+        return Promise.reject(new Error("Scribe: nenhum documento aberto para substituir"));
+      }
+      return replaceAll.call(deps.bridge, handle, query, replacement);
+    },
+  };
+
+  let currentDocKey = "";
+  const renderState = (state: FindBarState): void => {
+    bar.hidden = !state.open;
+    count.textContent = `${state.current}/${state.total}${state.truncated ? "+" : ""}`;
+    status.textContent = state.status ?? "";
+  };
+
+  // Selecionar uma ocorrência move o caret (coluna do início) e rola até a linha dela.
+  const moveCaretTo = (match: SearchMatch): void => {
+    const session = deps.controller.current;
+    if (session === undefined) return;
+    session.caret = Math.min(match.index, session.source.text.length);
+    updateCaretStatus(session.source, session.caret);
+    deps.viewport.scrollTo(match.line);
+    deps.renderer.start();
+  };
+
+  const model = new FindBarModel({
+    api,
+    schedule: createDebounceScheduler(),
+    onChange: renderState,
+    onSelect: moveCaretTo,
+  });
+
+  const syncDocument = (): void => {
+    const session = deps.controller.current;
+    if (session === undefined) return;
+    currentDocKey = documentHighlightKey(session.handle);
+    model.setDocument(currentDocKey, session.source.revision);
+  };
+
+  const openFind = (): void => {
+    syncDocument();
+    model.open();
+    input.focus();
+    input.select();
+  };
+
+  input.addEventListener("input", () => model.setPattern(input.value));
+  replaceInput.addEventListener("input", () => model.setReplacement(replaceInput.value));
+  replaceButton.addEventListener("click", () => void model.replaceAll());
+  closeButton.addEventListener("click", () => {
+    model.close();
+    deps.surface.focus();
+  });
+  bar.addEventListener("keydown", (event: KeyboardEvent) => {
+    if (event.key === "Escape") {
+      event.preventDefault();
+      model.close();
+      deps.surface.focus();
+      return;
+    }
+    if (event.key === "Enter") {
+      event.preventDefault();
+      if (event.shiftKey) model.previous();
+      else model.next();
+    }
+  });
+  // Ctrl/Cmd+F em qualquer lugar da janela: a barra pode estar focada, não só o canvas.
+  document.addEventListener("keydown", (event: KeyboardEvent) => {
+    if ((event.ctrlKey || event.metaKey) && !event.altKey && (event.key === "f" || event.key === "F")) {
+      event.preventDefault();
+      openFind();
+    }
+  });
+  // Edição muda a revisão: o modelo descarta a resposta de revisão superada e refaz a contagem.
+  deps.bridge.onDocumentChanged((event) => {
+    const session = deps.controller.current;
+    if (session === undefined || event.handle !== session.handle) return;
+    currentDocKey = documentHighlightKey(session.handle);
+    model.setDocument(currentDocKey, event.revision);
+  });
+
+  syncDocument();
+  renderState(model.state());
+  return { model, syncDocument };
+}
+
 function attachInputListeners(
   surface: HTMLCanvasElement,
   viewport: ViewportImpl,
   renderer: ScribeRenderer,
   controller: DocumentController | undefined,
+  findBar: FindBarBinding | undefined,
 ): void {
   const lineHeight = Math.ceil(TEXT_STYLE.sizePx * 1.4);
   const currentLine = (): number => Math.floor(viewport.scrollOffsetPx() / lineHeight);
@@ -1051,7 +1218,8 @@ function attachInputListeners(
     // (redo) e Esc durante "abrindo…" (cancela a abertura em curso).
     if (primary && !event.altKey && (event.key === "o" || event.key === "O")) {
       event.preventDefault();
-      if (controller !== undefined) void controller.openDialog();
+      // Abrir troca o documento ativo: re-sincroniza a find bar com o novo alvo.
+      if (controller !== undefined) void controller.openDialog().then(() => findBar?.syncDocument());
       return;
     }
     if (primary && !event.altKey && !event.shiftKey && (event.key === "z" || event.key === "Z")) {
@@ -1071,6 +1239,12 @@ function attachInputListeners(
       return;
     }
     if (event.key === "Escape") {
+      // Esc fecha a find bar primeiro (se aberta); só depois é que cancela uma abertura em curso.
+      if (findBar !== undefined && findBar.model.isOpen) {
+        event.preventDefault();
+        findBar.model.close();
+        return;
+      }
       if (controller !== undefined && controller.cancelOpening()) {
         event.preventDefault();
         return;

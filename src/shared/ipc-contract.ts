@@ -23,6 +23,7 @@ import type { ArgsOf, ResultOf } from "./extension-contract";
 import type { DocumentHandle } from "./handles";
 import type { DocumentHighlight } from "./syntax-contract";
 import type { MainThreadBusy } from "./concurrency-contract";
+import type { ReplaceAllResult, SearchDocumentResult, SearchQuery } from "./search-contract";
 
 /** Versão do contrato do canal — `"<major>.<minor>"` (DEC-IPC-11: handshake negocia). */
 export type IpcVersion = `${number}.${number}`;
@@ -87,6 +88,16 @@ export interface IpcMethods {
    * de linhas absolutas (a virtualização do `Viewport` já manda só o visível).
    */
   "syntax.highlight"(handle: DocumentHandle, first: number, count: number): DocumentHighlight;
+  /**
+   * Busca no documento numa lane de fundo (o main registra o texto no `TaskPool` e roda a task
+   * `search` na lane `background` do `Scheduler`). Devolve as ocorrências + a revisão do documento.
+   */
+  "search.find"(handle: DocumentHandle, query: SearchQuery): SearchDocumentResult;
+  /**
+   * Substitui **todas** as ocorrências (literal, sem `$1`). Num único passo de undo; recusa com
+   * `search.tooManyMatches` se a busca for truncada (nada de substituição parcial silenciosa).
+   */
+  "search.replaceAll"(handle: DocumentHandle, query: SearchQuery, replacement: string): ReplaceAllResult;
 }
 
 export type IpcMethodName = keyof IpcMethods & string;
@@ -114,6 +125,8 @@ export const IPC_METHODS = [
   "editor.undoState",
   "editor.snapshot",
   "syntax.highlight",
+  "search.find",
+  "search.replaceAll",
 ] as const satisfies readonly IpcMethodName[];
 
 export const IPC_EVENT_NAMES = ["document.changed"] as const satisfies readonly IpcEventName[];

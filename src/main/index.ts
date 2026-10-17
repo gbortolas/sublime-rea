@@ -35,6 +35,7 @@ import type {
   IpcResponse,
   MainThreadBusy,
   ResourceLayer,
+  SearchQuery,
 } from "../shared";
 
 export type { EditorCore, EditorCoreOptions } from "../core/editor";
@@ -309,6 +310,17 @@ async function dispatchIpc(
       const count = requireNumber(request.args[2], "syntax.highlight", "count");
       return core.highlightDocument(handle, first, count);
     }
+    case "search.find": {
+      const handle = requireHandle(request.args[0], "search.find");
+      const query = requireSearchQuery(request.args[1], "search.find");
+      return core.searchDocument(handle, query, signal);
+    }
+    case "search.replaceAll": {
+      const handle = requireHandle(request.args[0], "search.replaceAll");
+      const query = requireSearchQuery(request.args[1], "search.replaceAll");
+      const replacement = requireString(request.args[2], "search.replaceAll", "replacement");
+      return core.replaceAll(handle, query, replacement, signal);
+    }
     default:
       // Inalcançável: `parseIpcRequest` já validou o método; guarda contra regressão.
       throw new IpcProtocolError("unknown-method", "método desconhecido");
@@ -356,6 +368,41 @@ function requireHandle(value: unknown, method: string): DocumentHandle {
     throw new IpcProtocolError("invalid-args", `${method}: 'handle' deve ser inteiro`);
   }
   return value as DocumentHandle;
+}
+
+/** Valida/parseia um `SearchQuery` vindo do wire (sem `any`); tipo errado ⇒ `invalid-args`. */
+function requireSearchQuery(value: unknown, method: string): SearchQuery {
+  if (typeof value !== "object" || value === null) {
+    throw new IpcProtocolError("invalid-args", `${method}: 'query' deve ser um objeto`);
+  }
+  const record = value as Record<string, unknown>;
+  const pattern = record["pattern"];
+  if (typeof pattern !== "string") {
+    throw new IpcProtocolError("invalid-args", `${method}: 'query.pattern' deve ser string`);
+  }
+  const query: {
+    pattern: string;
+    regex?: boolean;
+    caseSensitive?: boolean;
+    wholeWord?: boolean;
+    maxMatches?: number;
+  } = { pattern };
+  for (const key of ["regex", "caseSensitive", "wholeWord"] as const) {
+    const field = record[key];
+    if (field === undefined) continue;
+    if (typeof field !== "boolean") {
+      throw new IpcProtocolError("invalid-args", `${method}: 'query.${key}' deve ser booleano`);
+    }
+    query[key] = field;
+  }
+  const maxMatches = record["maxMatches"];
+  if (maxMatches !== undefined) {
+    if (typeof maxMatches !== "number" || !Number.isFinite(maxMatches)) {
+      throw new IpcProtocolError("invalid-args", `${method}: 'query.maxMatches' deve ser número`);
+    }
+    query.maxMatches = maxMatches;
+  }
+  return query;
 }
 
 /** Raízes de recursos do app (diretório ausente é ignorado pelo scanner — DEC-PKG). */

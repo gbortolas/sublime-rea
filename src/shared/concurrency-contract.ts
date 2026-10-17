@@ -15,6 +15,7 @@
  */
 import type { DocumentHandle } from "./handles";
 import type { IndexResult, LineScanResult } from "./buffer-contract";
+import type { SearchQuery, SearchResult } from "./search-contract";
 
 /** Lanes de trabalho (DEC-CON-5): `io` = N fixo, `fileRead` ≤ 2 on-demand, `index` = cold-start. */
 export type PoolLane = "io" | "index" | "fileRead";
@@ -31,6 +32,7 @@ export interface TaskResultMap {
   writeFile: void;
   scanLines: LineScanResult;
   index: IndexResult;
+  search: SearchResult;
 }
 
 export type TaskKind = keyof TaskResultMap;
@@ -40,6 +42,7 @@ interface TaskSpecByKind {
   writeFile: { readonly kind: "writeFile"; readonly path: string; readonly data: ArrayBuffer };
   scanLines: { readonly kind: "scanLines"; readonly doc: DocumentHandle; readonly generation: number; readonly upto: number };
   index: { readonly kind: "index"; readonly doc: DocumentHandle; readonly generation: number };
+  search: { readonly kind: "search"; readonly doc: DocumentHandle; readonly generation: number; readonly query: SearchQuery };
 }
 
 /** Task imutável, serializável e cancelável (DEC-CON-4). */
@@ -99,5 +102,27 @@ export interface WorkerResponse {
   readonly id: number;
   readonly ok: boolean;
   readonly value?: unknown;
-  readonly error?: { readonly message: string; readonly stack: string | undefined };
+  readonly error?: {
+    readonly message: string;
+    readonly stack: string | undefined;
+    /** `name` da classe do erro no worker (ex.: `SearchInputError`) — preservado na travessia. */
+    readonly name?: string;
+    /** `code` estável do erro tipado (ex.: `search.emptyPattern`) — a classe não cruza o port. */
+    readonly code?: string;
+  };
+}
+
+/**
+ * Erro de uma task que **falhou no worker**: `message` da falha + `name`/`code` preservados
+ * quando o worker os enviou. Necessário porque o `structured-clone` não transporta classes de
+ * erro — o pool reidrata um erro tipado a partir do `code` do wire (DEC-TR-5).
+ */
+export class TaskError extends Error {
+  readonly code: string | undefined;
+
+  constructor(message: string, name?: string, code?: string) {
+    super(message);
+    this.name = name ?? "TaskError";
+    this.code = code;
+  }
 }

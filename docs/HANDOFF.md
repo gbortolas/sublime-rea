@@ -18,11 +18,13 @@ IPC) ✅ · **FASE 1 FECHADA** (P1.1 buffer ✅ · P1.2 concorrência ✅ · P1.
 P1.5 ledger consolidado ✅ · P1.6 empacotamento ✅) · **FASE 2 FECHADA** (P2.1: `docs/architecture/`,
 6 docs + README, **61 decisões `DEC-*`**) · **FASE 3 FECHADA** (P2.2: scaffold `src/` do **Scribe** em
 Electron/TS — 6 módulos de core + costura main↔core↔renderer + build, `docs/scaffold/`) — codinome
-decidido: **Scribe** (**P2.3** ✅) · **P2.4 EM ANDAMENTO** (fatia vertical end-to-end) — ✅ **Slices
+decidido: **Scribe** (**P2.3** ✅) · **P2.4 FECHADO** (fatia vertical end-to-end, 2026-10-17) — ✅ **Slices
 A/B/C** (`04096ae`: abrir arquivo CLI+`dialog` · undo/redo visível · cancelamento e2e) · ✅ **Slice D**
-(`2a169be`: realce de sintaxe e2e) · ✅ **P2.4b FECHADO** (2026-10-17: os 2 blockers + 1 risco do
-reviewer **corrigidos**, mais um bug **alto** extra pego em re-revisão; **348 testes / 40 arquivos**)
-· ⏳ **falta só** a frente de **busca/substituição** na lane `background`.
+(`2a169be`: realce de sintaxe e2e) · ✅ **P2.4b** (achados de revisão do realce corrigidos, mais um bug
+**alto** extra) · ✅ **P2.4c** (busca/substituição na lane `background` — **primeiro uso real** do
+`TaskPool`/`Scheduler`; **423 testes / 43 arquivos**) · ⏳ **próximo: P2.5 — salvar arquivo (`Ctrl/Cmd+S`
++ estado *dirty*)**, o item #1 do README ("abrir/editar/**salvar** — o mínimo inegociável"), que **ainda
+não existe** (o `TaskKind:"writeFile"` está no pool, mas ninguém o chama).
 
 **✅ Passo operacional resolvido (2026-10-16).** O `setup.py` foi rodado e o MCP `rea` foi relançado
 **já com `REA_GHIDRA_STARTUP_TIMEOUT_MS=900000`** (confirmado em `/proc/*/environ`) — **não** é mais
@@ -36,23 +38,16 @@ python3 setup/setup.py        # idempotente: reescreve setup/env.sh + environmen
 Sem o deadline maior, `open_binary`/`analyze` **via MCP** volta a estourar os 330 s (a análise leva
 ~355 s).
 
-**Próxima tarefa recomendada:** **implementar a busca/substituição na lane `background`** — é a **única
-frente restante** do **P2.4** (ver [`BACKLOG.md`](BACKLOG.md) §P2.4). Hoje **não** existe API de busca:
-precisa de um novo `TaskKind` (o `TaskResultMap` não tem `search`) + worker em
-`src/core/concurrency/worker-entry.ts` + contrato IPC + serviço de busca no `src/core/editor` consumindo
-`pool.run`/`scheduler.post("background", …)`. É o **primeiro uso real de uma lane não-`input`** — vale
-para provar a lane `background` do `Scheduler` (o resto da fatia vertical já está provado ponta a ponta:
-abrir arquivo real, undo/redo visível, cancelamento e **realce de sintaxe**, este último com os achados
-de revisão **corrigidos** em **P2.4b** ✅ — 348 testes verdes). O código está em `src/`; as convenções e
-as costuras congeladas estão em
+**Próxima tarefa recomendada:** **P2.5 — salvar arquivo** (`Ctrl/Cmd+S` + estado *dirty*) — fecha o item
+#1 do `README.md` (*"abrir / editar / **salvar** — o mínimo inegociável"*), que **hoje não existe**: o
+`TaskKind:"writeFile"` está no `TaskPool` (lane `io`) mas **ninguém o chama**; o contrato do buffer já
+expõe `dirty`. Plano completo (e as pegadinhas: `dirty` após undo, escrita atômica no worker, erro
+tipado de I/O) em [`BACKLOG.md`](BACKLOG.md) §P2.5. É o **segundo** uso real de uma lane do pool (a
+primeira foi `index`, na busca) — e a fatia casaria bem com o **residual do P2.4b** (teto de tokenização
+por documento **ou** tokenização em worker com prazo), que continua **aberto** (ver o último bullet do
+§P2.4b). O código está em `src/`; as convenções e as costuras congeladas estão em
 [`docs/scaffold/00-convencoes-e-costuras.md`](scaffold/00-convencoes-e-costuras.md) — **leia esse doc
 antes de mexer em `src/`**.
-⚠️ **Risco residual declarado (P2.4b, não corrigido de propósito):** o teto de tokenização é **por
-linha** (`MAX_TOKENIZE_LINE_LENGTH = 4096`), não por documento — `highlightDocument` tokeniza do estado
-inicial até a linha visível **absoluta**, então *deep scroll* + keystroke em documento grande re-tokeniza
-o prefixo inteiro a cada revisão e regex catastrófica dentro do prefixo ainda é vetor de *freeze*. A
-correção de verdade (cap de `end` **ou** tokenização em worker com prazo) **casa** com a frente de busca
-— se der, ataque as duas juntas.
 
 > ✅ **Pegadinha resolvida (2026-10-16, P3.9):** o `setup.py` agora **detecta** um JDK ≥ 21
 > compatível (`JAVA_HOME`, PATH, sdkman, `/usr/lib/jvm`) e escreve um **`export JAVA_HOME=…` ativo**
@@ -80,7 +75,7 @@ só conceitos e especificações abstratas.
 **Não** analisamos o `.deb`. O alvo é o **executável ELF** extraído do `.tar.xz`:
 
 ```
-bin/sublime_text_build_4215_x64.tar.xz ──(setup, etapa 8)──▶ target/sublime_text/sublime_text
+bin/sublime_text_build_4215_x64.tar.xz ──(setup, etapa 8: baixa+valida SHA-256)──▶ target/sublime_text/sublime_text
 ```
 
 A análise **começou de verdade** em 2026-10-16:
@@ -95,7 +90,7 @@ A análise **começou de verdade** em 2026-10-16:
 
 | Arquivo | O que é | Status |
 |---|---|---|
-| `bin/sublime_text_build_4215_x64.tar.xz` | tarball oficial do Sublime build 4215 | **fonte do alvo** (22 MB, versionado) |
+| `bin/sublime_text_build_4215_x64.tar.xz` | tarball oficial do Sublime build 4215 | **fonte do alvo** (22 MB, **fora do git**: baixado sob demanda pelo setup, SHA-256 pinado) |
 | `bin/sublime-text_build-4215_amd64.deb` | pacote Debian do mesmo build | **removido do git** (redundante) |
 | `target/sublime_text/sublime_text` | ELF 9,5 MiB, x86-64, **PIE**, **stripped** | **alvo da análise** |
 | `target/sublime_text/Lib/python314/` | API de plugins em Python puro | ✅ analisado (Track A) |
@@ -399,8 +394,28 @@ Gates finais: typecheck/lint/build exit 0 · **348 testes / 40 arquivos** (basel
 ⚠️ **Residual declarado e aberto:** o teto é **por linha**, não por documento — `highlightDocument`
 tokeniza do estado inicial até a linha visível **absoluta** (O(`end`)), então *deep scroll* + keystroke em
 documento grande re-tokeniza o prefixo inteiro a cada revisão e regex catastrófica **dentro** do prefixo
-segue vetor de *freeze*. Correção real = cap de `end` **ou** tokenização em worker com prazo (casa com a
-frente de busca — ver [`BACKLOG.md`](BACKLOG.md) §P2.4b, último bullet).
+segue vetor de *freeze*. Correção real = cap de `end` **ou** tokenização em worker com prazo — casa com a
+infra de `TaskPool` agora **provada** em P2.4c (ver [`BACKLOG.md`](BACKLOG.md) §P2.4b, último bullet).
+
+### Fase 3.3 (P2.4c) — busca/substituição na lane `background`
+
+**Primeira fatia que usa `TaskPool` + a lane `background` do `Scheduler` de verdade.** Contrato novo
+`src/shared/search-contract.ts` (`SearchQuery`/`SearchMatch`/`SearchResult`, caps de padrão/matches/texto,
+`SearchInputError` tipado, `normalizeSearchQuery`, `scanText` — varredura linear com `line/column` em
+UTF-16 e `truncated`); `TaskKind:"search"` no pool (lane `index`) com o texto chegando pelo idioma
+existente `registerText(handle, revision, text)`; `EditorCore.searchDocument` disparando por
+**`scheduler.post("background", …)`**; `EditorCore.replaceAll` (recusa `truncated`, substituição
+**literal**, **um** `EditScope` ⇒ um Ctrl+Z desfaz tudo, e **coalescência** de `document.changed`: 1
+evento por lote em vez de 1 por delta); IPC `search.find`/`search.replaceAll`; **find bar**
+(`Ctrl/Cmd+F`, `Enter`/`Shift+Enter` com wrap, `Esc` fecha antes do cancelamento de abertura, contador
+`atual/total`) com `FindBarModel` puro e testável. **Regex é opt-in** (default literal) e o scan roda no
+worker — regex patológico não congela a UI.
+Gates: typecheck/lint/build exit 0 · **423 testes / 43 arquivos** (baseline 348).
+Decisões, digests e follow-ups: §P2.4c no [`BACKLOG.md`](BACKLOG.md) — inclui o **teste de paridade** que
+trava a duplicação do scanner no `worker-entry.ts` (o `eval` do vitest não resolve `../../shared`; a
+duplicação morre em **P3.10**), **P3.11** (pintar os matches no canvas), **P3.12** (ciclo de vida das
+assinaturas) e a correção de doc: o guard de geração do pool é **por consistência** — quem garante
+"resultado fresco" é o chamador comparar `revision`.
 
 ---
 
@@ -436,8 +451,13 @@ Material de apoio: skill `reverse-engineer-anything` (+ `references/native-and-a
 - **Stack do scaffold (Fase 3):** `package.json` + `package-lock.json` versionados; `dist/` e
   `node_modules/` **não**; `npm install` reconstrói o ambiente Node. Scripts: `typecheck`, `test`,
   `lint`, `build`, `start` (+ `start:headless`).
-- ⚠️ `bin/sublime_text_build_4215_x64.tar.xz` (22 MB) **está versionado** (o `.deb` já foi removido).
-  Avaliar `git rm --cached` + download sob demanda com SHA pinado (ver P3.1 no BACKLOG).
+- ✅ `bin/sublime_text_build_4215_x64.tar.xz` (22 MB) **não é mais versionado** (P3.1, 2026-10-17): o
+  `setup.py` o **baixa sob demanda** de `download.sublimetext.com` e **valida o SHA-256** contra o pin em
+  `setup/versions.env` **antes** de extrair (download atômico `.part` → SHA → `os.replace`; hash
+  divergente = erro fatal, sem extrair e sem sobrescrever; com o arquivo já presente e SHA ok, **não**
+  toca a rede). `.gitignore` cobre o tarball (mas **não** `bin/` inteiro — `ghidra-preanalyze.sh` segue
+  versionado). Verificado: ausente ⇒ baixa/valida/extrai · pin adulterado ⇒ `code=4`, nada extraído ·
+  offline com arquivo presente ⇒ ok.
 
 ---
 

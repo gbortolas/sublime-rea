@@ -53,8 +53,8 @@ O fluxo conceitual tem **3 fases**. O diagrama (adaptado de
 [`TECHNICAL_SPECIFICATION.md`](docs/TECHNICAL_SPECIFICATION.md) §2.1):
 
 ```
-  bin/sublime_text_build_4215_x64.tar.xz        ← tarball oficial (versionado no repo)
-                │  setup, etapa 8 (extração)
+  bin/sublime_text_build_4215_x64.tar.xz        ← tarball oficial (baixado sob demanda; fora do git)
+                │  setup, etapa 8 (verifica SHA-256 + extração)
                 ▼
    target/sublime_text/sublime_text             ← o ALVO: ELF64, PIE, STRIPPED, ~9,5 MiB
                 │
@@ -104,8 +104,8 @@ O ambiente é **reproduzível por script** — você não precisa instalar nada 
 | **REA** | `rea-agents@6.5.0` (global via npm, ou `npx` efêmero) | **setup** |
 | **Ghidra** | **12.1.4** headless + native decompiler (~543 MiB de download) | **setup** |
 | **pwntools-elf** | provider offline em venv (pwntools 4.15.0 / pyelftools 0.33 / unicorn 2.1.2) | **setup** |
-| **Alvo** | `bin/sublime_text_build_4215_x64.tar.xz` — **já está versionado no repo** | **setup** (extrai) |
-| Rede / disco | acesso a `github.com`, registry npm e `pypi.org`; **~1,5 GiB** livres | você |
+| **Alvo** | `bin/sublime_text_build_4215_x64.tar.xz` — **baixado sob demanda** (fora do git, SHA-256 pinado em `setup/versions.env`) | **setup** (baixa + valida + extrai) |
+| Rede / disco | acesso a `github.com`, `download.sublimetext.com`, registry npm e `pypi.org`; **~1,5 GiB** livres | você |
 
 > ✅ **O REA precisa do `JAVA_HOME` (JDK ≥ 21)** — desde P3.9 o `setup.py` detecta um JDK
 > compatível (env, PATH, sdkman, `/usr/lib/jvm`) e escreve o `export JAVA_HOME=…` ativo no
@@ -123,7 +123,7 @@ Sem `sudo` em nenhum momento (a não ser que você peça `--install-deps` explic
 
 ### Passo 1 — Clonar o repositório e ver o plano 📥
 
-**Objetivo:** ter o repo no disco (o `bin/` já traz o tarball do alvo) e entender o que o setup faria.
+**Objetivo:** ter o repo no disco (o tarball do alvo **não** vem no repo: o setup o **baixa** na primeira execução e valida o SHA-256) e entender o que o setup faria.
 
 ```bash
 git clone <repo> sublime-rea && cd sublime-rea
@@ -357,16 +357,18 @@ npm run start                # ou start:headless, sem display
 ```
 
 **Estado:** o scaffold **compila, testa e sobe** (`electron .` boota e loga
-`Scribe: MainThreadBusy {...}`). O **Core do MVP** ainda **não** está satisfeito — falta a fatia
-vertical (abrir arquivo real → editar → salvar); é o item **P2.4** no
-[`docs/BACKLOG.md`](docs/BACKLOG.md).
+`Scribe: MainThreadBusy {...}`) e a **fatia vertical** (P2.4) provou **as 5 frentes** ponta a ponta:
+**abrir arquivo real** (CLI + `dialog`), **undo/redo visível**, **cancelamento**, **realce de sintaxe**
+(P2.4b ✅) e **busca/substituição na lane `background`** (P2.4c ✅ — `Ctrl/Cmd+F`, com `TaskPool`/
+`Scheduler` usados de verdade). **Próximo:** **salvar arquivo** (`Ctrl/Cmd+S` + estado *dirty*, §P2.5) —
+ver [`docs/BACKLOG.md`](docs/BACKLOG.md).
 
 ---
 
 ## 📍 Onde estamos agora
 
-**Estado em uma linha:** ambiente ✅ · binário-alvo **100% analisável** ✅ ·
-Track A (API Python + IPC) ✅ · **Fase 1 FECHADA** (P1.1–P1.6 ✅) · **Fase 2 ✅** (P2.1: 6 docs de arquitetura, 61 decisões) · **Fase 3 ✅** (P2.2: scaffold `src/` do **Scribe** — compila, testa e sobe) · **próximo: P2.4**.
+**Estado em uma linha:** ambiente ✅ (`healthy: true`) · binário-alvo **100% analisável** ✅ ·
+Track A (API Python + IPC) ✅ · **Fase 1 FECHADA** (P1.1–P1.6 ✅) · **Fase 2 ✅** (P2.1: 6 docs de arquitetura, 61 decisões) · **Fase 3 ✅** (P2.2: scaffold `src/` do **Scribe** — compila, testa e sobe) · **P2.4 ✅ fechada** (fatia vertical end-to-end: abrir · editar · undo/redo · cancelamento · realce · **busca/replace** em lane de background) · **próximo: P2.5** (salvar arquivo).
 
 | Frente | Status |
 |---|---|
@@ -382,7 +384,8 @@ Track A (API Python + IPC) ✅ · **Fase 1 FECHADA** (P1.1–P1.6 ✅) · **Fase
 | **Fase 1** — buffer, concorrência, IPC/opcodes, render, empacotamento, ledger | ✅ **fechada** (P1.1 ✅ · P1.2 ✅ · P1.3 ✅ · P1.4 ✅ · P1.5 ✅ · P1.6 ✅) |
 | **Fase 2** — spec abstrata (`docs/architecture/`) | ✅ **fechada** (P2.1 ✅: `01`–`06` + README; 61 decisões `DEC-*`) |
 | **P2.3** — nome do projeto **Scribe** | ✅ decidido (aplicado nas specs e em `docs/architecture/`) |
-| **Fase 3** — o editor em Electron/TS (`src/`) | ✅ **scaffold entregue** (P2.2 ✅: 6 módulos de core + costura main↔core↔renderer + build; `npm test` 250 testes · `electron .` sobe) — **próximo**: P2.4 (fatia vertical: abrir → editar → salvar) |
+| **Fase 3** — o editor em Electron/TS (`src/`) | ✅ **scaffold entregue** (P2.2 ✅: 6 módulos de core + costura main↔core↔renderer + build; `electron .` sobe) · ✅ **P2.4 fechada**: fatia vertical end-to-end (abrir arquivo · undo/redo · cancelamento · realce de sintaxe · busca/substituição em lane de background) — **próximo**: P2.5 **salvar arquivo** (`Ctrl/Cmd+S` + `dirty`) |
+| **Housekeeping** | ✅ P3.1 (tarball de 22 MB **fora do git**: download sob demanda + SHA-256 pinado) · P3.3 (script legacy travado) · P3.4 (boilerplate removido) · P3.9 (`JAVA_HOME` no `env.sh`) — pendentes: P3.10 (bundlar o worker) · P3.11 (pintar matches) · P3.12 |
 
 > 🔄 **Fontes vivas:** [`docs/HANDOFF.md`](docs/HANDOFF.md) (como retomar, pegadinhas operacionais) e
 > [`docs/BACKLOG.md`](docs/BACKLOG.md) (fases P0/P1/P2/P3 e status de cada item). Este README é um

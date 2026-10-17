@@ -11,6 +11,12 @@ dist/
 *.so
 *.class
 
+# --- tarball do alvo (Sublime Text build 4215): baixado SOB DEMANDA pelo setup.py
+#     (URL + SHA-256 pinados em setup/versions.env). NÃO versionar (>20 MB). O
+#     `bin/` NÃO é ignorado por inteiro: bin/ghidra-preanalyze.sh segue versionado.
+bin/sublime_text_build_4215_x64.tar.xz
+bin/sublime-text_build-4215_amd64.deb
+
 # --- ferramentas baixadas (ex.: se REA_TOOLS_DIR apontar para dentro do repo) ---
 tools/
 

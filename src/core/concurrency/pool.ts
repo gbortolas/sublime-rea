@@ -23,7 +23,7 @@ import { availableParallelism as osAvailableParallelism } from "node:os";
 import path from "node:path";
 import { Worker } from "node:worker_threads";
 import type * as TypeScript from "typescript";
-import { CancellationError, Deferred, toError } from "../../shared";
+import { CancellationError, Deferred, TaskError, toError } from "../../shared";
 import type {
   DocumentHandle,
   PoolLane,
@@ -34,6 +34,7 @@ import type {
   TaskPool,
   TaskResultMap,
   WorkerRequest,
+  WorkerResponse,
 } from "../../shared";
 import { createCounters, POOL_COUNTERS } from "./counters";
 import type { SharedCounters } from "./counters";
@@ -134,6 +135,9 @@ function defaultLane(kind: TaskKind): PoolLane {
     case "scanLines":
       return "io";
     case "index":
+      return "index";
+    case "search":
+      // CPU em memória (varredura linear sobre o texto já registrado): lane `index` (DEC-CON-6).
       return "index";
   }
 }
@@ -485,13 +489,26 @@ export class TaskPoolImpl implements TaskPool {
       return;
     }
     if (message.ok) {
-      const stale = this.staleReason(message.value);
+      const stale = this.staleReason(queued, message.value);
       if (stale) queued.deferred.reject(stale);
       else queued.deferred.resolve(message.value);
     } else {
-      queued.deferred.reject(new Error(message.error?.message ?? `task ${queued.kind} falhou`));
+      queued.deferred.reject(this.workerFailure(queued, message.error));
     }
     this.pump();
+  }
+
+  /**
+   * Reconstrói o erro de uma task falha. O `structured-clone` não transporta classes, então o
+   * worker envia `name`/`code`; aqui o erro vira um `TaskError` com os **mesmos** `name`/`code`
+   * (o `code` estável sobrevive ao IPC — DEC-TR-5).
+   */
+  private workerFailure(queued: QueuedTask, error: WorkerResponse["error"] | undefined): Error {
+    const message = error?.message ?? `task ${queued.kind} falhou`;
+    if (error === undefined || (error.name === undefined && error.code === undefined)) {
+      return new Error(message);
+    }
+    return new TaskError(message, error.name, error.code);
   }
 
   private onWorkerError(slot: WorkerSlot, error: Error): void {
@@ -524,14 +541,39 @@ export class TaskPoolImpl implements TaskPool {
     this.pump();
   }
 
-  private staleReason(value: unknown): StaleGenerationError | undefined {
+  /**
+   * Uma task concluída está obsoleta? Duas fontes, nesta ordem:
+   * 1. o **valor** devolvido — quando ele carrega `doc`/`generation` (scanLines/index);
+   * 2. o **payload da task** — quando o resultado não tem geração (ex.: `search`, cujo
+   *    `SearchResult` é só ocorrências). O pool sabe a geração pedida e o `latestGeneration` do
+   *    doc, então a comparação vale igualmente. Em qualquer caso, geração antiga ⇒ descarte.
+   */
+  private staleReason(queued: QueuedTask, value: unknown): StaleGenerationError | undefined {
+    const fromValue = this.staleFromValue(value);
+    if (fromValue !== undefined) return fromValue;
+    return this.staleFromTask(queued.task);
+  }
+
+  private staleFromValue(value: unknown): StaleGenerationError | undefined {
     if (typeof value !== "object" || value === null) return undefined;
     const record = value as { doc?: unknown; generation?: unknown };
     if (typeof record.doc !== "number" || typeof record.generation !== "number") return undefined;
-    const doc = record.doc as DocumentHandle;
+    return this.staleOrUndefined(record.doc as DocumentHandle, record.generation);
+  }
+
+  private staleFromTask(task: Task): StaleGenerationError | undefined {
+    const record = task as { doc?: unknown; generation?: unknown };
+    if (typeof record.doc !== "number" || typeof record.generation !== "number") return undefined;
+    return this.staleOrUndefined(record.doc as DocumentHandle, record.generation);
+  }
+
+  private staleOrUndefined(
+    doc: DocumentHandle,
+    generation: number,
+  ): StaleGenerationError | undefined {
     const current = this.latestGeneration.get(doc);
-    if (current === undefined || record.generation >= current) return undefined;
-    return new StaleGenerationError(doc, record.generation, current);
+    if (current === undefined || generation >= current) return undefined;
+    return new StaleGenerationError(doc, generation, current);
   }
 
   private spawn(lane: PoolLane): WorkerSlot {

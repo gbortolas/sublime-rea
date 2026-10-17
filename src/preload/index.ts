@@ -19,6 +19,9 @@ import type {
   DocumentHighlight,
   DocumentUndoState,
   MainThreadBusy,
+  ReplaceAllResult,
+  SearchDocumentResult,
+  SearchQuery,
 } from "../shared";
 
 export interface HostReadyInfo {
@@ -49,6 +52,14 @@ export interface ScribePreloadApi {
   undoState(handle: DocumentHandle): Promise<DocumentUndoState>;
   /** Destaque de sintaxe de um range de linhas (o main resolve a gramática e tokeniza). */
   highlight(handle: DocumentHandle, first: number, count: number): Promise<DocumentHighlight>;
+  /** Busca numa lane de fundo (o main usa o `TaskPool` + `Scheduler`). */
+  find(handle: DocumentHandle, query: SearchQuery): Promise<SearchDocumentResult>;
+  /** Substitui todas as ocorrências (um só passo de undo). */
+  replaceAll(
+    handle: DocumentHandle,
+    query: SearchQuery,
+    replacement: string,
+  ): Promise<ReplaceAllResult>;
   /** Cancela a operação em voo identificada por `signalId` (envelope `IpcCancel`). */
   cancel(signalId: number): void;
   /** Gera um `signalId` novo para uma operação cancelável (evita colisão com outros chamadores). */
@@ -147,6 +158,14 @@ const api: ScribePreloadApi = {
     call<DocumentUndoState>("editor.undoState", [handle]),
   highlight: (handle: DocumentHandle, first: number, count: number): Promise<DocumentHighlight> =>
     call<DocumentHighlight>("syntax.highlight", [handle, first, count]),
+  find: (handle: DocumentHandle, query: SearchQuery): Promise<SearchDocumentResult> =>
+    call<SearchDocumentResult>("search.find", [handle, query]),
+  replaceAll: (
+    handle: DocumentHandle,
+    query: SearchQuery,
+    replacement: string,
+  ): Promise<ReplaceAllResult> =>
+    call<ReplaceAllResult>("search.replaceAll", [handle, query, replacement]),
   cancel: (signalId: number): void => {
     const envelope: CancelEnvelope = { v: IPC_VERSION, kind: "cancel", signalId };
     // Push: sem resposta correlacionada; engolir a rejeição da ponte é intencional.

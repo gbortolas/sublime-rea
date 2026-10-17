@@ -17,3 +17,4 @@ export * from "./properties-contract";
 export * from "./extension-contract";
 export * from "./ipc-contract";
 export * from "./syntax-contract";
+export * from "./search-contract";

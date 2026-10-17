@@ -20,6 +20,8 @@ import type {
   DocumentHandle,
   IndexResult,
   LineScanResult,
+  SearchQuery,
+  SearchResult,
   TaskResultMap,
   TaskKind,
   WorkerRequest,
@@ -100,7 +102,14 @@ export function createWorkerRuntime(
       return { id: request.id, ok: true, value };
     } catch (err) {
       const error = toErrorLocal(err);
-      return { id: request.id, ok: false, error: { message: error.message, stack: error.stack } };
+      // O structured-clone não transporta classes: mandamos `name`/`code` para o pool reidratar
+      // um erro tipado (ex.: `SearchInputError`) — ver `TaskError` em `concurrency-contract.ts`.
+      const rawCode = (err as { code?: unknown }).code;
+      const wire: WorkerResponse["error"] =
+        typeof rawCode === "string"
+          ? { message: error.message, stack: error.stack, name: error.name, code: rawCode }
+          : { message: error.message, stack: error.stack, name: error.name };
+      return { id: request.id, ok: false, error: wire };
     }
   };
 
@@ -158,6 +167,8 @@ async function executeTask(
       return scanLines(payload.doc, payload.generation, payload.upto, texts);
     case "index":
       return indexDocument(payload.doc, payload.generation, texts);
+    case "search":
+      return searchDocument(payload.doc, payload.generation, payload.query, texts);
   }
 }
 
@@ -209,6 +220,130 @@ function indexDocument(
   const identifiers = /[A-Za-z_$][A-Za-z0-9_$]*/g;
   while (identifiers.exec(text) !== null) symbolCount++;
   return { doc, generation, symbolCount, durationMs: performance.now() - started };
+}
+
+// ---- busca/substituição (self-contained) ---------------------------------------------------
+//
+// **Duplicação deliberada e temporária.** O worker roda por `eval`/arquivo e o `require` do
+// caminho `eval` tem base no cwd: importar **valores** de `../../shared` não resolve ali (só
+// `import type` cruza a fronteira), então a varredura é replicada localmente. Isto é o **caminho de
+// produção**, não uma cópia de teste. A paridade com `src/shared/search-contract.ts` (a
+// implementação canônica, testada em `search-contract.test.ts`) é travada pela **tabela
+// discriminante** em `src/core/concurrency/pool.test.ts:422` (describe "paridade worker <-> shared
+// (tabela discriminante, worker real)"), que roda contra este worker de verdade.
+//
+// **Correção definitiva (follow-up, registrado no BACKLOG):** bundlear este worker no build (como
+// `renderer`/`preload`) e importar o contrato do shared — aí a duplicata some. Até lá, qualquer
+// mudança de semântica em `normalizeSearchQuery`/`scanText` **tem de** ser espelhada aqui.
+//
+// Espelha `normalizeSearchQuery` + `scanText` — mesma semântica de unidades: UTF-16 code units,
+// `line`/`column` 0-based.
+
+const SEARCH_DEFAULT_MAX_MATCHES = 2000;
+const SEARCH_MAX_MATCHES = 20000;
+const SEARCH_MAX_PATTERN_LENGTH = 512;
+const SEARCH_MAX_TEXT_LENGTH = 64 * 1024 * 1024;
+
+/** Erro de entrada da busca com o **mesmo** `name`/`code` do `SearchInputError` compartilhado. */
+class LocalSearchInputError extends Error {
+  readonly code: string;
+
+  constructor(code: string, detail: string) {
+    super(`SearchInputError[${code}]: ${detail}`);
+    this.name = "SearchInputError";
+    this.code = code;
+  }
+}
+
+interface LocalNormalized {
+  readonly regex: RegExp;
+  readonly maxMatches: number;
+}
+
+function escapeRegExpLocal(literal: string): string {
+  return literal.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+function normalizeSearchQueryLocal(query: SearchQuery): LocalNormalized {
+  const pattern = query.pattern;
+  if (pattern.length === 0) {
+    throw new LocalSearchInputError("search.emptyPattern", "o padrão de busca não pode ser vazio");
+  }
+  if (pattern.length > SEARCH_MAX_PATTERN_LENGTH) {
+    throw new LocalSearchInputError(
+      "search.pattern",
+      `o padrão excede o teto de ${SEARCH_MAX_PATTERN_LENGTH} code units`,
+    );
+  }
+  const body = query.regex === true ? pattern : escapeRegExpLocal(pattern);
+  const source = query.wholeWord === true ? `\\b(?:${body})\\b` : body;
+  const flags = query.caseSensitive === true ? "g" : "gi";
+  let regex: RegExp;
+  try {
+    regex = new RegExp(source, flags);
+  } catch (error) {
+    const detail = error instanceof Error ? error.message : String(error);
+    throw new LocalSearchInputError("search.pattern", `expressão regular inválida: ${detail}`);
+  }
+  const requested = query.maxMatches ?? SEARCH_DEFAULT_MAX_MATCHES;
+  // Espelha `normalizeSearchQuery` do shared: não-finito (`NaN`/`Infinity`) cai no default — com
+  // `Math.floor(NaN)` o cap viraria `NaN` e o truncamento nunca dispararia. `0` vira 1.
+  const finite = Number.isFinite(requested) ? requested : SEARCH_DEFAULT_MAX_MATCHES;
+  const maxMatches = Math.max(1, Math.min(SEARCH_MAX_MATCHES, Math.floor(finite)));
+  return { regex, maxMatches };
+}
+
+function scanTextLocal(text: string, normalized: LocalNormalized): SearchResult {
+  if (text.length > SEARCH_MAX_TEXT_LENGTH) {
+    throw new LocalSearchInputError(
+      "search.tooLarge",
+      `o texto excede o teto de ${SEARCH_MAX_TEXT_LENGTH} code units`,
+    );
+  }
+  const { regex, maxMatches } = normalized;
+  regex.lastIndex = 0;
+
+  const collected: { index: number; length: number; line: number; column: number }[] = [];
+  let truncated = false;
+  let scannedLength = text.length;
+  let newlineScan = 0;
+  let line = 0;
+  let lineStart = 0;
+
+  for (;;) {
+    const match = regex.exec(text);
+    if (match === null) break;
+    const length = match[0].length;
+    if (length === 0) {
+      if (regex.lastIndex <= match.index) regex.lastIndex = match.index + 1;
+      continue;
+    }
+    if (collected.length >= maxMatches) {
+      truncated = true;
+      scannedLength = match.index;
+      break;
+    }
+    while (newlineScan < match.index) {
+      if (text.charCodeAt(newlineScan) === 10) {
+        line += 1;
+        lineStart = newlineScan + 1;
+      }
+      newlineScan += 1;
+    }
+    collected.push({ index: match.index, length, line, column: match.index - lineStart });
+  }
+
+  return { matches: collected, truncated, scannedLength };
+}
+
+function searchDocument(
+  doc: DocumentHandle,
+  generation: number,
+  query: SearchQuery,
+  texts: Map<DocumentHandle, RegisteredText>,
+): SearchResult {
+  const text = lookupText(doc, generation, texts);
+  return scanTextLocal(text, normalizeSearchQueryLocal(query));
 }
 
 interface WorkerDataShape {

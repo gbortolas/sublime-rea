@@ -20,6 +20,19 @@
     <div id="app" role="application" aria-label="Scribe">
       <canvas id="editor-surface" tabindex="0"></canvas>
       <div id="ui-overlay" aria-hidden="false">
+        <!--
+          Find bar (busca/substituição): casca DOM que só REFLETE o `FindBarModel` (a lógica —
+          debounce, navegação, descarte de resposta obsoleta — vive em ./find-bar.ts e é testada).
+          Escondida por padrão (`hidden`); o renderer alterna conforme o estado do modelo.
+        -->
+        <div id="find-bar" role="search" aria-label="Buscar e substituir" hidden>
+          <input id="find-input" type="text" placeholder="Buscar" aria-label="Buscar" autocomplete="off" spellcheck="false" />
+          <span id="find-count" aria-live="polite">0/0</span>
+          <input id="find-replace-input" type="text" placeholder="Substituir" aria-label="Substituir" autocomplete="off" spellcheck="false" />
+          <button id="find-replace-all" type="button">Substituir tudo</button>
+          <span id="find-status" aria-live="polite"></span>
+          <button id="find-close" type="button" aria-label="Fechar busca">✕</button>
+        </div>
         <div id="status-bar" role="status">
           <span id="status-doc">sem documento</span>
           <span id="status-backend">backend: ?</span>

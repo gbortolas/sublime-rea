@@ -37,7 +37,11 @@ import type {
   PropertySystem,
   ResourceEntry,
   ResourceLayer,
+  ReplaceAllResult,
   Scheduler,
+  SearchDocumentResult,
+  SearchQuery,
+  SearchResult,
   SyntaxGrammar,
   TaskPool,
 } from "../../shared";
@@ -47,6 +51,8 @@ import {
   Emitter,
   PROPERTY_IO_WORKERS,
   RENDER_BACKEND_PROPERTY,
+  SEARCH_MAX_TEXT_LENGTH,
+  SearchInputError,
   parseResourceUri,
 } from "../../shared";
 import { availableParallelism as osAvailableParallelism } from "node:os";
@@ -69,6 +75,9 @@ export const PROPERTY_MAX_BACKGROUND_THREADS = "concurrency.maxBackgroundThreads
 
 /** `CommandId` canônico da inserção de texto (contrato de keymap/palette). */
 export const INSERT_COMMAND_ID = "buffer.insert";
+
+/** `CommandId` da substituição de uma ocorrência (usado pelo replace-all agrupado). */
+export const REPLACE_COMMAND_ID = "search.replace";
 
 /** Erro alto: operação sobre handle que não resolve (DEC-TR-1: guard obrigatório). */
 export class InvalidDocumentHandleError extends Error {
@@ -150,6 +159,27 @@ export interface EditorCore {
   grammarForDocument(handle: DocumentHandle): SyntaxGrammar | undefined;
   /** Destaque por linha do range pedido (o renderer consome isto pelo IPC `syntax.highlight`). */
   highlightDocument(handle: DocumentHandle, first: number, count: number): DocumentHighlight;
+  /**
+   * Busca no documento numa lane de **fundo**: registra o texto no `TaskPool` e executa
+   * `TaskPool.run({kind:"search"})` dentro da lane `background` do `Scheduler` (a UI não bloqueia).
+   * O custo `O(n)` de materializar o texto é pago **uma vez** por busca.
+   */
+  searchDocument(
+    handle: DocumentHandle,
+    query: SearchQuery,
+    signal?: AbortSignal,
+  ): Promise<SearchDocumentResult>;
+  /**
+   * Substitui **todas** as ocorrências (literal, sem `$1`). Faz uma busca fresca; **recusa**
+   * (`search.tooManyMatches`) quando o resultado foi truncado — substituição parcial silenciosa é
+   * proibida. Aplica tudo num **único** `EditScope` ⇒ um só `Ctrl+Z` desfaz o replace-all inteiro.
+   */
+  replaceAll(
+    handle: DocumentHandle,
+    query: SearchQuery,
+    replacement: string,
+    signal?: AbortSignal,
+  ): Promise<ReplaceAllResult>;
   /** Desfaz a última transação do documento (delega ao `CommandBus`/`UndoStack`). */
   undoDocument(handle: DocumentHandle): Promise<DocumentUndoState>;
   /** Refaz a última transação desfeita do documento (par simétrico de `undoDocument`). */
@@ -243,6 +273,37 @@ function parseInsertArgs(args: unknown): InsertArgs {
   return { handle: handle as DocumentHandle, at, text };
 }
 
+interface ReplaceArgs {
+  readonly handle: DocumentHandle;
+  readonly at: number;
+  readonly remove: string;
+  readonly insert: string;
+}
+
+function parseReplaceArgs(args: unknown): ReplaceArgs {
+  if (typeof args !== "object" || args === null) {
+    throw new EditorArgumentError("invalid-args", "search.replace espera um objeto de argumentos");
+  }
+  const record = args as Record<string, unknown>;
+  const handle = record["handle"];
+  const at = record["at"];
+  const remove = record["remove"];
+  const insert = record["insert"];
+  if (typeof handle !== "number" || !Number.isInteger(handle)) {
+    throw new EditorArgumentError("invalid-args", "search.replace: 'handle' deve ser inteiro");
+  }
+  if (typeof at !== "number" || !Number.isInteger(at) || at < 0) {
+    throw new EditorArgumentError("invalid-args", `search.replace: 'at' inválido: ${String(at)}`);
+  }
+  if (typeof remove !== "string" || typeof insert !== "string") {
+    throw new EditorArgumentError(
+      "invalid-args",
+      "search.replace: 'remove'/'insert' devem ser string",
+    );
+  }
+  return { handle: handle as DocumentHandle, at, remove, insert };
+}
+
 /**
  * Monta o núcleo do editor. **Síncrono** (a I/O real começa no primeiro `openDocument`); o
  * `main` injeta um `FileSystem` (ex.: `createNodeFileSystem()`).
@@ -296,6 +357,8 @@ export function createEditorCore(options: EditorCoreOptions = {}): EditorCore {
   const emitter = new Emitter<DocumentChangedEvent>();
   const opened = new Set<DocumentHandle>();
   const subscriptions = new Map<DocumentHandle, Disposable>();
+  /** Lote em andamento cujas notificações estão sendo agrupadas (ver `coalesceDocumentChanges`). */
+  let coalescing: { readonly handle: DocumentHandle; changed: boolean } | undefined;
 
   function resolveTarget(): UndoTarget | undefined {
     const handle = state.pendingHandle ?? state.activeHandle;
@@ -327,6 +390,13 @@ export function createEditorCore(options: EditorCoreOptions = {}): EditorCore {
     const edits: readonly Edit[] = [{ at: parsed.at, remove: "", insert: parsed.text }];
     return edits;
   });
+  // Substituição de uma ocorrência: o handler devolve o delta (o bus aplica — escritor único) e
+  // registra a transação, agrupável pelo `EditScope` do replace-all.
+  commands.register(REPLACE_COMMAND_ID, "Replace", (args) => {
+    const parsed = parseReplaceArgs(args);
+    const edits: readonly Edit[] = [{ at: parsed.at, remove: parsed.remove, insert: parsed.insert }];
+    return edits;
+  });
 
   let disposed = false;
   let chain: Promise<unknown> = Promise.resolve();
@@ -346,6 +416,13 @@ export function createEditorCore(options: EditorCoreOptions = {}): EditorCore {
     const buffer = registry.resolve(handle);
     if (buffer === undefined) return;
     const subscription = buffer.onDidChange((event) => {
+      if (coalescing !== undefined && coalescing.handle === handle) {
+        // Lote em andamento: **não** emite por delta — só o evento final sai (revisão do buffer)
+        // quando o escopo fechar. Sem isto, o `replaceAll` publica 1 evento por `buffer.apply` e o
+        // renderer refaz o documento **inteiro** a cada um (O(N·n) de IPC).
+        coalescing.changed = true;
+        return;
+      }
       emitter.fire({ handle, revision: event.revision });
     });
     subscriptions.set(handle, subscription);
@@ -421,6 +498,83 @@ export function createEditorCore(options: EditorCoreOptions = {}): EditorCore {
       () => undefined,
     );
     return run;
+  }
+
+  /**
+   * Agrupa as notificações `document.changed` de `operation` num **único** evento ao final.
+   *
+   * O `replaceAll` aplica N deltas (um `buffer.apply` cada) e, sem isto, cada delta publicaria um
+   * `document.changed` — e o renderer responde refazendo o documento **inteiro** a cada um: O(N·n)
+   * de IPC (medido: 1000 substituições num doc de 10.9 KB ⇒ ~10.9 MB refetchados; no cap default,
+   * 2000 ⇒ GB). Aqui as notificações são suprimidas durante o lote e **uma só** sai depois que o
+   * `EditScope` commitar. A edição comum (insert/undo/redo) **não** passa por aqui e continua
+   * notificando a cada mudança.
+   *
+   * A revisão do evento final é a **atual do buffer** (não a do último delta registrado): se a
+   * operação falhar no meio do escopo, o estado notificado continua coerente com o buffer — nunca
+   * um evento perdido com estado defasado.
+   */
+  async function coalesceDocumentChanges<T>(
+    handle: DocumentHandle,
+    operation: () => Promise<T>,
+  ): Promise<T> {
+    // Escopo aninhado (não acontece hoje: o `replaceAll` é serializado): o externo já agrupa.
+    if (coalescing !== undefined) return operation();
+    const buffer = resolveBuffer(handle);
+    coalescing = { handle, changed: false };
+    try {
+      return await operation();
+    } finally {
+      const pending = coalescing;
+      coalescing = undefined;
+      if (pending !== undefined && pending.changed) {
+        // Um listener que lança não pode mascarar o erro de `operation()` (o `Emitter.fire` relança
+        // dentro do `finally`) nem rejeitar o `replaceAll` com o texto **já** substituído: o lote está
+        // commitado, então a falha de notificação é reportada e engolida aqui.
+        try {
+          emitter.fire({ handle, revision: buffer.revision });
+        } catch (error) {
+          console.warn("[editor-core] listener de document.changed falhou:", error);
+        }
+      }
+    }
+  }
+
+  /**
+   * Busca interna: valida o handle (DEC-TR-1), materializa o texto **uma vez** (`O(n)`), registra-o
+   * no pool (`generation = revision`) e executa a task `search` **dentro da lane `background`** do
+   * `Scheduler` — este é o primeiro uso real da lane de fundo. O texto registrado também é devolvido
+   * (o `replaceAll` precisa dele para montar os deltas sem reler).
+   */
+  async function runSearch(
+    handle: DocumentHandle,
+    query: SearchQuery,
+    signal: AbortSignal | undefined,
+  ): Promise<{ revision: number; text: string; result: SearchResult }> {
+    const buffer = resolveBuffer(handle);
+    const revision = buffer.revision;
+    const text = buffer.text();
+    // Checagem **aqui** (não só no worker): o teto é do contrato de busca, e descobrir que o texto
+    // é grande demais só no worker custaria o clone de ≥64 MiB no `postMessage` + o reenvio a todos
+    // os workers. Mesmo erro tipado do `scanText` (DEC-TR-5); o check do worker continua como
+    // defesa em profundidade.
+    if (text.length > SEARCH_MAX_TEXT_LENGTH) {
+      throw new SearchInputError(
+        "search.tooLarge",
+        `o texto excede o teto de ${SEARCH_MAX_TEXT_LENGTH} code units`,
+      );
+    }
+    pool.registerText(handle, revision, text);
+    const result = await scheduler.post(
+      "background",
+      () =>
+        pool.run(
+          { kind: "search", doc: handle, generation: revision, query },
+          signal !== undefined ? { lane: "index", signal } : { lane: "index" },
+        ).done,
+      { handle },
+    );
+    return { revision, text, result };
   }
 
   async function runInsert(
@@ -558,6 +712,78 @@ export function createEditorCore(options: EditorCoreOptions = {}): EditorCore {
         lines.push({ line, spans: entry.spans[line] ?? [] });
       }
       return { revision, first: start, lines };
+    },
+
+    async searchDocument(
+      handle: DocumentHandle,
+      query: SearchQuery,
+      signal?: AbortSignal,
+    ): Promise<SearchDocumentResult> {
+      assertNotDisposed();
+      const { revision, result } = await runSearch(handle, query, signal);
+      return { revision, result };
+    },
+
+    replaceAll(
+      handle: DocumentHandle,
+      query: SearchQuery,
+      replacement: string,
+      signal?: AbortSignal,
+    ): Promise<ReplaceAllResult> {
+      assertNotDisposed();
+      // Serializa com os outros escritores: a busca e as edições acontecem "de uma vez".
+      // O lote inteiro roda sob `coalesceDocumentChanges`: **um** `document.changed` no fim.
+      return enqueue(() =>
+        coalesceDocumentChanges(handle, async () => {
+          const { text, result } = await runSearch(handle, query, signal);
+          if (result.truncated) {
+            // Substituição parcial e silenciosa é proibida: recusa com erro tipado (DEC-TR-5).
+            throw new SearchInputError(
+              "search.tooManyMatches",
+              `replace-all recusado: a busca foi truncada em ${result.matches.length} de ≥${result.matches.length + 1} ocorrências`,
+            );
+          }
+          const buffer = resolveBuffer(handle);
+          if (result.matches.length === 0) {
+            // No-op: nenhuma edição ⇒ nenhuma entrada de undo (transação vazia é descartada).
+            return { replaced: 0, revision: buffer.revision };
+          }
+          // Deltas em ordem **crescente**, cada `at` já ajustado pelo deslocamento acumulado: cada
+          // `at` é válido no estado em que a edição é aplicada (é a sequência em que a pilha
+          // reaplica). A ordem **reversa** também restaura o texto correto — cada `at` é válido no
+          // texto *original* e o inverso do `UndoStack` é a sequência espelhada; a alegação de que
+          // ela quebraria quando `replacement.length ≠ match.length` não se sustenta. Crescente é a
+          // ordem que está aqui, testada e mantida.
+          const edits: Edit[] = [];
+          let delta = 0;
+          for (const match of result.matches) {
+            const at = match.index + delta;
+            const remove = text.slice(match.index, match.index + match.length);
+            edits.push({ at, remove, insert: replacement });
+            delta += replacement.length - match.length;
+          }
+
+          // **Um** `EditScope` ⇒ todos os `run` compartilham o grupo `scope:<id>` e o `UndoStack`
+          // funde as transações num único passo: um `Ctrl+Z` desfaz o replace-all inteiro.
+          const scope = commands.openEditScope(`replace-all:${handle}`);
+          state.pendingHandle = handle;
+          try {
+            for (const edit of edits) {
+              await commands.run(
+                REPLACE_COMMAND_ID,
+                { handle, at: edit.at, remove: edit.remove, insert: edit.insert },
+                { origin: "user" },
+              );
+            }
+          } finally {
+            scope.dispose();
+            state.pendingHandle = undefined;
+          }
+          state.activeHandle = handle;
+          state.caret = Math.min(state.caret, buffer.text().length);
+          return { replaced: edits.length, revision: buffer.revision };
+        }),
+      );
     },
 
     undoDocument(handle: DocumentHandle): Promise<DocumentUndoState> {

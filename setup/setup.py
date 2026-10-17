@@ -7,6 +7,8 @@ colorida via `rich` e as MESMAS garantias de segurança/idempotência:
 
 * sem flags, NUNCA usa ``sudo`` e NUNCA altera o rc do shell;
 * SHA-256 do Ghidra verificado **antes** de extrair;
+* o tarball do alvo (Sublime) **não é versionado**: é baixado sob demanda da URL
+  oficial pinada e tem o SHA-256 verificado **antes** de extrair (fail-closed);
 * download atômico (``.part`` -> ``mv``), lock de instalação e cleanup garantido;
 * dependências base só instaladas com ``--install-deps``;
 * provisiona o provider offline ``pwntools-elf`` (venv dedicado + pinos) e propaga
@@ -269,7 +271,7 @@ class UI:
     def show(self, message: str) -> None: ...
     def dry(self, message: str) -> None: ...
     def status(self, message: str): ...
-    def download_start(self, total: int) -> None: ...
+    def download_start(self, total: int, label: str = "baixando Ghidra") -> None: ...
     def download_update(self, done: int, total: int) -> None: ...
     def download_end(self) -> None: ...
     def summary(self) -> None: ...
@@ -325,8 +327,9 @@ class PlainUI(UI):
         print(f"     {message} ...", file=sys.stderr)
         yield None
 
-    def download_start(self, total: int) -> None:
+    def download_start(self, total: int, label: str = "baixando Ghidra") -> None:
         self._dl_total = total
+        self._dl_label = label
         self._dl_last_pct = -1
         self._dl_last_time = time.monotonic()
 
@@ -337,7 +340,7 @@ class PlainUI(UI):
         if pct != self._dl_last_pct and (pct % 2 == 0 or now - self._dl_last_time > 3):
             self._dl_last_pct = pct
             self._dl_last_time = now
-            print(f"     baixando Ghidra... {pct:3d}% ({done} bytes)", file=sys.stderr)
+            print(f"     {self._dl_label}... {pct:3d}% ({done} bytes)", file=sys.stderr)
 
     def download_end(self) -> None:
         print("     download concluído", file=sys.stderr)
@@ -433,7 +436,7 @@ class RichUI(UI):
         with self.console.status(f"[cyan]{message}...[/cyan]", spinner="dots"):
             yield None
 
-    def download_start(self, total: int) -> None:
+    def download_start(self, total: int, label: str = "baixando Ghidra") -> None:
         self._dl_last = 0
         self._progress = Progress(
             SpinnerColumn(),
@@ -445,7 +448,7 @@ class RichUI(UI):
             console=self.console,
         )
         self._progress.start()
-        self._task = self._progress.add_task("baixando Ghidra", total=total or None)
+        self._task = self._progress.add_task(label, total=total or None)
 
     def download_update(self, done: int, total: int) -> None:
         if self._progress is None:
@@ -581,12 +584,18 @@ def download(
     retries: int = 3,
     retry_delay: int = 2,
     expected_size: int = 0,
+    exit_code: int = EXIT_GHIDRA,
+    label: str = "Ghidra",
+    hint: str = "",
 ) -> None:
     """Download via urllib com retry/backoff e barra de progresso.
 
     Valida o tamanho baixado contra o ``Content-Length`` (e contra
     ``expected_size``, quando informado) **dentro** do loop de retry, para que um
     truncamento seja retentado em vez de só ser detectado no SHA-256 (que aborta).
+
+    Genérico para qualquer artefato pinado: ``exit_code``/``label``/``hint``
+    ajustam o erro final (Ghidra por default; o alvo passa ``EXIT_TARGET``).
     """
     last_error: Exception | None = None
     for attempt in range(1, retries + 1):
@@ -594,7 +603,7 @@ def download(
             request = urllib.request.Request(url, headers={"User-Agent": f"{PROJECT_NAME}-setup"})
             with urllib.request.urlopen(request, timeout=60) as response, dest.open("wb") as fh:
                 total = int(response.headers.get("Content-Length") or 0)
-                ui.download_start(total)
+                ui.download_start(total, f"baixando {label}")
                 done = 0
                 while True:
                     chunk = response.read(1024 * 256)
@@ -619,11 +628,10 @@ def download(
             if attempt < retries:
                 ui.warn(f"download falhou (tentativa {attempt}/{retries}): {exc}")
                 time.sleep(retry_delay)
-    raise SetupFailure(
-        EXIT_GHIDRA,
-        "falha no download do Ghidra",
-        [str(last_error)],
-    )
+    lines = [str(last_error)]
+    if hint:
+        lines.append(hint)
+    raise SetupFailure(exit_code, f"falha no download do {label}", lines)
 
 
 # ---------------------------------------------------------------------------
@@ -655,6 +663,9 @@ class Ctx:
         self.ghidra_jdk_url = v("GHIDRA_JDK_URL")
         self.sublime_build = v("SUBLIME_BUILD")
         self.sublime_tarball = v("SUBLIME_TARBALL")
+        self.sublime_tarball_url = v("SUBLIME_TARBALL_URL")
+        self.sublime_tarball_sha256 = v("SUBLIME_TARBALL_SHA256")
+        self.sublime_tarball_size = v("SUBLIME_TARBALL_SIZE_BYTES")
         self.sublime_target_bin = v("SUBLIME_TARGET_BIN")
         self.node_min = v("NODE_MIN_MAJOR")
         self.rich_version = versions.get("RICH_VERSION") or RICH_VERSION_FALLBACK
@@ -1534,20 +1545,15 @@ def step_target(ctx: Ctx, ui: UI) -> None:
         return
 
     rel_bin = ctx.target_bin.relative_to(ctx.target_dir)
-    top_name = rel_bin.parts[0]
 
     if ui.dry_run:
-        if not ctx.tarball.is_file():
-            ui.warn(f"tarball do alvo ausente: {ctx.tarball} (dry-run: apenas reporta)")
-        ui.show(f"mkdir -p {ctx.target_dir}  # extração atômica num dir temporário")
-        ui.show(f"mkdir <tmp> && tar -xJf {ctx.tarball} -C <tmp>")
-        ui.show("validar o alvo (tamanho > 1 MiB e magic ELF) ANTES de promover")
-        ui.show(f"mv <tmp>/{top_name} {ctx.target_dir}/  # atômico, preservando o anterior")
+        _target_plan(ctx, ui)
         ui.mark(8, "dry", "plano impresso")
         return
 
-    if not ctx.tarball.is_file():
-        raise SetupFailure(EXIT_TARGET, "tarball do alvo ausente", [str(ctx.tarball)])
+    # O tarball não é mais versionado: garante presença + SHA-256 (baixa sob
+    # demanda se faltar; offline OK se já estiver em bin/ com o SHA correto).
+    _ensure_tarball(ctx, ui)
 
     ensure_dir(ui, ctx.target_dir)
     tmp_dir = Path(tempfile.mkdtemp(prefix=".extract.", dir=str(ctx.target_dir)))
@@ -1588,6 +1594,89 @@ def step_target(ctx: Ctx, ui: UI) -> None:
         )
     ui.ok(f"extraído: {ctx.target_bin}")
     ui.mark(8, "ok", str(ctx.target_bin))
+
+
+def _tarball_sha_ok(ctx: Ctx, ui: UI) -> bool:
+    """True se ``bin/<tarball>`` existe e bate com o SHA-256 pinado."""
+    if not ctx.tarball.is_file():
+        return False
+    return sha256_of(ctx.tarball, ui) == ctx.sublime_tarball_sha256
+
+
+def _ensure_tarball(ctx: Ctx, ui: UI) -> None:
+    """Garante que ``bin/<tarball>`` existe e tem o SHA-256 pinado.
+
+    * arquivo presente + SHA-256 OK → **não** toca na rede (funciona offline);
+    * ausente **ou** SHA-256 divergente → baixa da URL pinada para ``.part``,
+      **valida o SHA-256 ANTES de promover** (``os.replace`` atômico). SHA-256
+      divergente = erro fatal: nada é extraído e o arquivo existente é preservado.
+    """
+    if ctx.tarball.is_file():
+        if _tarball_sha_ok(ctx, ui):
+            ui.ok("tarball do alvo já presente e SHA-256 confere")
+            return
+        ui.warn("tarball do alvo presente mas SHA-256 diverge; baixando novamente")
+
+    size_mib = _mib(ctx.sublime_tarball_size)
+    ui.info(
+        f"baixando alvo build {ctx.sublime_build} "
+        f"(~{ctx.sublime_tarball_size} bytes / ~{size_mib} MiB)..."
+    )
+    ui.info(f"URL: {ctx.sublime_tarball_url}")
+    ensure_dir(ui, ctx.tarball.parent)
+    part = ctx.tarball.with_name(ctx.tarball.name + ".part")
+    part.unlink(missing_ok=True)
+    try:
+        # download atômico: grava em .part e só promove após validar o SHA-256
+        download(
+            ctx.sublime_tarball_url,
+            part,
+            ui,
+            expected_size=_int_or_zero(ctx.sublime_tarball_size),
+            exit_code=EXIT_TARGET,
+            label=f"alvo (build {ctx.sublime_build})",
+            hint=(
+                "sem rede? coloque o tarball manualmente em "
+                f"{ctx.tarball} (SHA-256 pinado em setup/versions.env)."
+            ),
+        )
+        got = sha256_of(part, ui)
+        if got != ctx.sublime_tarball_sha256:
+            raise SetupFailure(
+                EXIT_TARGET,
+                "SHA-256 do tarball do alvo não confere com o pin",
+                [
+                    f"esperado: {ctx.sublime_tarball_sha256}",
+                    f"obtido:   {got}",
+                    "abortando SEM extrair e SEM sobrescrever o arquivo existente.",
+                ],
+            )
+        os.replace(part, ctx.tarball)
+        ui.ok("SHA-256 OK")
+    finally:
+        part.unlink(missing_ok=True)
+
+
+def _target_plan(ctx: Ctx, ui: UI) -> None:
+    """Imprime o plano do alvo em dry-run (download incluído quando necessário)."""
+    rel_bin = ctx.target_bin.relative_to(ctx.target_dir)
+    top_name = rel_bin.parts[0]
+    if ctx.tarball.is_file() and _tarball_sha_ok(ctx, ui):
+        ui.ok("tarball do alvo já presente e SHA-256 confere")
+    else:
+        if ctx.tarball.is_file():
+            ui.warn("tarball do alvo presente mas SHA-256 diverge; baixaria novamente")
+        ui.info(f"baixando alvo build {ctx.sublime_build} de {ctx.sublime_tarball_url}")
+        ui.dry(
+            "download (urllib, .part, retry/backoff, valida o tamanho vs Content-Length "
+            "e barra de progresso)"
+        )
+        ui.dry(f"mv -f {ctx.tarball}.part {ctx.tarball}")
+        ui.dry(f"verificar SHA-256 == {ctx.sublime_tarball_sha256} (antes de extrair)")
+    ui.show(f"mkdir -p {ctx.target_dir}  # extração atômica num dir temporário")
+    ui.show(f"mkdir <tmp> && tar -xJf {ctx.tarball} -C <tmp>")
+    ui.show("validar o alvo (tamanho > 1 MiB e magic ELF) ANTES de promover")
+    ui.show(f"mv <tmp>/{top_name} {ctx.target_dir}/  # atômico, preservando o anterior")
 
 
 ELF_MAGIC = b"\x7fELF"
