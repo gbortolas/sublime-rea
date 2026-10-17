@@ -48,6 +48,7 @@ export const IPC_CHANNELS = {
   ping: "scribe:host:ping",
   ready: "scribe:host:ready",
   exit: "scribe:host:exit",
+  menuAction: "scribe:menu:action",
 } as const;
 
 /** Intervalo de publicação das métricas `MainThreadBusy` (observabilidade, DEC-CON-10). */
@@ -429,7 +430,13 @@ function packageRoots(appPath: string, userData: string): Partial<Record<Resourc
  */
 export async function startMainProcess(): Promise<void> {
   const electron = await import("electron");
-  const { app, BrowserWindow, dialog, ipcMain } = electron;
+  const { app, BrowserWindow, dialog, ipcMain, Menu } = electron;
+
+  function sendMenuAction(window: ElectronBrowserWindow | null, action: string): void {
+    if (window !== null && !window.isDestroyed()) {
+      window.webContents.send(IPC_CHANNELS.menuAction, action);
+    }
+  }
 
   if (!app.requestSingleInstanceLock()) {
     app.quit();
@@ -484,6 +491,8 @@ export async function startMainProcess(): Promise<void> {
     const window = new BrowserWindow({
       width: 1024,
       height: 768,
+      title: "Scribe",
+      show: false,
       webPreferences: {
         preload: join(__dirname, "../preload/index.js"),
         contextIsolation: true,
@@ -492,6 +501,7 @@ export async function startMainProcess(): Promise<void> {
       },
     });
     loadRenderer(window, documentPath);
+    window.once("ready-to-show", () => window.show());
     return window;
   };
 
@@ -538,6 +548,53 @@ export async function startMainProcess(): Promise<void> {
   });
 
   app.on("will-quit", shutdown);
+
+  const menuTemplate: Electron.MenuItemConstructorOptions[] = [
+    {
+      label: "File",
+      submenu: [
+        { label: "Open", accelerator: "CmdOrCtrl+O", click: () => sendMenuAction(mainWindow, "file.open") },
+        { label: "Save", accelerator: "CmdOrCtrl+S", click: () => sendMenuAction(mainWindow, "file.save") },
+        { type: "separator" },
+        { label: "Quit", accelerator: "CmdOrCtrl+Q", click: () => app.quit() },
+      ],
+    },
+    {
+      label: "Edit",
+      submenu: [
+        { label: "Undo", accelerator: "CmdOrCtrl+Z", click: () => sendMenuAction(mainWindow, "edit.undo") },
+        { label: "Redo", accelerator: "CmdOrCtrl+Shift+Z", click: () => sendMenuAction(mainWindow, "edit.redo") },
+        { type: "separator" },
+        { label: "Cut", accelerator: "CmdOrCtrl+X", click: () => sendMenuAction(mainWindow, "edit.cut") },
+        { label: "Copy", accelerator: "CmdOrCtrl+C", click: () => sendMenuAction(mainWindow, "edit.copy") },
+        { label: "Paste", accelerator: "CmdOrCtrl+V", click: () => sendMenuAction(mainWindow, "edit.paste") },
+        { label: "Select All", accelerator: "CmdOrCtrl+A", click: () => sendMenuAction(mainWindow, "edit.selectAll") },
+      ],
+    },
+    {
+      label: "Selection",
+      submenu: [
+        { label: "Select All", accelerator: "CmdOrCtrl+A", click: () => sendMenuAction(mainWindow, "edit.selectAll") },
+      ],
+    },
+    {
+      label: "Find",
+      submenu: [
+        { label: "Find", accelerator: "CmdOrCtrl+F", click: () => sendMenuAction(mainWindow, "find.open") },
+        { label: "Find Next", accelerator: "F3", click: () => sendMenuAction(mainWindow, "find.next") },
+        { label: "Find Previous", accelerator: "Shift+F3", click: () => sendMenuAction(mainWindow, "find.prev") },
+      ],
+    },
+    {
+      label: "View",
+      submenu: [
+        { label: "Toggle Theme", accelerator: "CmdOrCtrl+Shift+T", click: () => sendMenuAction(mainWindow, "view.toggleTheme") },
+      ],
+    },
+  ];
+
+  const menu = Menu.buildFromTemplate(menuTemplate);
+  Menu.setApplicationMenu(menu);
 
   await app.whenReady();
 

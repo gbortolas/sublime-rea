@@ -6,6 +6,7 @@
 # --- alvo extraído / build ---
 target/
 build/
+!build/icon.*
 dist/
 *.o
 *.so

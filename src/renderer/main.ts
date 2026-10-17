@@ -767,6 +767,7 @@ class DocumentController {
     updateCaretStatus(source, 0);
     setDocStatus(label);
     setDirtyStatus(false);
+    showWelcome(false);
     await this.refreshUndoStatus();
     this.renderTabBar();
     this.renderer.start();
@@ -807,6 +808,7 @@ class DocumentController {
       setDocStatus("sem documento");
       setDirtyStatus(false);
       setUndoStatus(false, false);
+      showWelcome(true);
     } else if (index <= this.activeIndex) {
       this.activate(Math.max(0, this.activeIndex - 1));
     } else {
@@ -973,6 +975,14 @@ function demoText(): string {
     return `${n}  linha de demonstração do pipeline de render (scroll: roda do mouse / setas)`;
   });
   return lines.join("\n");
+}
+// Referência explícita para manter a função como fallback disponível (não removida).
+void demoText;
+
+/** Alterna a exibição da tela de boas-vindas (welcome screen). */
+function showWelcome(show: boolean): void {
+  const el = document.getElementById("welcome-screen");
+  if (el) el.hidden = !show;
 }
 
 // ---- app ------------------------------------------------------------------------------------------
@@ -1325,10 +1335,10 @@ export async function bootRenderer(): Promise<boolean> {
     console.info("Scribe: ponte do preload presente, mas sem ?file= — renderer em modo demo");
   }
   if (!opened) {
-    source.setText(demoText(), 0);
+    showWelcome(true);
     viewport.setMetrics({ lineCount: source.lineCount() });
     if (initialPath === undefined) {
-      setDocStatus(bridge === undefined ? "demo (sem preload)" : "demo (sem ?file=)");
+      setDocStatus(bridge === undefined ? "demo (sem preload)" : "Nenhum arquivo aberto");
     }
   }
 
@@ -1952,7 +1962,10 @@ function attachInputListeners(
     // Em Electron, `File.path` contém o caminho real do arquivo no sistema.
     if (path === undefined || path.length === 0) return;
     const opened = await controller.open(path);
-    if (opened) findBar?.syncDocument();
+    if (opened) {
+      showWelcome(false);
+      findBar?.syncDocument();
+    }
   });
 }
 

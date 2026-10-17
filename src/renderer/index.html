@@ -26,6 +26,21 @@
           debounce, navegação, descarte de resposta obsoleta — vive em ./find-bar.ts e é testada).
           Escondida por padrão (`hidden`); o renderer alterna conforme o estado do modelo.
         -->
+        <!-- Welcome screen: aparece quando nenhum arquivo está aberto. -->
+        <div id="welcome-screen" hidden>
+          <div class="welcome-content">
+            <h1 class="welcome-logo">Scribe</h1>
+            <p class="welcome-subtitle">Editor de texto rápido e moderno</p>
+            <div class="welcome-shortcuts">
+              <div class="shortcut-row"><kbd>Ctrl+O</kbd><span>Abrir arquivo</span></div>
+              <div class="shortcut-row"><kbd>Ctrl+N</kbd><span>Novo documento</span></div>
+              <div class="shortcut-row"><kbd>Ctrl+S</kbd><span>Salvar</span></div>
+              <div class="shortcut-row"><kbd>Ctrl+F</kbd><span>Buscar</span></div>
+              <div class="shortcut-row"><kbd>Ctrl+Shift+T</kbd><span>Alternar tema</span></div>
+            </div>
+            <p class="welcome-hint">Arraste um arquivo para abrir</p>
+          </div>
+        </div>
         <div id="find-bar" role="search" aria-label="Buscar e substituir" hidden>
           <input id="find-input" type="text" placeholder="Buscar" aria-label="Buscar" autocomplete="off" spellcheck="false" />
           <span id="find-count" aria-live="polite">0/0</span>

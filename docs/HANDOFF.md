@@ -1,7 +1,7 @@
 # HANDOFF — sublime-rea
 
 > **Documento de handoff entre sessões** (leia antes de retomar). Atualizado em **2026-10-17**.
-> Status: P3#12/13/14 + PyCharm concluídos. Issues UX reportadas ao testar AppImage (demo text, menu, branding) — ver BACKLOG.md §🐛.
+> Status: 🐛 UX issues (3 P0 + 1 P1) resolvidos — resta P1 (performance dos menus). Próximo: P3.6 ou nova feature do roadmap.
 
 ---
 
@@ -18,7 +18,8 @@ P2.4b/c ✅ · P2.5 (salvar) ✅ · P3.10/11/12 (dívidas) ✅ · P1#1 (seleçã
 **P1#3 (scrollbar) ✅ · P1#4 (find bar toggles) ✅ · P2#5 (múltiplos cursores) ✅** ·
 **P2#7 (drag & drop) ✅ · Infra (GitHub repo + CI/Release) ✅ · P2#6 (abas) ✅ · P2#8 (temas) ✅** ·
 **P3#12 (go to line) ✅ · P3#13 (auto-pair) ✅ · P3#14 (bracket matching) ✅ · PyCharm ✅** ·
-**sessão encerrada — ver BACKLOG.md §🐛 UX Issues para blockers da próxima sessão**
+**🐛 UX: welcome screen ✅ · menu bar ✅ · branding/ícone ✅ · dica abrir arquivo ✅** ·
+**Pendente: P1 — performance dos menus**
 
 **✅ Passo operacional resolvido (2026-10-16).** O `setup.py` foi rodado e o MCP `rea` foi relançado
 **já com `REA_GHIDRA_STARTUP_TIMEOUT_MS=900000`** (confirmado em `/proc/*/environ`) — **não** é mais
@@ -32,7 +33,7 @@ python3 setup/setup.py        # idempotente: reescreve setup/env.sh + environmen
 Sem o deadline maior, `open_binary`/`analyze` **via MCP** volta a estourar os 330 s (a análise leva
 ~355 s).
 
-**Próxima tarefa recomendada:** **P2#8 — Temas (cores configuráveis)** ([`docs/ROADMAP.md`](ROADMAP.md)). Trocar tema por JSON/JSONC, paleta clara/escura, reload sem restart. Esforço **P** (pequeno) — mexe no `ThemeResolver` + UI de seleção.
+**Próxima tarefa recomendada:** **P3.6 — Snapshot de análise do REA** ([`docs/BACKLOG.md`](BACKLOG.md)). Baixa prioridade — o projeto Ghidra persistente já cobre o caso. Alternativa: atacar o **P1 — Performance dos menus** (investigar lentidão dos menus nativos Electron) ou escolher nova feature do roadmap (P2#9 minimap, P3#10 plugin host).
 
 > ✅ **Pegadinha resolvida (2026-10-16, P3.9):** o `setup.py` agora **detecta** um JDK ≥ 21
 > compatível (`JAVA_HOME`, PATH, sdkman, `/usr/lib/jvm`) e escreve um **`export JAVA_HOME=…` ativo**

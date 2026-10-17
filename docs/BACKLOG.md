@@ -298,11 +298,11 @@ IDs). Cada item vira uma seção da spec técnica abstrata. **Fase 1 FECHADA** �
 
 Problemas identificados ao testar o AppImage pela primeira vez:
 
-- [ ] **P0 — Demo text pouco convidativo**: o texto de demonstração ("linha de demonstração do pipeline de render") não deixa claro que o app é um editor de verdade. Substituir por um **welcome screen** com atalhos listados (Ctrl+O pra abrir, Ctrl+N pra novo, Ctrl+Shift+T pra tema) + instruções claras.
-- [ ] **P0 — Sem menu bar**: não há File > Open / Save / Save As. O app depende só de atalhos de teclado (Ctrl+O, Ctrl+S) que o usuário não conhece. Adicionar **menu nativo do Electron** (`Menu.buildFromTemplate`) com File, Edit, Selection, Find, View.
-- [ ] **P0 — Aparência "Sublime" genérica**: o Electron window chrome é default (sem custom title bar), sem branding do Scribe. Adicionar **custom title bar** ou ao menos mudar o título da janela e o ícone.
+- [x] **P0 — Demo text pouco convidativo**: substituído por **welcome screen** com logo Scribe, atalhos (Ctrl+O, Ctrl+N, Ctrl+S, Ctrl+F, Ctrl+Shift+T) e hint de drag & drop. ✅ (2026-10-17)
+- [x] **P0 — Sem menu bar**: adicionado menu nativo do Electron em `src/main/index.ts` com File (Open/Save/Quit), Edit (Undo/Redo/Cut/Copy/Paste/Select All), Selection (Select All), Find (Find/Next/Previous), View (Toggle Theme). Ações enviadas ao renderer via IPC `scribe:menu:action`. ✅ (2026-10-17)
+- [x] **P0 — Aparência "Sublime" genérica**: janela titulada "Scribe" com `show: false` → `ready-to-show`; ícone SVG+PNG em `build/icon.svg`/`build/icon.png` (logo "S" azul); `electron-builder.yml` configurado para Linux/Windows/macOS. ✅ (2026-10-17)
 - [ ] **P1 — Performance dos menus lentos**: menus nativos do Electron com muitos itens podem estar causando lentidão. Investigar e simplificar.
-- [ ] **P1 — Sem indicação de como abrir arquivo**: na primeira execução (sem `--file=`), o app mostra demo text mas não diz "pressione Ctrl+O para abrir um arquivo". Adicionar dica na status bar ou no canvas.
+- [x] **P1 — Sem indicação de como abrir arquivo**: welcome screen exibe atalhos (Ctrl+O, Ctrl+N) e hint "Arraste um arquivo para abrir". Status bar mostra "Nenhum arquivo aberto". ✅ (2026-10-17)
 
 ## 🧹 P3 — Housekeeping / dívidas
 
