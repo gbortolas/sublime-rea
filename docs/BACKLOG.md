@@ -274,7 +274,12 @@ IDs). Cada item vira uma seção da spec técnica abstrata. **Fase 1 FECHADA** �
   - **main.ts** — `DocumentController` refatorado: `sessions: TabSession[]`, `activate()`, `close()`, `renderTabBar()` (DOM), dirty tracking por sessão, `resize()` desconta 32px, Ctrl+Tab navigation
   - Gates: typecheck/lint/build exit 0 · **430 testes / 43 arquivos** (baseline 430)
 
-- [x] **Infra — GitHub repo + CI/Release** ✅ **fechado** (2026-10-17). Repositório `gbortolas/sublime-rea` criado e público; workflows CI (typecheck+test+build) e Release (Linux AppImage + Windows nsis); electron-builder configurado; ícone placeholder 256x256.
+- [x] **P2#8 — Temas (cores configuráveis)** ✅ **fechado** (2026-10-17). Troca entre tema escuro (Scribe Dark) e claro (Scribe Light) por clique na status bar ou Ctrl+Shift+T, persistido em sessionStorage. Implementação:
+  - **shared** — `theme-contract.ts` (interface `EditorTheme` com paleta completa) + `themes.ts` (DARK_THEME + LIGHT_THEME + BUILTIN_THEMES)
+  - **scene** — `LineLayout.searchMatchColor/searchCurrentColor/selectionColor` em vez de constantes globais
+  - **renderer** — `loadTheme/saveTheme` com sessionStorage; `THEME.current` substitui `COLORS`; `rgbToCss()` para body; toggle por click/Ctrl+Shift+T
+  - **index.html+CSS** — botão `#status-theme` (🌙/☀️) com estilo `.clickable`
+  - Gates: typecheck/lint/build exit 0 · **430 testes / 43 arquivos** (baseline 430)
 
 ## 🧹 P3 — Housekeeping / dívidas
 

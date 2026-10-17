@@ -18,10 +18,13 @@ import {
   SelectionOps,
   SelectionSetOps,
   toDisposable,
+  DARK_THEME,
+  LIGHT_THEME,
 } from "../shared";
 import type {
   Disposable,
   DocumentHighlight,
+  EditorTheme,
   HighlightSpan,
   RenderBackendKind,
   RGBA,
@@ -62,21 +65,25 @@ const DEMO_LINE_COUNT = 200;
 const GLYPH_CHUNK = 2048;
 
 const TEXT_STYLE: TextStyle = { family: "monospace", sizePx: 15, weight: 400, italic: false };
-const COLORS = {
-  background: 0x1e1f22ff as RGBA,
-  text: 0xd4d4d4ff as RGBA,
-  caret: 0x7fb3ffff as RGBA,
-  gutter: 0x2b2d30ff as RGBA,
-  gutterFg: 0x6e6e6eff as RGBA,
-};
 
-/** Clareia uma cor RGBA por um fator (0 = sem mudança, 1 = branco). */
-function lightenColor(color: RGBA, factor: number): RGBA {
-  const r = Math.min(255, Math.round(((color >>> 24) & 0xff) + (255 - ((color >>> 24) & 0xff)) * factor));
-  const g = Math.min(255, Math.round(((color >>> 16) & 0xff) + (255 - ((color >>> 16) & 0xff)) * factor));
-  const b = Math.min(255, Math.round(((color >>> 8) & 0xff) + (255 - ((color >>> 8) & 0xff)) * factor));
-  const a = color & 0xff;
-  return ((r << 24) | (g << 16) | (b << 8) | a) >>> 0;
+/** Tema ativo do editor (default: escuro). Guardado em sessionStorage para persistência entre pageloads. */
+function loadTheme(): EditorTheme {
+  try {
+    const raw = sessionStorage.getItem("scribe-theme");
+    if (raw !== null) {
+      const parsed = JSON.parse(raw) as EditorTheme;
+      if (parsed && typeof parsed === "object" && "kind" in parsed) return parsed;
+    }
+  } catch { /* fallback */ }
+  return DARK_THEME;
+}
+function saveTheme(theme: EditorTheme): void {
+  sessionStorage.setItem("scribe-theme", JSON.stringify(theme));
+}
+const THEME: { current: EditorTheme } = { current: loadTheme() };
+
+function rgbToCss(rgba: RGBA): string {
+  return `#${(rgba >>> 0).toString(16).padStart(8, "0").slice(0, 6)}`;
 }
 
 // ---- rasterização/medição no renderer (fora da main thread seria o ideal — DEC-REN-3) ----------
@@ -1023,6 +1030,7 @@ class ScribeRenderer {
     const lineCount = this.source.lineCount();
     const gutterDigits = Math.max(1, Math.floor(Math.log10(Math.max(1, lineCount))) + 1);
     const gutterWidth = gutterDigits * 9 + 16; // ~9px/dígito + 16px padding horizontal
+    const colors = THEME.current.colors;
     const layout: LineLayout = {
       lineHeight: this.lineHeight(),
       paddingLeft: gutterWidth + 8,
@@ -1030,21 +1038,24 @@ class ScribeRenderer {
       tabWidth: 4,
       scrollOffsetPx: this.viewport.scrollOffsetPx(),
       viewport: viewportRect,
-      background: COLORS.background,
-      defaultColor: COLORS.text,
+      background: colors.background,
+      defaultColor: colors.foreground,
       gutterWidth,
-      gutterBackground: COLORS.gutter,
-      gutterColor: COLORS.gutterFg,
+      gutterBackground: colors.gutter,
+      gutterColor: colors.gutterForeground,
       scrollbarWidth: 10,
-      scrollbarTrack: lightenColor(COLORS.background, 0.05),
-      scrollbarThumb: lightenColor(COLORS.background, 0.25),
+      scrollbarTrack: colors.scrollbarTrack,
+      scrollbarThumb: colors.scrollbarThumb,
+      searchMatchColor: colors.searchMatch,
+      searchCurrentColor: colors.searchCurrent,
+      selectionColor: colors.selection,
     };
 
     // Computa carets e seleções extras para multi-cursor (P2#5)
     const primaryCaret = {
       line: Math.floor(this.viewport.scrollOffsetPx() / layout.lineHeight),
       column: 0,
-      color: COLORS.caret,
+      color: colors.caret,
       width: 2,
     };
     let extraCarets: readonly CaretPosition[] | undefined;
@@ -1057,7 +1068,7 @@ class ScribeRenderer {
         const sel = this.currentSelections[si]!;
         if (!SelectionOps.isCollapsed(sel)) es.push(sel);
         const pos = this.source.positionAt(sel.active);
-        ec.push({ line: pos.line, column: pos.column, color: COLORS.caret, width: 2 });
+        ec.push({ line: pos.line, column: pos.column, color: colors.caret, width: 2 });
       }
       if (ec.length > 0) extraCarets = ec;
       if (es.length > 0) extraSelections = es;
@@ -1172,6 +1183,10 @@ export async function bootRenderer(): Promise<boolean> {
   setStatus(effective);
   console.info(`Scribe: backend efetivo = ${effective} (pedido: ${requested})`);
 
+  // Aplica tema no body
+  document.body.style.background = rgbToCss(THEME.current.colors.background);
+  document.body.style.color = rgbToCss(THEME.current.colors.foreground);
+
   const source = new DocumentLineSource();
   const viewport = new ViewportImpl({
     lineCount: source.lineCount(),
@@ -1268,6 +1283,21 @@ export async function bootRenderer(): Promise<boolean> {
       : undefined;
 
   attachInputListeners(surface, viewport, renderer, controller, findBar);
+
+  // Toggle tema (Ctrl+Shift+T)
+  const themeBtn = document.getElementById("status-theme");
+  if (themeBtn) {
+    themeBtn.textContent = THEME.current.kind === "dark" ? "🌙" : "☀️";
+    themeBtn.addEventListener("click", () => {
+      const next = THEME.current.kind === "dark" ? LIGHT_THEME : DARK_THEME;
+      THEME.current = next;
+      saveTheme(next);
+      themeBtn.textContent = next.kind === "dark" ? "🌙" : "☀️";
+      document.body.style.background = rgbToCss(next.colors.background);
+      renderer.start();
+    });
+  }
+
   window.addEventListener("resize", () => renderer.resize(surface.clientWidth, surface.clientHeight));
   renderer.start();
   return true;
@@ -1436,6 +1466,13 @@ export function attachFindBar(deps: FindBarDeps): FindBarBinding | undefined {
     if ((event.ctrlKey || event.metaKey) && !event.altKey && (event.key === "f" || event.key === "F")) {
       event.preventDefault();
       openFind();
+      return;
+    }
+    // Toggle tema: Ctrl+Shift+T
+    if ((event.ctrlKey || event.metaKey) && event.shiftKey && !event.altKey && (event.key === "t" || event.key === "T")) {
+      event.preventDefault();
+      const btn = document.getElementById("status-theme");
+      btn?.click();
       return;
     }
     // Ctrl+Alt+C/R/W alterna os toggles de busca de qualquer lugar da janela.

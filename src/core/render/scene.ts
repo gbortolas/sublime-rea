@@ -60,6 +60,12 @@ export interface LineLayout {
   readonly scrollbarTrack: RGBA;
   /** Cor do thumb da scrollbar. */
   readonly scrollbarThumb: RGBA;
+  /** Cor das ocorrências de busca (não atuais). */
+  readonly searchMatchColor: RGBA;
+  /** Cor da ocorrência atual da busca. */
+  readonly searchCurrentColor: RGBA;
+  /** Cor de fundo da seleção de texto. */
+  readonly selectionColor: RGBA;
 }
 
 /** Cursor opcional desenhado como `RectInstance`. */
@@ -83,12 +89,6 @@ export interface SearchHighlight {
 }
 
 /** @internal exported only for tests. */
-export const SEARCH_MATCH_COLOR: RGBA = 0xffff0044;
-/** @internal exported only for tests. */
-export const SEARCH_CURRENT_COLOR: RGBA = 0xff880088;
-
-/** Cor de fundo da seleção (azul semi-transparente, como editores de texto). */
-export const SELECTION_COLOR: RGBA = 0x264f78ff;
 
 /** Instâncias de um frame — entradas diretas do `RenderPipeline`. */
 export interface SceneInstances {
@@ -298,7 +298,7 @@ export function buildInstances(
           w: Math.max(matchEndX - matchStartX, 0),
           h: layout.lineHeight,
         },
-        color: isCurrent ? SEARCH_CURRENT_COLOR : SEARCH_MATCH_COLOR,
+        color: isCurrent ? layout.searchCurrentColor : layout.searchMatchColor,
       });
     }
   }
@@ -354,7 +354,7 @@ export function buildInstances(
           w: Math.max(selEndX - selStartX, 0),
           h: layout.lineHeight,
         },
-        color: SELECTION_COLOR,
+        color: layout.selectionColor,
       });
     }
   }
@@ -435,7 +435,7 @@ export function buildInstances(
             w: Math.max(selEndX - selStartX, 0),
             h: layout.lineHeight,
           },
-          color: SELECTION_COLOR,
+          color: layout.selectionColor,
         });
       }
     }

@@ -85,6 +85,9 @@ function layout(): LineLayout {
     scrollbarWidth: 0,
     scrollbarTrack: 0x00000000,
     scrollbarThumb: 0x00000000,
+    searchMatchColor: 0xffff0044,
+    searchCurrentColor: 0xff880088,
+    selectionColor: 0x264f78ff,
   };
 }
 

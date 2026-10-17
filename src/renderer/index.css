@@ -67,6 +67,14 @@ body {
   opacity: 0.35;
 }
 
+#status-bar .clickable {
+  cursor: pointer;
+  user-select: none;
+}
+#status-bar .clickable:hover {
+  opacity: 0.8;
+}
+
 #status-dirty.dirty {
   color: #e8a838;
   font-weight: bold;

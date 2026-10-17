@@ -4,7 +4,7 @@
 import { describe, expect, it } from "vitest";
 import type { RGBA, Scope, ScopeStyle, SearchMatch, TextStyle, ThemeResolver } from "../../shared";
 import { GlyphAtlas } from "./atlas";
-import { buildInstances, type LineLayout, type LineSource, SEARCH_MATCH_COLOR, SEARCH_CURRENT_COLOR } from "./scene";
+import { buildInstances, type LineLayout, type LineSource } from "./scene";
 
 /** Resolvedor de tema mínimo local ao teste (evita import cruzado entre módulos de `core`). */
 function prefixTheme(rules: Readonly<Record<string, RGBA>>): ThemeResolver {
@@ -51,6 +51,9 @@ function layout(scrollOffsetPx = 0): LineLayout {
     scrollbarWidth: 0,
     scrollbarTrack: 0x00000000,
     scrollbarThumb: 0x00000000,
+    searchMatchColor: 0xffff0044,
+    searchCurrentColor: 0xff880088,
+    selectionColor: 0x264f78ff,
   };
 }
 
@@ -190,13 +193,13 @@ describe("buildInstances — destaque de busca (P3.11)", () => {
     // Fundo (1) + 2 matches na linha 0 + 1 match na linha 1 = 4 rects
     expect(scene.rects).toHaveLength(4);
     // Match 0 (linha 0, offset 0-3): amarelo
-    expect(scene.rects[1]?.color).toBe(SEARCH_MATCH_COLOR);
+    expect(scene.rects[1]?.color).toBe(0xffff0044); // SEARCH_MATCH_COLOR
     expect(scene.rects[1]?.rect.y).toBe(4);
     expect(scene.rects[1]?.rect.x).toBeCloseTo(8, 5);
     // Match 1 (linha 0, offset 8-11): atual → magenta
-    expect(scene.rects[2]?.color).toBe(SEARCH_CURRENT_COLOR);
+    expect(scene.rects[2]?.color).toBe(0xff880088); // SEARCH_CURRENT_COLOR
     // Match 2 (linha 1, offset 2-7): amarelo
-    expect(scene.rects[3]?.color).toBe(SEARCH_MATCH_COLOR);
+    expect(scene.rects[3]?.color).toBe(0xffff0044); // SEARCH_MATCH_COLOR
     expect(scene.rects[3]?.rect.y).toBe(24);
   });
 
