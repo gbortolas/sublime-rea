@@ -23,6 +23,7 @@ import type { ArgsOf, ResultOf } from "./extension-contract";
 import type { DocumentHandle } from "./handles";
 import type { DocumentHighlight } from "./syntax-contract";
 import type { MainThreadBusy } from "./concurrency-contract";
+import type { CommandListResult } from "./command-contract";
 import type { ReplaceAllResult, SearchDocumentResult, SearchQuery } from "./search-contract";
 import type { Selection, SelectionSet } from "./selection-contract";
 
@@ -104,6 +105,8 @@ export interface IpcMethods {
    * `search.tooManyMatches` se a busca for truncada (nada de substituição parcial silenciosa).
    */
   "search.replaceAll"(handle: DocumentHandle, query: SearchQuery, replacement: string): ReplaceAllResult;
+  "command.list"(): CommandListResult;
+  "command.execute"(commandId: string): void;
 }
 
 export type IpcMethodName = keyof IpcMethods & string;
@@ -135,6 +138,8 @@ export const IPC_METHODS = [
   "syntax.highlight",
   "search.find",
   "search.replaceAll",
+  "command.list",
+  "command.execute",
 ] as const satisfies readonly IpcMethodName[];
 
 export const IPC_EVENT_NAMES = ["document.changed"] as const satisfies readonly IpcEventName[];

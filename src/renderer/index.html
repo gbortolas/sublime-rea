@@ -37,6 +37,7 @@
               <div class="shortcut-row"><kbd>Ctrl+S</kbd><span>Salvar</span></div>
               <div class="shortcut-row"><kbd>Ctrl+F</kbd><span>Buscar</span></div>
               <div class="shortcut-row"><kbd>Ctrl+Shift+T</kbd><span>Alternar tema</span></div>
+              <div class="shortcut-row"><kbd>Ctrl+Shift+P</kbd><span>Paleta de comandos</span></div>
             </div>
             <p class="welcome-hint">Arraste um arquivo para abrir</p>
           </div>
@@ -53,6 +54,11 @@
           <button id="find-replace-all" type="button">Substituir tudo</button>
           <span id="find-status" aria-live="polite"></span>
           <button id="find-close" type="button" aria-label="Fechar busca">✕</button>
+        </div>
+        <!-- Command Palette: overlay de busca de comandos (Ctrl+Shift+P). -->
+        <div id="command-palette" hidden>
+          <input id="palette-input" type="text" placeholder="Comandos..." autocomplete="off" spellcheck="false" />
+          <div id="palette-results"></div>
         </div>
         <div id="status-bar" role="status">
           <span id="status-doc">sem documento</span>

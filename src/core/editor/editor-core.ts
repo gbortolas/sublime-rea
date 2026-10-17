@@ -21,6 +21,7 @@
  */
 import type {
   Buffer,
+  Command,
   Disposable,
   DocumentChangedEvent,
   DocumentHandle,
@@ -195,6 +196,10 @@ export interface EditorCore {
   onDocumentChanged(cb: (event: DocumentChangedEvent) => void): Disposable;
   /** `MainThreadBusy` do scheduler com as lanes do pool (DEC-CON-10). */
   snapshot(): MainThreadBusy;
+  /** Lista todos os comandos registrados (para a Command Palette). */
+  listCommands(): readonly Command[];
+  /** Executa um comando pelo id (lança se desconhecido). */
+  executeCommand(id: string): Promise<void>;
   dispose(): void;
 }
 
@@ -919,6 +924,46 @@ export function createEditorCore(options: EditorCoreOptions = {}): EditorCore {
         pendingCallbacks: busy.pendingCallbacks,
         lanes: pool.busy,
       };
+    },
+
+    listCommands(): readonly Command[] {
+      return [
+        { id: "file.open",      label: "Abrir arquivo",      category: "File", accelerator: "Ctrl+O" },
+        { id: "file.save",      label: "Salvar",              category: "File", accelerator: "Ctrl+S" },
+        { id: "edit.undo",      label: "Desfazer",            category: "Edit", accelerator: "Ctrl+Z" },
+        { id: "edit.redo",      label: "Refazer",             category: "Edit", accelerator: "Ctrl+Shift+Z" },
+        { id: "edit.cut",       label: "Recortar",            category: "Edit", accelerator: "Ctrl+X" },
+        { id: "edit.copy",      label: "Copiar",              category: "Edit", accelerator: "Ctrl+C" },
+        { id: "edit.paste",     label: "Colar",               category: "Edit", accelerator: "Ctrl+V" },
+        { id: "edit.selectAll", label: "Selecionar tudo",     category: "Edit", accelerator: "Ctrl+A" },
+        { id: "find.open",      label: "Buscar",              category: "Find", accelerator: "Ctrl+F" },
+        { id: "view.toggleTheme", label: "Alternar tema",     category: "View", accelerator: "Ctrl+Shift+T" },
+      ];
+    },
+
+    async executeCommand(id: string): Promise<void> {
+      switch (id) {
+        case "file.open":
+          // Aberto no dispatchIpc com deps.dialog; aqui sem dialog não tem o que fazer.
+          throw new EditorArgumentError("no-dialog", "file.open requer diálogo injetado");
+        case "file.save": {
+          if (state.activeHandle === undefined) return;
+          await this.saveDocument(state.activeHandle);
+          break;
+        }
+        case "edit.undo": {
+          if (state.activeHandle === undefined) return;
+          await this.undoDocument(state.activeHandle);
+          break;
+        }
+        case "edit.redo": {
+          if (state.activeHandle === undefined) return;
+          await this.redoDocument(state.activeHandle);
+          break;
+        }
+        default:
+          throw new EditorArgumentError("unknown-command", `comando desconhecido: ${id}`);
+      }
     },
 
     dispose(): void {

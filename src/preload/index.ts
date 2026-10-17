@@ -14,6 +14,7 @@
  */
 import { contextBridge, ipcRenderer } from "electron";
 import type {
+  CommandListResult,
   DocumentChangedEvent,
   DocumentHandle,
   DocumentHighlight,
@@ -68,6 +69,12 @@ export interface ScribePreloadApi {
   nextSignalId(): number;
   snapshot(): Promise<MainThreadBusy>;
   onDocumentChanged(callback: (event: DocumentChangedEvent) => void): () => void;
+  /** Lista todos os comandos registrados (para a Command Palette). */
+  listCommands(): Promise<CommandListResult>;
+  /** Executa um comando pelo id. */
+  executeCommand(commandId: string): Promise<void>;
+  /** Escuta ações de menu enviadas pelo processo principal (menu nativo). */
+  onMenuAction(callback: (action: string) => void): () => void;
 }
 
 // Duplicado de propósito: o preload não importa `src/shared` em runtime (sandbox).
@@ -76,6 +83,7 @@ const CHANNEL_EVENT = "scribe:ipc:event";
 const IPC_VERSION = "1.0";
 const CHANNEL_PING = "scribe:host:ping";
 const CHANNEL_READY = "scribe:host:ready";
+const CHANNEL_MENU_ACTION = "scribe:menu:action";
 
 interface RequestEnvelope {
   readonly v: string;
@@ -196,6 +204,15 @@ const api: ScribePreloadApi = {
     return () => {
       ipcRenderer.removeListener(CHANNEL_EVENT, listener);
     };
+  },
+  listCommands: (): Promise<CommandListResult> =>
+    call<CommandListResult>("command.list", []),
+  executeCommand: (commandId: string): Promise<void> =>
+    call<void>("command.execute", [commandId]),
+  onMenuAction: (callback: (action: string) => void): (() => void) => {
+    const listener = (_event: unknown, action: string): void => { callback(action); };
+    ipcRenderer.on(CHANNEL_MENU_ACTION, listener);
+    return () => { ipcRenderer.removeListener(CHANNEL_MENU_ACTION, listener); };
   },
 };
 

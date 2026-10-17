@@ -21,3 +21,4 @@ export * from "./search-contract";
 export * from "./selection-contract";
 export * from "./theme-contract";
 export * from "./themes";
+export * from "./command-contract";

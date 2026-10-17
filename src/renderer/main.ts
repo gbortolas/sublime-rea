@@ -22,6 +22,7 @@ import {
   LIGHT_THEME,
 } from "../shared";
 import type {
+  CommandListResult,
   Disposable,
   DocumentHighlight,
   EditorTheme,
@@ -42,6 +43,8 @@ import {
   createDebounceScheduler,
 } from "./find-bar";
 import type { FindBarApi, FindBarState } from "./find-bar";
+import { attachCommandPalette } from "./command-palette";
+import type { CommandPaletteApi, CommandPaletteBinding } from "./command-palette";
 import {
   Canvas2DBackend,
   GlyphAtlas,
@@ -316,6 +319,9 @@ interface ScribeBridge {
   nextSignalId(): number;
   snapshot(): Promise<unknown>;
   onDocumentChanged(callback: (event: { handle: number; revision: number }) => void): () => void;
+  listCommands(): Promise<CommandListResult>;
+  executeCommand(commandId: string): Promise<void>;
+  onMenuAction(callback: (action: string) => void): () => void;
 }
 
 function readBridge(): ScribeBridge | undefined {
@@ -1355,7 +1361,61 @@ export async function bootRenderer(): Promise<boolean> {
       ? attachFindBar({ bridge, controller, source, viewport, renderer, surface })
       : undefined;
 
-  attachInputListeners(surface, viewport, renderer, controller, findBar);
+  const commandPaletteApi: CommandPaletteApi | undefined =
+    bridge !== undefined
+      ? {
+          listCommands: () => bridge.listCommands(),
+          executeCommand: (commandId: string) => bridge.executeCommand(commandId),
+        }
+      : undefined;
+
+  const handleMenuAction = (action: string): void => {
+    switch (action) {
+      case "find.open":
+        if (findBar !== undefined && !findBar.model.isOpen) {
+          findBar.model.open();
+        }
+        break;
+      case "view.toggleTheme":
+        document.getElementById("status-theme")?.click();
+        break;
+    }
+  };
+
+  const palette =
+    commandPaletteApi !== undefined
+      ? attachCommandPalette({
+          api: commandPaletteApi,
+          onExecute: (command) => {
+            // Fecha a palette antes de executar
+            palette?.model.close();
+            // UI actions tratadas localmente no renderer
+            if (command.id === "find.open") {
+              if (findBar !== undefined && !findBar.model.isOpen) {
+                findBar.model.open();
+              }
+            } else if (["view.toggleTheme", "edit.cut", "edit.copy", "edit.paste", "edit.selectAll"].includes(command.id)) {
+              handleMenuAction(command.id);
+            } else {
+              // Comandos de core: file.*, edit.undo/redo — executa via IPC
+              void commandPaletteApi.executeCommand(command.id).catch((error: unknown) => {
+                console.error("Scribe: falha ao executar comando", command.id, error);
+              });
+            }
+            // Foca o canvas de volta
+            surface.focus();
+          },
+        })
+      : undefined;
+
+  // Escuta ações de menu nativo enviadas pelo processo principal
+  if (bridge !== undefined && typeof bridge.onMenuAction === "function") {
+    bridge.onMenuAction((action: string) => {
+      handleMenuAction(action);
+    });
+  }
+
+  attachInputListeners(surface, viewport, renderer, controller, findBar, palette);
 
   // Toggle tema (Ctrl+Shift+T)
   const themeBtn = document.getElementById("status-theme");
@@ -1593,6 +1653,7 @@ function attachInputListeners(
   renderer: ScribeRenderer,
   controller: DocumentController | undefined,
   findBar: FindBarBinding | undefined,
+  palette: CommandPaletteBinding | undefined,
 ): void {
   const lineHeight = Math.ceil(TEXT_STYLE.sizePx * 1.4);
   const currentLine = (): number => Math.floor(viewport.scrollOffsetPx() / lineHeight);
@@ -1607,6 +1668,25 @@ function attachInputListeners(
   );
 
   let mouseDragAnchor: number | undefined;
+
+  // Command palette: Ctrl+Shift+P interceptado antes de chegar ao canvas.
+  const openPalette = (): void => {
+    if (palette === undefined) return;
+    // Se o find bar estiver aberto, fecha ele primeiro
+    if (findBar !== undefined && findBar.model.isOpen) {
+      findBar.model.close();
+    }
+    void palette.model.open().then(() => {
+      const input = document.getElementById("palette-input");
+      if (input instanceof HTMLInputElement) input.focus();
+    });
+  };
+  document.addEventListener("keydown", (event: KeyboardEvent) => {
+    if ((event.ctrlKey || event.metaKey) && event.shiftKey && !event.altKey && (event.key === "p" || event.key === "P")) {
+      event.preventDefault();
+      openPalette();
+    }
+  });
 
   // Scrollbar: mousedown no track/thumb (deve vir antes do mousedown do texto para capturar primeiro).
   surface.addEventListener("mousedown", (event: MouseEvent) => {

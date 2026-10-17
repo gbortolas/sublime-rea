@@ -320,3 +320,74 @@ body {
   font-size: 0.78rem;
   color: #666;
 }
+
+/* ── Command Palette ──────────────────────────────────────────── */
+#command-palette {
+  pointer-events: auto;
+  position: absolute;
+  top: 2rem;
+  left: 50%;
+  transform: translateX(-50%);
+  width: 480px;
+  background: #2b2d30;
+  border: 1px solid #3a3d41;
+  border-radius: 6px;
+  box-shadow: 0 8px 24px rgba(0,0,0,0.4);
+  z-index: 20;
+  overflow: hidden;
+}
+
+#command-palette[hidden] {
+  display: none;
+}
+
+#palette-input {
+  width: 100%;
+  padding: 0.6rem 0.75rem;
+  border: none;
+  border-bottom: 1px solid #3a3d41;
+  background: transparent;
+  color: #e0e0e0;
+  font-size: 0.9rem;
+  outline: none;
+  box-sizing: border-box;
+}
+
+#palette-input::placeholder {
+  color: #666;
+}
+
+#palette-results {
+  max-height: 280px;
+  overflow-y: auto;
+}
+
+.palette-item {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 0.4rem 0.75rem;
+  cursor: pointer;
+  font-size: 0.85rem;
+}
+
+.palette-item:hover,
+.palette-item.selected {
+  background: #3a3d41;
+}
+
+.palette-item .cmd-label {
+  color: #e0e0e0;
+}
+
+.palette-item .cmd-accel {
+  color: #666;
+  font-size: 0.75rem;
+  margin-left: 1rem;
+}
+
+.palette-item .cmd-category {
+  color: #7fb3ff;
+  font-size: 0.7rem;
+  margin-left: 0.5rem;
+}

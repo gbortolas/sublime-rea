@@ -330,6 +330,26 @@ async function dispatchIpc(
       const replacement = requireString(request.args[2], "search.replaceAll", "replacement");
       return core.replaceAll(handle, query, replacement, signal);
     }
+    case "command.list":
+      return core.listCommands();
+    case "command.execute": {
+      const commandId = requireString(request.args[0], "command.execute", "commandId");
+      // file.open precisa do dialog injetado (não vive no core)
+      if (commandId === "file.open") {
+        if (deps.dialog === undefined) {
+          throw new IpcProtocolError(
+            "dialog-unavailable",
+            "command.execute: file.open requer diálogo",
+          );
+        }
+        const path = await deps.dialog.showOpenDialog();
+        if (path !== null) {
+          await core.openDocument(path, signal);
+        }
+        return;
+      }
+      return core.executeCommand(commandId);
+    }
     default:
       // Inalcançável: `parseIpcRequest` já validou o método; guarda contra regressão.
       throw new IpcProtocolError("unknown-method", "método desconhecido");
