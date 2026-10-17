@@ -50,7 +50,7 @@ Funcionalidades de editor "profissional" — muitas dependem de arquitetura já 
 | # | Feature | Esforço | Depende de | Descrição |
 |---|---------|---------|------------|-----------|
 | 10 | **Plugin host** (extensão isolada) | G | ExtensionHost existe | O `utilityProcess` + handshake + OPS bridge existem mas nunca rodaram com uma extensão real |
-| 11 | **Command palette** (Ctrl+Shift+P) | M | CommandBus existe | Busca fuzzy em lista de comandos registrados, execução pelo bus |
+| 11 | **Command palette** (Ctrl+Shift+P) | M | CommandBus existe | Busca fuzzy em lista de comandos registrados, execução pelo bus | ✅ |
 | 12 | **Go to line** (Ctrl+G) | P | caret existe | Diálogo minimalista, navega pra linha digitada |
 | 13 | **Auto-pair** (aspas/chaves/colchetes) | P | inserção existe | Fechamento automático, pular fechamento existente, backspace inteligente |
 | 14 | **Bracket matching** | P | buffer scanning | Highlight do par correspondente quando cursor está em bracket |
