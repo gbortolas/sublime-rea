@@ -50,8 +50,8 @@ máx 2^31−1). Fatos descobertos no `dist/` do `rea-agents@6.5.0` — detalhes 
 ## 📐 P1 — Fase 1 (conteúdo da análise) — **em curso**
 
 Dividir por pergunta (o skill recomenda decompor em escopos independentes, com ledger de Evidence
-IDs). Cada item vira uma seção da spec técnica abstrata. **Fase 1 FECHADA** — P1.5 entregue; o
-próximo trabalho é a **Fase 2** (P2.1).
+IDs). Cada item vira uma seção da spec técnica abstrata. **Fase 1 FECHADA** — P1.5 entregue.
+*(Fases 2 e 3 também já fechadas; o trabalho corrente é a **Fase 3.2 / P2.4** — ver §P2 abaixo.)*
 
 - [x] **P1.1 — Estrutura de buffer** ✅ entregue: [`docs/analysis/buffer-structure.md`](analysis/buffer-structure.md).
       Achado: classe **`TextBuffer`** (facade, RTTI) delega a um objeto interno **anônimo** com
@@ -146,17 +146,42 @@ próximo trabalho é a **Fase 2** (P2.1).
       **Scribe**; aplicado em `TECHNICAL_SPECIFICATION.md` ("Scribe / High-Performance Electron Text
       Editor Core"), em [`docs/architecture/`](architecture/) e no `README.md`. O repositório segue
       **`sublime-rea`** (nome do repo, não do produto).
-- [ ] **P2.4 — Fase 3.2: primeira fatia vertical end-to-end** ← **próximo**. O scaffold está de pé e
-      o smoke do `electron .` sobe (main loga `Scribe: MainThreadBusy`); falta o app **fazer** algo
-      útil de ponta a ponta:
-      - [ ] **Abrir arquivo real** sem `?file=`: argumento de linha de comando + `dialog` (hoje o
-            renderer só recebe documento com `?file=` no contrato mínimo)
-      - [ ] **Fiar o cancelamento**: o contrato já modela `AbortSignal`/`IpcCancel` mas nenhuma
-            operação longa usa (nada a cancelar ainda)
-      - [ ] **Realce de sintaxe** ponta a ponta: `PackageResolver` → gramática → tokens → `RenderPipeline`
-            (o scaffold tem o consumidor de tokens, não o produtor)
-      - [ ] **Undo/redo visível** (teclas + status bar) sobre o `UndoStack` já testado
-      - [ ] **Busca/substituição** na lane `background` (primeiro uso real de lane não-`input`)
+- [~] **P2.4 — Fase 3.2: primeira fatia vertical end-to-end** ← **em andamento** (3 de 4 frentes já
+      provadas ponta a ponta):
+      - [x] **Abrir arquivo real** sem `?file=` ✅ — arg de linha de comando + `dialog.showOpenDialog`
+            (IPC `document.openDialog`); `Ctrl/Cmd+O` abre **pós-boot** também. (`04096ae`)
+      - [x] **Fiar o cancelamento** ✅ — registro `signalId → AbortController` no `main`, `IpcCancel` no
+            mesmo canal, abort vira erro tipado `cancelled` (sem stack); `Esc`/troca de arquivo aborta a
+            abertura em voo. (`04096ae`)
+      - [x] **Undo/redo visível** ✅ — `EditorCore.undoDocument`/`redoDocument`/`undoStateOf` + IPC
+            `editor.undo|redo|undoState` + atalhos (`Ctrl/Cmd+Z`, `+Shift+Z`, `+Y`) e status bar.
+            (`04096ae`)
+      - [x] **Realce de sintaxe** ponta a ponta ✅ — `src/core/syntax/**` (YAML de subconjunto +
+            gramática + tokenizer + theme + registry), `syntax.highlight` no IPC e coloração por escopo
+            em `buildInstances`; fixture **nossa** `assets/grammars/scribe-demo.sublime-syntax`.
+            **MAS** com achados de revisão pendentes → ver **P2.4b**. (`2a169be`)
+      - [ ] **Busca/substituição** na lane `background` (primeiro uso real de lane não-`input`) —
+            **única frente restante**. Ainda **não** existe API de busca (`TaskResultMap` não tem kind
+            `search`); precisa de novo `TaskKind` + worker em `worker-entry.ts` + contrato IPC + serviço
+            de busca no `core/editor` consumindo `pool.run`/`scheduler.post("background", …)`.
+
+- [ ] **P2.4b — Corrigir achados de revisão da Slice D** ← **próximo**. Um reviewer independente achou
+      **2 blockers baratos + 1 risco de segurança** que ficaram **sem correção** (o `fixer` foi
+      interrompido). Por severidade:
+      - **ALTO** — cache de destaque chaveado **só por `revision`**: se `highlightDocument` roda antes de
+            `syntaxReady`, grava spans vazios e **nunca recomputa** (`src/core/editor/editor-core.ts`).
+            → incluir identidade/versão da gramática na chave (ou invalidar quando `syntaxReady` mudar).
+      - **ALTO** — **sem guarda de falha**: gramática que registra mas não compila devolve `null` → um
+            IPC + `console.warn` **por frame** (`src/renderer/main.ts`). → guardar "falhou nesta
+            revision" + limitar tentativas.
+      - **ALTO** — tokenização **síncrona no `main`** sem teto: regex com quantificador aninhado +
+            texto do usuário = freeze da app (`src/core/syntax/grammar.ts`). → mitigação *bounded*:
+            teto de tamanho de linha/documento com **degradação explícita** (cair em cor default).
+      - **MÉDIO/BAIXO** — `HighlightStore` aceita resposta de mesmo `revision` cobrindo range diferente
+            (fora de ordem); `readBridge` passou a **exigir** `highlight` (quebra preload antigo);
+            `visiting` não é limpo no tokenizer; trecho sem regra usa `grammar.scope` em vez do escopo do
+            contexto do topo; captura com grupo inexistente ignorada em silêncio; re-registro não limpa
+            `byExtension` obsoleto; formatação quebrada em `src/renderer/main.ts`.
 
 ---
 

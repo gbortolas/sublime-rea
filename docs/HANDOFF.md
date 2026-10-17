@@ -1,6 +1,6 @@
 # HANDOFF — sublime-rea
 
-> **Documento de handoff entre sessões** (leia antes de retomar). Atualizado em **2026-10-16**.
+> **Documento de handoff entre sessões** (leia antes de retomar). Atualizado em **2026-10-17**.
 > Specs do projeto: [`SPECIFICATION.md`](SPECIFICATION.md) · [`TECHNICAL_SPECIFICATION.md`](TECHNICAL_SPECIFICATION.md)
 > Backlog vivo: [`BACKLOG.md`](BACKLOG.md)
 
@@ -18,7 +18,10 @@ IPC) ✅ · **FASE 1 FECHADA** (P1.1 buffer ✅ · P1.2 concorrência ✅ · P1.
 P1.5 ledger consolidado ✅ · P1.6 empacotamento ✅) · **FASE 2 FECHADA** (P2.1: `docs/architecture/`,
 6 docs + README, **61 decisões `DEC-*`**) · **FASE 3 FECHADA** (P2.2: scaffold `src/` do **Scribe** em
 Electron/TS — 6 módulos de core + costura main↔core↔renderer + build, `docs/scaffold/`) — codinome
-decidido: **Scribe** (**P2.3** ✅) · **próximo: P2.4** (fatia vertical end-to-end).
+decidido: **Scribe** (**P2.3** ✅) · **P2.4 EM ANDAMENTO** (fatia vertical end-to-end) — ✅ **Slices
+A/B/C** (`04096ae`: abrir arquivo CLI+`dialog` · undo/redo visível · cancelamento e2e) · ✅ **Slice D**
+(`2a169be`: realce de sintaxe e2e — **gates verdes, mas com achados de revisão PENDENTES**) · ⏳ **Slice
+E** (busca na lane `background`) não iniciada.
 
 **✅ Passo operacional resolvido (2026-10-16).** O `setup.py` foi rodado e o MCP `rea` foi relançado
 **já com `REA_GHIDRA_STARTUP_TIMEOUT_MS=900000`** (confirmado em `/proc/*/environ`) — **não** é mais
@@ -32,14 +35,18 @@ python3 setup/setup.py        # idempotente: reescreve setup/env.sh + environmen
 Sem o deadline maior, `open_binary`/`analyze` **via MCP** volta a estourar os 330 s (a análise leva
 ~355 s).
 
-**Próxima tarefa recomendada:** **P2.4 — primeira fatia vertical end-to-end** (ver
-[`BACKLOG.md`](BACKLOG.md) §P2): o scaffold está de pé e o smoke do `electron .` sobe (o main loga
-`Scribe: MainThreadBusy`), mas falta o app **fazer** algo útil de ponta a ponta. Ordem sugerida:
-**abrir arquivo real** (CLI/`dialog`; hoje o renderer só recebe documento com `?file=`) → **realce de
-sintaxe** (`PackageResolver` → gramática → tokens → `RenderPipeline`) → **undo/redo visível** (teclas)
-→ **busca** na lane `background`. O código está em `src/`; as convenções e as costuras congeladas estão
-em [`docs/scaffold/00-convencoes-e-costuras.md`](scaffold/00-convencoes-e-costuras.md) — **leia esse
-doc antes de mexer em `src/`**.
+**Próxima tarefa recomendada:** **corrigir os achados de revisão da Slice D** (realce de sintaxe) e
+depois fechar o **P2.4** (ver [`BACKLOG.md`](BACKLOG.md) §P2.4). A fatia vertical já provou o caminho
+ponta a ponta em 3 das 4 frentes — **abrir arquivo real** (CLI + `dialog`), **undo/redo visível**
+(teclas + status bar) e **cancelamento** (`AbortSignal`/`IpcCancel` fiados) ✅ — e o **realce de
+sintaxe** entrou ✅, mas um reviewer independente achou **2 blockers baratos + 1 risco** que ficaram
+**sem correção** (o `fixer` foi interrompido): chave do cache de destaque por `revision` sem identidade
+de gramática; retry em tempestade quando a gramática registra mas não compila; e tokenização síncrona
+no main (risco de DoS por regex). Ver a lista priorizada em [`BACKLOG.md`](BACKLOG.md) §P2.4b. **Depois**
+disso, a única frente restante é a **busca/substituição na lane `background`**. O código está em
+`src/`; as convenções e as costuras congeladas estão em
+[`docs/scaffold/00-convencoes-e-costuras.md`](scaffold/00-convencoes-e-costuras.md) — **leia esse doc
+antes de mexer em `src/`**.
 
 > ✅ **Pegadinha resolvida (2026-10-16, P3.9):** o `setup.py` agora **detecta** um JDK ≥ 21
 > compatível (`JAVA_HOME`, PATH, sdkman, `/usr/lib/jvm`) e escreve um **`export JAVA_HOME=…` ativo**
@@ -353,6 +360,25 @@ polling, validação de handle, clean-room) → **aderente**, sem bloqueadores.
 
 **Pré-requisito novo de ambiente:** **Node ≥ 20 + npm** (o scaffold usa Node 24) — o `setup.py` **não**
 instala Node. `npm install` traz `electron@38`, `typescript`, `vitest`, `eslint` e `esbuild`.
+
+### Fase 3.2 (P2.4) — primeira fatia vertical end-to-end
+
+**Slice A/B/C** (`04096ae`) — **abrir arquivo real** (arg de CLI + `dialog.showOpenDialog` via
+`document.openDialog`), **undo/redo visível** (`Ctrl/Cmd+Z`, `Ctrl/Cmd+Shift+Z`, `Ctrl/Cmd+Y` +
+elementos `#status-undo`/`#status-redo`) e **cancelamento end-to-end** (registro `signalId →
+AbortController` no `main`, `IpcCancel` no mesmo canal, `Esc`/troca de arquivo aborta a abertura em
+voo). Novos testes: `test/document-path.test.ts`, `test/ipc-cancel.test.ts`. Gates: typecheck/test/lint/
+build verdes (**263 testes / 33 arquivos**).
+
+**Slice D** (`2a169be`) — **realce de sintaxe ponta a ponta**: contrato novo
+`src/shared/syntax-contract.ts`; módulo novo `src/core/syntax/**` (leitor de subconjunto YAML,
+compilador de gramática com `main`/`prototype`/`include`/`extends`, tokenizer de máquina de estados,
+`ThemeResolver` por especificidade de escopo, `GrammarRegistry`); costura em `buildInstances`
+(`src/core/render/scene.ts`) + `EditorCore.highlightDocument` (cache por revisão); IPC `syntax.highlight`
+(`ipc-contract.ts`/`main`/`preload`); fixture **nossa** em `assets/grammars/scribe-demo.sublime-syntax`.
+Gates: typecheck/test/lint/build verdes (**319 testes / 39 arquivos**).
+⚠️ **Pendente:** um reviewer independente achou **2 blockers baratos + 1 risco** que **não** foram
+corrigidos (o `fixer` foi interrompido) — lista priorizada em [`BACKLOG.md`](BACKLOG.md) §P2.4b.
 
 ---
 
