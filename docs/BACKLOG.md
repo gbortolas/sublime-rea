@@ -458,7 +458,16 @@ Problemas identificados ao testar o AppImage pela primeira vez:
       - **519 testes / 50 arquivos** (baseline 449; +70: 4 testes LSP com 55 + 15 integração)
       - **Limitações conhecidas**: servidores precisam estar no `$PATH`; full document sync;
         sem signatureHelp / documentSymbol / references / definition / codeAction
-- [ ] **P4#17 — Diagnósticos no gutter** (ícones de erro/warning à esquerda das linhas)
+- [x] **P4#17 — Diagnósticos no gutter** ✅ **fechado** (2026-10-18). Ícones de severidade
+      no gutter (faixa de números de linha) para diagnósticos LSP:
+      - **Error** — círculo vermelho com X
+      - **Warning** — triângulo âmbar com !
+      - **Info** — círculo azul com "i"
+      - **Hint** — bolinha cinza
+      - Agrupa por linha (mostra o ícone da maior severidade)
+      - Implementado como extensão de `renderDiagnostics()` — mesmo overlay Canvas 2D
+        que desenha os squiggly underlines
+      - Gates: typecheck/lint/test/build exit 0 · 519 testes / 50 arquivos (mesmo baseline)
 - [ ] **P4#18 — Ir para definição** (`textDocument/definition` via atalho F12 ou Ctrl+click)
 - [ ] **P4#19 — Signature help** (`textDocument/signatureHelp` ao digitar `(`)
 - [ ] **P4#20 — Document symbols** (`textDocument/documentSymbol` na command palette)

@@ -1460,9 +1460,8 @@ class ScribeRenderer {
   }
 
   /**
-   * Desenha squiggly underlines para diagnósticos LSP do documento ativo.
-   * Usa a API Canvas 2D diretamente sobre o canvas (funciona em cima do que
-   * o pipeline já desenhou).
+   * Desenha squiggly underlines + ícones no gutter para diagnósticos LSP.
+   * Usa a API Canvas 2D diretamente sobre o canvas (overlay após o pipeline).
    */
   private renderDiagnostics(): void {
     if (this.activeHandle === undefined) return;
@@ -1484,34 +1483,17 @@ class ScribeRenderer {
     const ctx = this.canvas.getContext("2d");
     if (ctx === null) return;
 
-    const gutterWidth = (() => {
-      const digits = Math.max(1, Math.floor(Math.log10(Math.max(1, this.source.lineCount()))) + 1);
-      return digits * 9 + 16;
-    })();
+    const gutterDigits = Math.max(1, Math.floor(Math.log10(Math.max(1, this.source.lineCount()))) + 1);
+    const gutterWidth = gutterDigits * 9 + 16;
     const paddingLeft = gutterWidth + 8;
     const paddingTop = 8;
     const charW = this.style.sizePx * 0.6;
 
     ctx.save();
 
+    // ── Squiggly underlines (como antes) ──────────────────────────────────
     for (const diag of visible) {
-      // Determina cor por severidade
-      let color: string;
-      switch (diag.severity) {
-        case "error":
-          color = "#f14c4c";
-          break;
-        case "warning":
-          color = "#cca700";
-          break;
-        case "info":
-          color = "#3794ff";
-          break;
-        case "hint":
-          color = "#6e6e6e";
-          break;
-      }
-
+      const color = this.diagColor(diag.severity);
       const startY = diag.range.startLine * lineHeight + lineHeight - 2 - scrollPx;
       const startX = paddingLeft + diag.range.startCol * charW;
       const endX = paddingLeft + diag.range.endCol * charW;
@@ -1519,8 +1501,6 @@ class ScribeRenderer {
 
       ctx.strokeStyle = color;
       ctx.lineWidth = 1;
-
-      // Desenha uma linha ondulada (squiggly) simples
       const squigglyY = startY + paddingTop;
       ctx.beginPath();
       const segments = Math.max(1, Math.floor(width / 6));
@@ -1533,7 +1513,110 @@ class ScribeRenderer {
       ctx.stroke();
     }
 
+    // ── Ícones no gutter ─────────────────────────────────────────────────
+    // Agrupa por linha (usa a linha de início do range) e pega a maior severidade
+    const SEVERITY_RANK: Record<string, number> = {
+      error: 4,
+      warning: 3,
+      info: 2,
+      hint: 1,
+    };
+    const lineMaxSeverity = new Map<number, "error" | "warning" | "info" | "hint">();
+    for (const diag of visible) {
+      const line = diag.range.startLine;
+      const current = lineMaxSeverity.get(line);
+      if (current === undefined || (SEVERITY_RANK[diag.severity] ?? 0) > (SEVERITY_RANK[current] ?? 0)) {
+        lineMaxSeverity.set(line, diag.severity);
+      }
+    }
+
+    const iconSize = 12;
+    const iconX = Math.round((gutterWidth - iconSize) / 2);
+
+    for (const [line, severity] of lineMaxSeverity) {
+      const y = line * lineHeight + Math.round((lineHeight - iconSize) / 2) - scrollPx + paddingTop;
+      if (y + iconSize < 0 || y > this.viewportHeight) continue;
+
+      ctx.save();
+      const color = this.diagColor(severity);
+
+      switch (severity) {
+        case "error": {
+          // Círculo vermelho com X
+          const cx = iconX + iconSize / 2;
+          const cy = y + iconSize / 2;
+          const r = iconSize / 2;
+          ctx.beginPath();
+          ctx.arc(cx, cy, r, 0, Math.PI * 2);
+          ctx.fillStyle = color;
+          ctx.fill();
+          // X branco
+          ctx.strokeStyle = "#ffffff";
+          ctx.lineWidth = 2;
+          ctx.beginPath();
+          const inset = r * 0.35;
+          ctx.moveTo(cx - inset, cy - inset);
+          ctx.lineTo(cx + inset, cy + inset);
+          ctx.moveTo(cx + inset, cy - inset);
+          ctx.lineTo(cx - inset, cy + inset);
+          ctx.stroke();
+          break;
+        }
+        case "warning": {
+          // Triângulo amarelo com !
+          const cx = iconX + iconSize / 2;
+          const topY = y;
+          const botY = y + iconSize;
+          ctx.beginPath();
+          ctx.moveTo(cx, topY);
+          ctx.lineTo(iconX + iconSize, botY);
+          ctx.lineTo(iconX, botY);
+          ctx.closePath();
+          ctx.fillStyle = color;
+          ctx.fill();
+          // ! branco
+          ctx.fillStyle = "#ffffff";
+          ctx.font = `bold ${iconSize * 0.7}px sans-serif`;
+          ctx.textAlign = "center";
+          ctx.textBaseline = "middle";
+          ctx.fillText("!", cx, y + iconSize * 0.55);
+          break;
+        }
+        default: {
+          // info/hint: círculo menor com "i" / bolinha
+          const cx = iconX + iconSize / 2;
+          const cy = y + iconSize / 2;
+          const r = iconSize / 2;
+          ctx.beginPath();
+          ctx.arc(cx, cy, r, 0, Math.PI * 2);
+          ctx.fillStyle = color;
+          ctx.fill();
+          if (severity === "info") {
+            ctx.fillStyle = "#ffffff";
+            ctx.font = `bold ${iconSize * 0.7}px sans-serif`;
+            ctx.textAlign = "center";
+            ctx.textBaseline = "middle";
+            ctx.fillText("i", cx, cy + 1);
+          }
+          break;
+        }
+      }
+
+      ctx.restore();
+    }
+
     ctx.restore();
+  }
+
+  /** Retorna a cor hex para uma severidade de diagnóstico. */
+  private diagColor(severity: string): string {
+    switch (severity) {
+      case "error": return "#f14c4c";
+      case "warning": return "#cca700";
+      case "info": return "#3794ff";
+      case "hint": return "#6e6e6e";
+      default: return "#6e6e6e";
+    }
   }
 }
 
