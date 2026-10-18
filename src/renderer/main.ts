@@ -20,6 +20,7 @@ import {
   toDisposable,
   DARK_THEME,
   LIGHT_THEME,
+  BUILTIN_THEMES,
 } from "../shared";
 import type {
   CommandListResult,
@@ -59,6 +60,7 @@ import {
   type CaretPosition,
   type GlyphBitmap,
   type GlyphRasterizer,
+  type GlyphTinter,
   type LineLayout,
   type LineSource,
   type SceneHighlight,
@@ -66,7 +68,7 @@ import {
   type TextMeasurer,
   buildInstances,
 } from "../core/render";
-import { createDefaultTheme } from "../core/syntax";
+import { createSyntaxTheme } from "../core/syntax";
 
 const DEMO_LINE_COUNT = 200;
 const GLYPH_CHUNK = 2048;
@@ -111,24 +113,75 @@ const AUTO_PAIRS: Record<string, string> = {
 };
 const CLOSING = new Set(Object.values(AUTO_PAIRS));
 
-/** Tema ativo do editor (default: escuro). Guardado em sessionStorage para persistência entre pageloads. */
+/** Ícones criados em JS (mesmo desenho dos do HTML; herdam `currentColor`). */
+const ICON_CHEVRON_RIGHT =
+  '<svg viewBox="0 0 16 16" width="12" height="12" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><path d="M6 3.5 10.5 8 6 12.5"/></svg>';
+const ICON_CLOSE =
+  '<svg viewBox="0 0 16 16" width="12" height="12" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" aria-hidden="true" focusable="false"><path d="M4 4l8 8M12 4l-8 8"/></svg>';
+
+/**
+ * Tema ativo do editor (default: escuro), persistido em `sessionStorage`.
+ *
+ * A persistência guarda só `name`/`kind` e **reidrata a paleta do builtin** correspondente: assim
+ * uma paleta antiga (sem as chaves novas da casca) não fica congelada entre versões do app.
+ */
 function loadTheme(): EditorTheme {
   try {
     const raw = sessionStorage.getItem("scribe-theme");
     if (raw !== null) {
-      const parsed = JSON.parse(raw) as EditorTheme;
-      if (parsed && typeof parsed === "object" && "kind" in parsed) return parsed;
+      const parsed = JSON.parse(raw) as Partial<EditorTheme>;
+      const match = BUILTIN_THEMES.find(
+        (t) => t.name === parsed.name || t.kind === parsed.kind,
+      );
+      if (match !== undefined) return match;
     }
-  } catch { /* fallback */ }
+  } catch {
+    /* fallback silencioso: sessionStorage indisponível ou JSON inválido */
+  }
   return DARK_THEME;
 }
 function saveTheme(theme: EditorTheme): void {
-  sessionStorage.setItem("scribe-theme", JSON.stringify(theme));
+  sessionStorage.setItem("scribe-theme", JSON.stringify({ name: theme.name, kind: theme.kind }));
 }
 const THEME: { current: EditorTheme } = { current: loadTheme() };
 
 function rgbToCss(rgba: RGBA): string {
   return `#${(rgba >>> 0).toString(16).padStart(8, "0").slice(0, 6)}`;
+}
+
+/** `rgba(...)` a partir do `RGBA` empacotado (0xRRGGBBAA) e de um alfa próprio. */
+function rgbaToCss(rgba: RGBA, alpha: number): string {
+  const v = rgba >>> 0;
+  return `rgba(${(v >>> 24) & 0xff}, ${(v >>> 16) & 0xff}, ${(v >>> 8) & 0xff}, ${alpha})`;
+}
+
+/**
+ * Espelha o `EditorTheme` ativo em custom properties CSS (e no `data-theme` do `<html>`).
+ *
+ * É o que faz a **casca** acompanhar o tema junto com o canvas: antes o toggle só pintava o `body`,
+ * que fica escondido atrás do canvas. Os estados (hover/seleção/texto secundário) são derivados em
+ * CSS a partir de `--s-fg`/`--s-accent`, então só as cores-base precisam vir daqui.
+ */
+function applyChromeTheme(theme: EditorTheme): void {
+  const root = document.documentElement;
+  const c = theme.colors;
+  const vars: ReadonlyArray<readonly [string, string]> = [
+    ["--s-bg", rgbToCss(c.background)],
+    ["--s-fg", rgbToCss(c.foreground)],
+    ["--s-accent", rgbToCss(c.accent)],
+    ["--s-gutter", rgbToCss(c.gutter)],
+    ["--s-gutter-fg", rgbToCss(c.gutterForeground)],
+    ["--s-border", rgbToCss(c.border)],
+    ["--s-activitybar", rgbToCss(c.activityBar)],
+    ["--s-sidebar", rgbToCss(c.sidebar)],
+    ["--s-statusbar", rgbToCss(c.statusBar)],
+    ["--s-tabbar", rgbToCss(c.tabBar)],
+    ["--s-tabactive", rgbToCss(c.tabActive)],
+    ["--s-tabinactive", rgbToCss(c.tabInactive)],
+  ];
+  for (const [name, value] of vars) root.style.setProperty(name, value);
+  root.dataset.theme = theme.kind;
+  root.style.colorScheme = theme.kind;
 }
 
 // ---- rasterização/medição no renderer (fora da main thread seria o ideal — DEC-REN-3) ----------
@@ -205,6 +258,62 @@ function createAtlasSurface(size: number): { surface: AtlasSurface; canvas: HTML
     },
   };
   return { surface, canvas };
+}
+
+/** Bloco de altura (px) das cópias tingidas: folga para não re-tingir a cada glifo novo. */
+const TINT_BLOCK = 256;
+
+/** Tingidor do atlas com descarte explícito (usado na troca de tema). */
+interface AtlasTinter extends GlyphTinter {
+  /** Descarta as cópias tingidas (ex.: as cores do tema mudaram). */
+  clear(): void;
+}
+
+/**
+ * Cópias tingidas do atlas para o backend `canvas2d`.
+ *
+ * O atlas guarda **tinta branca + alpha** (a cor é de cada instância) e o `Canvas2DBackend` só
+ * aplica `globalAlpha` — sem tingir, todo texto sairia branco: legível por acidente sobre fundo
+ * escuro e invisível sobre fundo claro. Aqui a tinta branca é trocada pela cor da instância com
+ * um `source-in` sobre uma cópia do atlas.
+ *
+ * Custo: **uma cópia por RGB usado**, recortada à faixa viva do atlas (`usedHeight`, arredondada
+ * para cima em blocos de `TINT_BLOCK` para não re-tingir a cada glifo novo) — a página inteira
+ * (1024²) só é copiada se o atlas realmente chegar lá. Quando o atlas cresce além do bloco já
+ * copiado, as cópias são descartadas: os glifos novos não estariam nelas.
+ */
+function createAtlasTinter(atlas: GlyphAtlas, source: HTMLCanvasElement): AtlasTinter {
+  const copies = new Map<number, HTMLCanvasElement>();
+  let copiedHeight = 0;
+  return {
+    imageFor(rgba: RGBA): CanvasImageSource | undefined {
+      const used = atlas.usedHeight;
+      if (used === 0) return undefined;
+      const needed = Math.min(source.height, Math.ceil(used / TINT_BLOCK) * TINT_BLOCK);
+      if (needed > copiedHeight) {
+        copies.clear();
+        copiedHeight = needed;
+      }
+      const rgb = rgba >>> 8;
+      const hit = copies.get(rgb);
+      if (hit !== undefined) return hit;
+      const canvas = document.createElement("canvas");
+      canvas.width = source.width;
+      canvas.height = copiedHeight;
+      const ctx = canvas.getContext("2d");
+      if (ctx === null) return undefined;
+      ctx.drawImage(source, 0, 0);
+      // `source-in` troca a tinta branca pela cor, preservando o alpha (cobertura) do glifo.
+      ctx.globalCompositeOperation = "source-in";
+      ctx.fillStyle = rgbToCss((rgb << 8) | 0xff);
+      ctx.fillRect(0, 0, canvas.width, canvas.height);
+      copies.set(rgb, canvas);
+      return canvas;
+    },
+    clear(): void {
+      copies.clear();
+    },
+  };
 }
 
 // ---- seleção de backend -------------------------------------------------------------------------
@@ -362,6 +471,8 @@ export interface TabInfo {
 }
 
 interface TabSession extends DocumentSession {
+  /** Caminho completo do arquivo (breadcrumbs e título do item no painel). */
+  readonly path: string;
   /** Nome do arquivo (curto, para exibir na tab). */
   readonly label: string;
   /** Offset de scroll salvo quando a sessão perde o foco. */
@@ -758,6 +869,7 @@ class DocumentController {
       bridge: this.bridge,
       handle,
       source,
+      path,
       label,
       caret: 0,
       selection: SelectionOps.collapsed(0),
@@ -776,6 +888,7 @@ class DocumentController {
     this.renderer.setSelections(session.selections);
     updateCaretStatus(source, 0);
     setDocStatus(label);
+    setBreadcrumbs(path);
     setDirtyStatus(false);
     showWelcome(false);
     await this.refreshUndoStatus();
@@ -802,6 +915,7 @@ class DocumentController {
     this.renderer.setSelections(session.selections);
     updateCaretStatus(session.source, session.caret);
     setDocStatus(session.label);
+    setBreadcrumbs(session.path);
     setDirtyStatus(session.dirty ?? false);
     this.refreshUndoStatus();
     this.renderTabBar();
@@ -816,6 +930,7 @@ class DocumentController {
     if (this.sessions.length === 0) {
       this.activeIndex = -1;
       setDocStatus("sem documento");
+      setBreadcrumbs(undefined);
       setDirtyStatus(false);
       setUndoStatus(false, false);
       showWelcome(true);
@@ -829,24 +944,25 @@ class DocumentController {
   }
 
   private renderTabBar(): void {
+    this.renderSidebar();
     const bar = document.getElementById("tab-bar");
     if (!bar) return;
     bar.innerHTML = "";
     for (let i = 0; i < this.sessions.length; i++) {
       const s = this.sessions[i]!;
       const tab = document.createElement("button");
-      tab.className = `tab${i === this.activeIndex ? " active" : ""}`;
+      tab.className = `tab${i === this.activeIndex ? " active" : ""}${s.dirty ? " dirty" : ""}`;
       tab.role = "tab";
       tab.setAttribute("aria-selected", String(i === this.activeIndex));
 
       const label = document.createElement("span");
       label.className = "tab-label";
-      label.textContent = (s.dirty ? "\u25cf " : "") + s.label;
+      label.textContent = s.label;
       tab.appendChild(label);
 
       const close = document.createElement("span");
       close.className = "tab-close";
-      close.textContent = "\u00d7";
+      close.innerHTML = ICON_CLOSE;
       close.title = "Fechar";
       close.addEventListener("mousedown", (e: MouseEvent) => {
         e.stopPropagation();
@@ -864,6 +980,41 @@ class DocumentController {
       });
 
       bar.appendChild(tab);
+    }
+  }
+
+  /**
+   * Espelha os documentos abertos no painel lateral ("Abertos"). É chamado junto com a tab bar
+   * para que as duas visões da mesma lista nunca divirjam.
+   */
+  private renderSidebar(): void {
+    const count = document.getElementById("sidebar-count");
+    if (count) count.textContent = String(this.sessions.length);
+    const list = document.getElementById("sidebar-editors");
+    if (!list) return;
+    list.replaceChildren();
+    for (let i = 0; i < this.sessions.length; i++) {
+      const s = this.sessions[i]!;
+      const item = document.createElement("button");
+      item.type = "button";
+      item.className = `sidebar-item${i === this.activeIndex ? " active" : ""}`;
+      item.role = "listitem";
+      item.title = s.path;
+
+      const name = document.createElement("span");
+      name.className = "item-name";
+      name.textContent = s.label;
+      item.appendChild(name);
+
+      if (s.dirty) {
+        const dot = document.createElement("span");
+        dot.className = "item-dot";
+        dot.title = "Modificado";
+        item.appendChild(dot);
+      }
+
+      item.addEventListener("click", () => this.activate(i));
+      list.appendChild(item);
     }
   }
 
@@ -1262,23 +1413,40 @@ function setDirtyStatus(dirty: boolean): void {
 
 function updateCaretStatus(source: DocumentLineSource, offset: number): void {
   const status = document.getElementById("status-caret");
-  if (!status) return;
   const position = source.positionAt(offset);
-  status.textContent = `${position.line + 1}:${position.column + 1}`;
+  if (status) status.textContent = `${position.line + 1}:${position.column + 1}`;
+  const breadcrumb = document.getElementById("bc-position");
+  if (breadcrumb) breadcrumb.textContent = `Ln ${position.line + 1}, Col ${position.column + 1}`;
+}
+
+/**
+ * Desenha os breadcrumbs do documento ativo: segmentos do caminho separados por chevrons.
+ * O último segmento (nome do arquivo) é destacado por CSS (`.bc-seg:last-child`).
+ */
+function setBreadcrumbs(path: string | undefined): void {
+  const host = document.getElementById("bc-path");
+  if (!host) return;
+  host.replaceChildren();
+  if (path === undefined) return;
+  const segments = path.split("/").filter((segment) => segment.length > 0);
+  segments.forEach((segment, index) => {
+    if (index > 0) {
+      const separator = document.createElement("span");
+      separator.className = "bc-sep";
+      separator.innerHTML = ICON_CHEVRON_RIGHT;
+      host.appendChild(separator);
+    }
+    const element = document.createElement("span");
+    element.className = "bc-seg";
+    element.textContent = segment;
+    host.appendChild(element);
+  });
 }
 
 /** Reflete a disponibilidade de undo/redo na status bar (habilitado/desabilitado). */
 function setUndoStatus(canUndo: boolean, canRedo: boolean): void {
-  const undo = document.getElementById("status-undo");
-  if (undo) {
-    undo.textContent = "↶ undo";
-    undo.classList.toggle("disabled", !canUndo);
-  }
-  const redo = document.getElementById("status-redo");
-  if (redo) {
-    redo.textContent = "↷ redo";
-    redo.classList.toggle("disabled", !canRedo);
-  }
+  document.getElementById("status-undo")?.classList.toggle("disabled", !canUndo);
+  document.getElementById("status-redo")?.classList.toggle("disabled", !canRedo);
 }
 
 /**
@@ -1298,6 +1466,8 @@ export async function bootRenderer(): Promise<boolean> {
     measurer: createCanvasMeasurer(),
     surface: atlasSurface,
   });
+  // O backend 2D não tinge glifos por conta própria: recebe as cópias tingidas do atlas.
+  const atlasTinter = createAtlasTinter(atlas, atlasCanvas);
 
   let pipeline: RenderPipeline;
   let effective: string = DEFAULT_RENDER_BACKEND;
@@ -1309,19 +1479,24 @@ export async function bootRenderer(): Promise<boolean> {
       if (!(error instanceof WebGPUUnavailableError)) throw error;
       // DEC-TR-7: degradação DECLARADA e logada — nunca *fallback* silencioso.
       console.warn(`Scribe: webgpu indisponível, usando canvas2d — ${error.reason}`);
-      pipeline = new Canvas2DBackend(assertiveContext(surface), atlas, { image: atlasCanvas });
+      pipeline = new Canvas2DBackend(assertiveContext(surface), atlas, {
+        image: atlasCanvas,
+        tint: atlasTinter,
+      });
       effective = "canvas2d (fallback de webgpu)";
     }
   } else {
-    pipeline = new Canvas2DBackend(assertiveContext(surface), atlas, { image: atlasCanvas });
+    pipeline = new Canvas2DBackend(assertiveContext(surface), atlas, {
+      image: atlasCanvas,
+      tint: atlasTinter,
+    });
   }
 
   setStatus(effective);
   console.info(`Scribe: backend efetivo = ${effective} (pedido: ${requested})`);
 
-  // Aplica tema no body
-  document.body.style.background = rgbToCss(THEME.current.colors.background);
-  document.body.style.color = rgbToCss(THEME.current.colors.foreground);
+  // Tema: espelha a paleta ativa na casca (CSS vars) antes do primeiro frame.
+  applyChromeTheme(THEME.current);
 
   const source = new DocumentLineSource();
   const viewport = new ViewportImpl({
@@ -1349,7 +1524,10 @@ export async function bootRenderer(): Promise<boolean> {
 
   // Destaque de sintaxe: o main resolve a gramática e tokeniza; aqui só colorimos (ThemeResolver).
   const highlightStore = new HighlightStore();
-  const theme = createDefaultTheme();
+  // Tema de sintaxe acompanha o tipo do tema do editor: as cores do par escuro são claras e
+  // sumiriam sobre fundo branco (e vice-versa). Reatribuído no toggle — o `scene` lê `theme`
+  // a cada frame, então basta trocar a referência.
+  let syntaxTheme = createSyntaxTheme(THEME.current.kind);
   // Preload antigo sem `syntax.highlight`: realce desligado de forma explícita (uma linha de log).
   const canHighlight = bridge?.highlight !== undefined;
   if (bridge !== undefined && !canHighlight) {
@@ -1364,12 +1542,20 @@ export async function bootRenderer(): Promise<boolean> {
       ? DEMO_DOCUMENT_KEY
       : documentHighlightKey(controller.current.handle);
 
+  /**
+   * Fonte do documento **ativo** no renderer: a sessão aberta ou, sem ponte, a demo do boot.
+   *
+   * O realce precisa disto (e não da `source` do boot): cada documento tem a sua fonte, com a
+   * revisão que o `main` devolveu, e a requisição só vale se a revisão bater com a resposta.
+   */
+  const activeSource = (): DocumentLineSource => controller?.current?.source ?? source;
+
   renderer.setHighlighter(
-    { spansFor: (line) => highlightStore.spansFor(activeDocumentKey(), line), theme },
+    { spansFor: (line) => highlightStore.spansFor(activeDocumentKey(), line), get theme() { return syntaxTheme; } },
     (first, count) => {
       if (controller === undefined || !canHighlight) return;
       const docKey = activeDocumentKey();
-      const revision = source.revision;
+      const revision = activeSource().revision;
       // Falhou nesta revisão, já coberto, requisição **em voo** para a mesma revisão (dedupe), teto de
       // retentativas esgotado ou janela pós-resposta-vazia: não dispara IPC.
       if (!highlightStore.needsRequest(docKey, revision, first, count)) return;
@@ -1400,6 +1586,7 @@ export async function bootRenderer(): Promise<boolean> {
   if (!opened) {
     showWelcome(true);
     viewport.setMetrics({ lineCount: source.lineCount() });
+    setBreadcrumbs(initialPath);
     if (initialPath === undefined) {
       setDocStatus(bridge === undefined ? "demo (sem preload)" : "Nenhum arquivo aberto");
     }
@@ -1476,7 +1663,7 @@ export async function bootRenderer(): Promise<boolean> {
         findBar?.model.previous();
         break;
       case "view.toggleTheme":
-        document.getElementById("status-theme")?.click();
+        document.getElementById("theme-toggle")?.click();
         break;
     }
   };
@@ -1516,7 +1703,7 @@ export async function bootRenderer(): Promise<boolean> {
 
   attachInputListeners(surface, viewport, renderer, controller, findBar, palette);
 
-  // Minimap (P2#9)
+  // Minimap (P2#9): as cores vêm do tema ativo — sem isso a faixa fica preta no tema claro.
   const minimap = attachMinimap({
     source: {
       lineCount: () => controller?.current?.source.lineCount() ?? source.lineCount(),
@@ -1525,24 +1712,81 @@ export async function bootRenderer(): Promise<boolean> {
     viewport,
     lineHeight: Math.ceil(TEXT_STYLE.sizePx * 1.4),
     getViewportHeight: () => renderer.viewportHeight,
+    colors: () => {
+      const c = THEME.current.colors;
+      return {
+        background: rgbToCss(c.background),
+        line: rgbToCss(c.foreground),
+        viewport: rgbaToCss(c.foreground, 0.08),
+        viewportBorder: rgbaToCss(c.foreground, 0.25),
+      };
+    },
   });
   renderer.attachMinimap(minimap);
 
-  // Toggle tema (Ctrl+Shift+T)
-  const themeBtn = document.getElementById("status-theme");
-  if (themeBtn) {
-    themeBtn.textContent = THEME.current.kind === "dark" ? "🌙" : "☀️";
-    themeBtn.addEventListener("click", () => {
-      const next = THEME.current.kind === "dark" ? LIGHT_THEME : DARK_THEME;
-      THEME.current = next;
-      saveTheme(next);
-      themeBtn.textContent = next.kind === "dark" ? "🌙" : "☀️";
-      document.body.style.background = rgbToCss(next.colors.background);
-      renderer.start();
-    });
-  }
+  // Toggle tema (Ctrl+Shift+T): casca (CSS vars) e canvas (`THEME.current`) trocam juntos.
+  document.getElementById("theme-toggle")?.addEventListener("click", () => {
+    const next = THEME.current.kind === "dark" ? LIGHT_THEME : DARK_THEME;
+    THEME.current = next;
+    saveTheme(next);
+    syntaxTheme = createSyntaxTheme(next.kind);
+    atlasTinter.clear(); // as cores mudaram: as cópias tingidas ficariam com a paleta antiga
+    applyChromeTheme(next);
+    renderer.start(); // repinta canvas E minimap com a paleta nova
+  });
 
-  window.addEventListener("resize", () => renderer.resize(surface.clientWidth, surface.clientHeight));
+  // ── Casca: rail de atividades, painel lateral e atalhos de layout ────────────────────────────
+  const sidebar = document.getElementById("sidebar");
+  const explorerBtn = document.getElementById("activity-explorer");
+  const resizeSurface = (): void =>
+    renderer.resize(surface.clientWidth || 1, surface.clientHeight || 1);
+  const setSidebarVisible = (visible: boolean): void => {
+    if (sidebar) sidebar.hidden = !visible;
+    explorerBtn?.setAttribute("aria-pressed", String(visible));
+    explorerBtn?.classList.toggle("active", visible);
+    resizeSurface();
+    renderer.start();
+  };
+  explorerBtn?.addEventListener("click", () => setSidebarVisible(sidebar?.hidden ?? true));
+
+  document.getElementById("activity-search")?.addEventListener("click", () => {
+    findBar?.model.open();
+    surface.focus();
+  });
+  document.getElementById("activity-palette")?.addEventListener("click", () => {
+    void palette?.model.open();
+  });
+
+  // Seção do painel: colapsa/expande a lista de documentos abertos.
+  const sectionToggle = document.getElementById("sidebar-section-toggle");
+  sectionToggle?.addEventListener("click", () => {
+    const collapsed = sectionToggle.getAttribute("aria-expanded") === "true";
+    sectionToggle.setAttribute("aria-expanded", String(!collapsed));
+    const list = document.getElementById("sidebar-editors");
+    if (list) list.hidden = collapsed;
+  });
+
+  // Ctrl+B: alterna o painel (convenção de editores).
+  document.addEventListener("keydown", (event: KeyboardEvent) => {
+    if (
+      (event.ctrlKey || event.metaKey) &&
+      !event.shiftKey &&
+      !event.altKey &&
+      (event.key === "b" || event.key === "B")
+    ) {
+      event.preventDefault();
+      setSidebarVisible(sidebar?.hidden ?? true);
+    }
+  });
+
+  // Undo/redo do rodapé: mesmos comandos do menu (antes eram apenas indicadores, sem handler).
+  document.getElementById("status-undo")?.addEventListener("click", () => handleMenuAction("edit.undo"));
+  document.getElementById("status-redo")?.addEventListener("click", () => handleMenuAction("edit.redo"));
+
+  // Abrir/fechar o painel muda a largura do canvas SEM resize de janela: o observer cobre os dois.
+  new ResizeObserver(resizeSurface).observe(surface);
+
+  window.addEventListener("resize", resizeSurface);
   renderer.start();
   return true;
 }
@@ -1715,8 +1959,7 @@ export function attachFindBar(deps: FindBarDeps): FindBarBinding | undefined {
     // Toggle tema: Ctrl+Shift+T
     if ((event.ctrlKey || event.metaKey) && event.shiftKey && !event.altKey && (event.key === "t" || event.key === "T")) {
       event.preventDefault();
-      const btn = document.getElementById("status-theme");
-      btn?.click();
+      document.getElementById("theme-toggle")?.click();
       return;
     }
     // Ctrl+Alt+C/R/W alterna os toggles de busca de qualquer lugar da janela.

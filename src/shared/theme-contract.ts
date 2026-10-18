@@ -23,6 +23,20 @@ export interface EditorTheme {
     readonly scrollbarTrack: RGBA;
     readonly scrollbarThumb: RGBA;
     readonly lineHighlight: RGBA;
+    /**
+     * Acento da casca (foco, tab ativa, item selecionado). Separado do `caret` porque a casca
+     * precisa de um azul de alto contraste para bordas e ícones, enquanto o caret é um traço fino
+     * sobre o texto. Nos temas embutidos os dois coincidem.
+     */
+    readonly accent: RGBA;
+    /** Fundo da faixa de atividades (rail vertical à esquerda). */
+    readonly activityBar: RGBA;
+    /** Fundo do painel lateral (explorador). */
+    readonly sidebar: RGBA;
+    /** Fundo da barra de status (rodapé). */
+    readonly statusBar: RGBA;
+    /** Divisórias entre superfícies da casca (painéis, tab bar, rodapé). */
+    readonly border: RGBA;
     /** Cor de fundo da tab bar. */
     readonly tabBar: RGBA;
     /** Cor da tab ativa. */

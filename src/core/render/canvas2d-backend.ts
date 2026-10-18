@@ -7,7 +7,8 @@
  *
  * Mapeamento primitiva → chamada:
  * - `RectInstance`  → `fillRect` (ou caminho arredondado via `arcTo` quando há `radius`);
- * - `GlyphInstance` → `drawImage` do **atlas**; subpixel = 3 desenhos com offset + alpha/3;
+ * - `GlyphInstance` → `drawImage` do **atlas** (tingido por cor via `GlyphTinter` opcional);
+ *   subpixel = 3 desenhos com offset + alpha/3;
  * - `LineInstance`  → `stroke` de traço fino.
  *
  * `setClip` é aplicado por lote com `save`/`restore` balanceados em `draw` (sem pilha solta).
@@ -16,7 +17,7 @@
  * contexto 2D *fake* nos testes (sem DOM/GUI) — `CanvasRenderingContext2D` real a satisfaz.
  */
 
-import type { GlyphInstance, LineInstance, Rect, RectInstance } from "../../shared";
+import type { GlyphInstance, LineInstance, RGBA, Rect, RectInstance } from "../../shared";
 import { alphaOf, cssColor, type GlyphAtlas } from "./atlas";
 import { RenderError } from "./errors";
 import { BaseRenderPipeline, type DrawBatch } from "./pipeline";
@@ -54,9 +55,23 @@ export interface Canvas2DContextLike {
   lineWidth: number;
 }
 
+/**
+ * Tingidor de glifos: o atlas guarda **tinta branca + alpha** (o RGB vem da instância), então o
+ * backend precisa de uma cópia do atlas pintada com essa cor. Injetado — `core` não cria DOM.
+ */
+export interface GlyphTinter {
+  /** Cópia do atlas tingida com o RGB de `rgba`; `undefined` = desenhe a tinta branca do atlas. */
+  imageFor(rgba: RGBA): CanvasImageSource | undefined;
+}
+
 export interface Canvas2DBackendOptions {
   /** Superfície do atlas (default: `atlas.image`). Sem ela, não há como desenhar glifos. */
   readonly image?: CanvasImageSource;
+  /**
+   * Tingidor das cópias do atlas. **Sem ele os glifos saem brancos** (tinta do atlas) em qualquer
+   * fundo — legível só sobre fundo escuro. É o renderer que injeta a implementação em canvas.
+   */
+  readonly tint?: GlyphTinter;
 }
 
 const SUBPIXEL_PASSES = 3 as const;
@@ -66,6 +81,7 @@ export class Canvas2DBackend extends BaseRenderPipeline {
 
   private readonly ctx: Canvas2DContextLike;
   private readonly image: CanvasImageSource;
+  private readonly tint: GlyphTinter | undefined;
 
   constructor(ctx: Canvas2DContextLike, atlas: GlyphAtlas, options: Canvas2DBackendOptions = {}) {
     super(atlas);
@@ -78,6 +94,7 @@ export class Canvas2DBackend extends BaseRenderPipeline {
     }
     this.ctx = ctx;
     this.image = image;
+    this.tint = options.tint;
   }
 
   /** Ajusta o espaço lógico (ex.: escala por *device pixel ratio*). */
@@ -155,16 +172,19 @@ export class Canvas2DBackend extends BaseRenderPipeline {
     const { ctx } = this;
     const { atlasX, atlasY, atlasW, atlasH, x, y, color, subpixel } = instance;
     const alpha = alphaOf(color);
+    // A cópia tingida tem a mesma origem/dimensões lógicas do atlas (recortada à faixa viva),
+    // então as coordenadas de origem valem para as duas sem conversão.
+    const image = this.tint?.imageFor(color) ?? this.image;
     if (subpixel) {
       // Two-pass horizontal (DEC-REN-8): três desenhos levemente deslocados, alpha fracionado.
       const per = alpha / SUBPIXEL_PASSES;
       for (let i = 0; i < SUBPIXEL_PASSES; i++) {
         ctx.globalAlpha = per;
-        ctx.drawImage(this.image, atlasX, atlasY, atlasW, atlasH, x + (subpixel[i] ?? 0), y, atlasW, atlasH);
+        ctx.drawImage(image, atlasX, atlasY, atlasW, atlasH, x + (subpixel[i] ?? 0), y, atlasW, atlasH);
       }
       return;
     }
     ctx.globalAlpha = alpha;
-    ctx.drawImage(this.image, atlasX, atlasY, atlasW, atlasH, x, y, atlasW, atlasH);
+    ctx.drawImage(image, atlasX, atlasY, atlasW, atlasH, x, y, atlasW, atlasH);
   }
 }

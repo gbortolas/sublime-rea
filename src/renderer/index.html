@@ -11,68 +11,188 @@
   </head>
   <body>
     <!--
-      Superfície do renderer: um único canvas "editor" + overlay de UI.
+      Casca (shell) do renderer. Regra de arquitetura (DEC-REN-8): o DOM só cerca **conteúdo** —
+      menus, diálogos e painéis. O documento em si é desenhado no <canvas> pelo RenderPipeline, e
+      nada aqui estiliza texto de documento.
 
-      O canvas é o alvo do RenderPipeline (backend Canvas2D ou WebGPU — ver
-      docs/architecture/04-render-e-ui.md). O overlay fica FORA do canvas para que a
-      pipeline só desenhe conteúdo de documento (damage rects).
+      Layout (grid):
+        #workbench  = [activity-bar | sidebar | editor-area]
+        #editor-area= [tab-bar / breadcrumbs / editor-stack]
+        #status-bar = rodapé de largura total
+
+      Ícones são SVG inline (herdam `currentColor`, então acompanham o tema sem JS). Inline SVG no
+      DOM não é afetado pela CSP (não é fetch) — segue `default-src 'none'`.
     -->
     <div id="app" role="application" aria-label="Scribe">
-      <div id="tab-bar" role="tablist" aria-label="Documentos"></div>
-      <canvas id="editor-surface" tabindex="0"></canvas>
-      <div id="ui-overlay" aria-hidden="false">
-        <!--
-          Find bar (busca/substituição): casca DOM que só REFLETE o `FindBarModel` (a lógica —
-          debounce, navegação, descarte de resposta obsoleta — vive em ./find-bar.ts e é testada).
-          Escondida por padrão (`hidden`); o renderer alterna conforme o estado do modelo.
-        -->
-        <!-- Welcome screen: aparece quando nenhum arquivo está aberto. -->
-        <div id="welcome-screen" hidden>
-          <div class="welcome-content">
-            <h1 class="welcome-logo">Scribe</h1>
-            <p class="welcome-subtitle">Editor de texto rápido e moderno</p>
-            <div class="welcome-shortcuts">
-              <div class="shortcut-row"><kbd>Ctrl+O</kbd><span>Abrir arquivo</span></div>
-              <div class="shortcut-row"><kbd>Ctrl+N</kbd><span>Novo documento</span></div>
-              <div class="shortcut-row"><kbd>Ctrl+S</kbd><span>Salvar</span></div>
-              <div class="shortcut-row"><kbd>Ctrl+F</kbd><span>Buscar</span></div>
-              <div class="shortcut-row"><kbd>Ctrl+Shift+T</kbd><span>Alternar tema</span></div>
-              <div class="shortcut-row"><kbd>Ctrl+Shift+P</kbd><span>Paleta de comandos</span></div>
+      <div id="workbench">
+        <!-- Faixa de atividades: só ações que existem de fato. -->
+        <nav id="activity-bar" aria-label="Barra de atividades">
+          <button
+            id="activity-explorer"
+            class="activity-item"
+            type="button"
+            title="Explorador (Ctrl+B)"
+            aria-label="Explorador"
+            aria-pressed="true"
+          >
+            <svg viewBox="0 0 16 16" width="20" height="20" fill="none" stroke="currentColor" stroke-width="1.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false">
+              <path d="M9 1.5H4.2a1 1 0 0 0-1 1v11a1 1 0 0 0 1 1h7.6a1 1 0 0 0 1-1V5z" />
+              <path d="M9 1.5V5h3.8" />
+            </svg>
+          </button>
+          <button
+            id="activity-search"
+            class="activity-item"
+            type="button"
+            title="Buscar (Ctrl+F)"
+            aria-label="Buscar"
+          >
+            <svg viewBox="0 0 16 16" width="20" height="20" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" aria-hidden="true" focusable="false">
+              <circle cx="6.8" cy="6.8" r="4.3" />
+              <path d="M10 10l3.6 3.6" />
+            </svg>
+          </button>
+          <button
+            id="activity-palette"
+            class="activity-item"
+            type="button"
+            title="Paleta de comandos (Ctrl+Shift+P)"
+            aria-label="Paleta de comandos"
+          >
+            <svg viewBox="0 0 16 16" width="20" height="20" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false">
+              <rect x="1.6" y="2.6" width="12.8" height="10.8" rx="2" />
+              <path d="M4.6 6.4 7 8.2l-2.4 1.8" />
+              <path d="M8.6 10.2h2.8" />
+            </svg>
+          </button>
+          <div class="activity-spacer"></div>
+          <button
+            id="theme-toggle"
+            class="activity-item"
+            type="button"
+            title="Alternar tema (Ctrl+Shift+T)"
+            aria-label="Alternar tema"
+          >
+            <svg class="icon-moon" viewBox="0 0 16 16" width="20" height="20" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false">
+              <path d="M13.2 9.6A5.6 5.6 0 0 1 6.4 2.8a5.6 5.6 0 1 0 6.8 6.8z" />
+            </svg>
+            <svg class="icon-sun" viewBox="0 0 16 16" width="20" height="20" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" aria-hidden="true" focusable="false">
+              <circle cx="8" cy="8" r="3.1" />
+              <path d="M8 1.2v1.7M8 13.1v1.7M1.2 8h1.7M13.1 8h1.7M3.2 3.2l1.2 1.2M11.6 11.6l1.2 1.2M12.8 3.2l-1.2 1.2M4.4 11.6l-1.2 1.2" />
+            </svg>
+          </button>
+        </nav>
+
+        <!-- Explorador: lista os documentos abertos (fonte: as abas do DocumentController). -->
+        <aside id="sidebar" aria-label="Explorador">
+          <button
+            id="sidebar-section-toggle"
+            class="sidebar-header"
+            type="button"
+            aria-expanded="true"
+            aria-controls="sidebar-editors"
+          >
+            <svg class="sidebar-chevron" viewBox="0 0 16 16" width="14" height="14" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false">
+              <path d="M4 6.5 8 10.5l4-4" />
+            </svg>
+            <span class="sidebar-title">Abertos</span>
+            <span id="sidebar-count" class="sidebar-count">0</span>
+          </button>
+          <div id="sidebar-editors" class="sidebar-list" role="list"></div>
+        </aside>
+
+        <div id="editor-area">
+          <div id="tab-bar" role="tablist" aria-label="Documentos"></div>
+
+          <!-- Breadcrumbs: caminho do documento ativo + posição do caret. -->
+          <div id="breadcrumbs" aria-label="Trilha do documento">
+            <span id="bc-path" class="bc-path"></span>
+            <span id="bc-position" class="bc-position">Ln 1, Col 1</span>
+          </div>
+
+          <div id="editor-stack">
+            <canvas id="editor-surface" tabindex="0"></canvas>
+            <!-- Overlay de UI: fica FORA do canvas para que a pipeline só desenhe documento. -->
+            <div id="ui-overlay" aria-hidden="false">
+              <!-- Welcome screen: aparece quando nenhum arquivo está aberto. -->
+              <div id="welcome-screen" hidden>
+                <div class="welcome-content">
+                  <h1 class="welcome-logo">Scribe</h1>
+                  <p class="welcome-subtitle">Editor de texto rápido e moderno</p>
+                  <div class="welcome-shortcuts">
+                    <div class="shortcut-row"><kbd>Ctrl+O</kbd><span>Abrir arquivo</span></div>
+                    <div class="shortcut-row"><kbd>Ctrl+N</kbd><span>Novo documento</span></div>
+                    <div class="shortcut-row"><kbd>Ctrl+S</kbd><span>Salvar</span></div>
+                    <div class="shortcut-row"><kbd>Ctrl+F</kbd><span>Buscar</span></div>
+                    <div class="shortcut-row"><kbd>Ctrl+B</kbd><span>Alternar painel</span></div>
+                    <div class="shortcut-row"><kbd>Ctrl+Shift+T</kbd><span>Alternar tema</span></div>
+                    <div class="shortcut-row"><kbd>Ctrl+Shift+P</kbd><span>Paleta de comandos</span></div>
+                  </div>
+                  <p class="welcome-hint">Arraste um arquivo para abrir</p>
+                </div>
+              </div>
+              <div id="minimap">
+                <canvas id="minimap-surface"></canvas>
+              </div>
+              <!--
+                Find bar: casca DOM que só REFLETE o `FindBarModel` (a lógica — debounce, navegação,
+                descarte de resposta obsoleta — vive em ./find-bar.ts e é testada). Escondida por
+                padrão (`hidden`); o renderer alterna conforme o estado do modelo.
+              -->
+              <div id="find-bar" role="search" aria-label="Buscar e substituir" hidden>
+                <div class="find-row">
+                  <input id="find-input" type="text" placeholder="Buscar" aria-label="Buscar" autocomplete="off" spellcheck="false" />
+                  <span id="find-count" aria-live="polite">0/0</span>
+                  <div class="find-toggles">
+                    <button id="find-case" class="find-toggle" type="button" title="Case-sensitive (Ctrl+Alt+C)">Aa</button>
+                    <button id="find-regex" class="find-toggle" type="button" title="Regex (Ctrl+Alt+R)">.*</button>
+                    <button id="find-word" class="find-toggle" type="button" title="Whole word (Ctrl+Alt+W)">\b</button>
+                  </div>
+                  <button id="find-close" type="button" aria-label="Fechar busca">
+                    <svg viewBox="0 0 16 16" width="14" height="14" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" aria-hidden="true" focusable="false">
+                      <path d="M4 4l8 8M12 4l-8 8" />
+                    </svg>
+                  </button>
+                </div>
+                <div class="find-row">
+                  <input id="find-replace-input" type="text" placeholder="Substituir" aria-label="Substituir" autocomplete="off" spellcheck="false" />
+                  <button id="find-replace-all" type="button">Substituir tudo</button>
+                  <span id="find-status" aria-live="polite"></span>
+                </div>
+              </div>
+              <!-- Command Palette: overlay de busca de comandos (Ctrl+Shift+P). -->
+              <div id="command-palette" hidden>
+                <input id="palette-input" type="text" placeholder="Digite um comando…" autocomplete="off" spellcheck="false" />
+                <div id="palette-results"></div>
+              </div>
             </div>
-            <p class="welcome-hint">Arraste um arquivo para abrir</p>
           </div>
         </div>
-        <div id="minimap">
-          <canvas id="minimap-surface"></canvas>
+      </div>
+
+      <div id="status-bar" role="status">
+        <div class="status-group">
+          <span id="status-doc" class="status-item">sem documento</span>
+          <span id="status-dirty" class="status-item"></span>
         </div>
-        <div id="find-bar" role="search" aria-label="Buscar e substituir" hidden>
-          <input id="find-input" type="text" placeholder="Buscar" aria-label="Buscar" autocomplete="off" spellcheck="false" />
-          <span id="find-count" aria-live="polite">0/0</span>
-          <div class="find-toggles">
-            <button id="find-case" class="find-toggle" title="Case-sensitive (Ctrl+Alt+C)">Aa</button>
-            <button id="find-regex" class="find-toggle" title="Regex (Ctrl+Alt+R)">.*</button>
-            <button id="find-word" class="find-toggle" title="Whole word (Ctrl+Alt+W)">\b</button>
-          </div>
-          <input id="find-replace-input" type="text" placeholder="Substituir" aria-label="Substituir" autocomplete="off" spellcheck="false" />
-          <button id="find-replace-all" type="button">Substituir tudo</button>
-          <span id="find-status" aria-live="polite"></span>
-          <button id="find-close" type="button" aria-label="Fechar busca">✕</button>
+        <div class="status-group status-right">
+          <span id="status-backend" class="status-item">backend: ?</span>
+          <button id="status-undo" class="status-item clickable disabled" type="button" title="Desfazer (Ctrl+Z)">
+            <svg viewBox="0 0 16 16" width="14" height="14" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false">
+              <path d="M5.4 4.6 2.6 7.4l2.8 2.8" />
+              <path d="M2.6 7.4h6.2a3.4 3.4 0 0 1 0 6.8H6.6" />
+            </svg>
+            <span class="status-label">Undo</span>
+          </button>
+          <button id="status-redo" class="status-item clickable disabled" type="button" title="Refazer (Ctrl+Y)">
+            <svg viewBox="0 0 16 16" width="14" height="14" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false">
+              <path d="M10.6 4.6l2.8 2.8-2.8 2.8" />
+              <path d="M13.4 7.4H7.2a3.4 3.4 0 0 0 0 6.8h2.2" />
+            </svg>
+            <span class="status-label">Redo</span>
+          </button>
+          <span id="status-caret" class="status-item">1:1</span>
         </div>
-        <!-- Command Palette: overlay de busca de comandos (Ctrl+Shift+P). -->
-        <div id="command-palette" hidden>
-          <input id="palette-input" type="text" placeholder="Comandos..." autocomplete="off" spellcheck="false" />
-          <div id="palette-results"></div>
-        </div>
-        <div id="status-bar" role="status">
-          <span id="status-doc">sem documento</span>
-          <span id="status-backend">backend: ?</span>
-          <span id="status-caret">1:1</span>
-          <span id="status-undo" class="disabled">↶ undo</span>
-          <span id="status-redo" class="disabled">↷ redo</span>
-          <span id="status-dirty"></span>
-          <span id="status-theme" class="clickable" title="Alternar tema (Ctrl+Shift+T)" role="button" tabindex="0">🌙</span>
-        </div>
-        <!-- Menu/panels (find, palette, tabs) entram aqui na Fase 3.2+. -->
       </div>
     </div>
     <script src="./main.js"></script>

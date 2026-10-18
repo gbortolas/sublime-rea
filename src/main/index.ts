@@ -442,11 +442,13 @@ function requireSearchQuery(value: unknown, method: string): SearchQuery {
 }
 
 /** Raízes de recursos do app (diretório ausente é ignorado pelo scanner — DEC-PKG). */
-function packageRoots(appPath: string, userData: string): Partial<Record<ResourceLayer, readonly string[]>> {
+export function packageRoots(appPath: string, userData: string): Partial<Record<ResourceLayer, readonly string[]>> {
   return {
     os: [join(__dirname, "..", "..", "res")],
-    // `assets/grammars` é onde vive a gramática de brinquedo do Scribe (escolha nossa).
-    app: [join(appPath, "res"), join(appPath, "packages"), join(appPath, "assets", "grammars")],
+    // Cada raiz é um **contentor de pacotes** (o scanner só desce em diretórios): a gramática de
+    // brinde vive em `assets/grammars/`, então a raiz é `assets/` e o pacote é `grammars` —
+    // apontar direto para `assets/grammars` faria o scanner **ignorar** a gramática.
+    app: [join(appPath, "res"), join(appPath, "packages"), join(appPath, "assets")],
     user: [join(userData, "Packages")],
   };
 }

@@ -17,7 +17,7 @@ import { createDefaultTheme } from "../src/core/syntax";
 import type { ResourceScanner, ScannedResource } from "../src/core/packages";
 import { IPC_VERSION } from "../src/shared";
 import type { DocumentHandle, ResourceLayer } from "../src/shared";
-import { handleIpcRequest } from "../src/main/index";
+import { handleIpcRequest, packageRoots } from "../src/main/index";
 
 const FIXTURE = readFileSync(resolve(process.cwd(), "assets/grammars/scribe-demo.sublime-syntax"), "utf8");
 
@@ -225,6 +225,31 @@ describe("realce de sintaxe de ponta a ponta (PackageResolver → gramática →
       });
       expect(response.ok).toBe(false);
       if (!response.ok) expect(response.error.code).toBe("invalid-args");
+    } finally {
+      core.dispose();
+    }
+  });
+});
+
+describe("realce — raízes de pacote do app", () => {
+  /**
+   * O scanner só desce em **diretórios**: cada raiz é um contentor de pacotes. A gramática de
+   * brinde mora em `assets/grammars/`, então a raiz do app tem de ser `assets/` — apontar para
+   * `assets/grammars` faz o scanner ignorar o arquivo e o realce nunca liga (regressão real,
+   * achada com o app aberto: `syntax.highlight` respondia sempre sem spans).
+   */
+  it("a raiz do app registra a gramática de brinde (assets/ é contentor de pacotes)", async () => {
+    const core = createEditorCore({
+      fileSystem: memoryFs({ "/notas.demo": "const a = 1;\n" }),
+      availableParallelism: 4,
+      packageRoots: packageRoots(process.cwd(), "/userData"),
+    });
+    try {
+      await core.syntaxReady;
+      const handle = await core.openDocument("/notas.demo");
+      expect(core.grammarForDocument(handle)?.name).toBe("Scribe Demo");
+      const highlight = core.highlightDocument(handle, 0, 1);
+      expect(highlight.lines[0]?.spans.some((span) => span.scope === "keyword.control.demo")).toBe(true);
     } finally {
       core.dispose();
     }

@@ -49,7 +49,8 @@ __pycache__/
 venv/
 
 # --- IDE / editor ---
-.idea/
+# .idea/ NÃO é ignorado por inteiro: runConfigurations/ é versionado.
+# O filtro fino está em .idea/.gitignore (ignora tudo exceto runConfigurations/).
 .vscode/
 
 # --- misc ---

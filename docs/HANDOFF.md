@@ -1,7 +1,8 @@
 # HANDOFF — sublime-rea
 
 > **Documento de handoff entre sessões** (leia antes de retomar). Atualizado em **2026-10-17**.
-> Status: 🐛 UX issues (3 P0 + 1 P1) resolvidos ✅ · P3#11 Command Palette implementada ✅ — próxima: P2#9 Minimap ou P3#10 Plugin host.
+> Status: 🎨 **Repaginação do design (VS Code-like) ✅** + **3 bugs de render/realce corrigidos ✅** —
+> próxima: P1 — Performance dos menus, P3.6 snapshot de análise, ou nova feature do roadmap.
 
 ---
 
@@ -19,7 +20,7 @@ P2.4b/c ✅ · P2.5 (salvar) ✅ · P3.10/11/12 (dívidas) ✅ · P1#1 (seleçã
 **P2#7 (drag & drop) ✅ · Infra (GitHub repo + CI/Release) ✅ · P2#6 (abas) ✅ · P2#8 (temas) ✅** ·
 **P3#12 (go to line) ✅ · P3#13 (auto-pair) ✅ · P3#14 (bracket matching) ✅ · PyCharm ✅** ·
 **🐛 UX: welcome screen ✅ · menu bar ✅ · branding/ícone ✅ · dica abrir arquivo ✅** ·
-**P3#11 Command Palette ✅** · **P2#9 Minimap ✅** · **P3#15 Indentation Guides ✅** · **cursor line highlight ✅** · **smooth mouse wheel ✅** · **P4#18 Snippets ✅**
+**P3#11 Command Palette ✅** · **P2#9 Minimap ✅** · **P3#15 Indentation Guides ✅** · **cursor line highlight ✅** · **smooth mouse wheel ✅** · **P4#18 Snippets ✅** · **🎨 repaginação do design (casca VS Code-like + tema como fonte única + sintaxe clara) ✅** · **🐛 3 bugs de render/realce (tint do `canvas2d`, revisão do realce, raiz de pacote) ✅**
 
 **✅ Passo operacional resolvido (2026-10-16).** O `setup.py` foi rodado e o MCP `rea` foi relançado
 **já com `REA_GHIDRA_STARTUP_TIMEOUT_MS=900000`** (confirmado em `/proc/*/environ`) — **não** é mais
@@ -33,7 +34,10 @@ python3 setup/setup.py        # idempotente: reescreve setup/env.sh + environmen
 Sem o deadline maior, `open_binary`/`analyze` **via MCP** volta a estourar os 330 s (a análise leva
 ~355 s).
 
-**Próxima tarefa recomendada:** **P3.6 — Snapshot de análise do REA** ([`docs/BACKLOG.md`](BACKLOG.md)). Baixa prioridade — o projeto Ghidra persistente já cobre o caso. Alternativa: atacar o **P1 — Performance dos menus** (investigar lentidão dos menus nativos Electron) ou escolher nova feature do roadmap (P2#9 minimap, P3#10 plugin host).
+**Próxima tarefa recomendada:** **fechar a pendência de git** (commit do design + 3 bugs; ver
+**🗂️ Estado do repositório**) e então **P1 — Performance dos menus** (investigar lentidão dos menus
+nativos Electron — único item aberto da lista de UX). Alternativas: **P3.6 — Snapshot de análise do REA**
+(baixa prioridade: o projeto Ghidra persistente já cobre) ou nova feature do roadmap (`P3#10` plugin host).
 
 > ✅ **Pegadinha resolvida (2026-10-16, P3.9):** o `setup.py` agora **detecta** um JDK ≥ 21
 > compatível (`JAVA_HOME`, PATH, sdkman, `/usr/lib/jvm`) e escreve um **`export JAVA_HOME=…` ativo**
@@ -405,6 +409,73 @@ assinaturas) e a correção de doc: o guard de geração do pool é **por consis
 
 ---
 
+## 🎨 Fase 3.4 — Repaginação da UI + 3 bugs de render/realce (2026-10-17)
+
+**Pedido do usuário:** *"o app tá meio capenga, temos que trabalhar o design, deixar mais elegante e
+moderno"* → direção escolhida por ele: **moderno tipo VS Code**. Escopo aceito: mexer no DOM/layout.
+
+### O que mudou (design)
+
+- **Casca VS Code-like**: `#app` = grid [workbench | status bar]; `#workbench` = [activity bar 48 |
+  painel lateral 240 | área do editor]; `#editor-area` = [tabs | breadcrumbs | stack do editor].
+  Painel colapsado **devolve a largura** ao editor (`grid-template-columns: var(--s-activitybar-w) auto
+  minmax(0, 1fr)` + `#editor-area { grid-column: 3 }` + canvas absoluto — era o bug de `w736` fixo).
+- **`EditorTheme` = fonte única** das cores da UI, espelhada em custom properties `--s-*` por
+  `applyChromeTheme()` (`src/renderer/main.ts`); estados derivados por `color-mix(in srgb, var(--s-fg)
+  N%, transparent)`; paletas **Dark/Light Modern** (`src/shared/themes.ts` + 5 chaves novas em
+  `theme-contract.ts`: `accent`, `activityBar`, `sidebar`, `statusBar`, `border`).
+- **`loadTheme()`** persiste só `{name, kind}` e reidrata o builtin (paleta velha não congela no
+  `sessionStorage`). Ícones **SVG inline** (herdam `currentColor`; não são atingidos pela CSP).
+  **Minimap** recebe as cores do tema (`MinimapDeps.colors()`). Undo/redo da status bar viraram
+  **botões reais** (`handleMenuAction("edit.undo"/"edit.redo")` — antes eram enfeite sem handler).
+- Rail só com o que existe de fato: Explorer (`Ctrl+B`), Search, Palette, toggle de tema
+  (`#theme-toggle`, saiu da status bar).
+
+### Os 3 bugs (todos pré-existentes, todos com efeito visível)
+
+1. **`Canvas2DBackend` nunca tingia os glifos** — `atlas.ts` guarda **tinta branca + alpha** ("o backend
+   aplica a cor") mas `drawGlyph` só aplicava `globalAlpha`; o RGB da instância era ignorado. Efeito:
+   **toda** a coloração de sintaxe invisível no backend **default** (`DEFAULT_RENDER_BACKEND =
+   "canvas2d"`) e texto **invisível** no tema claro (branco sobre branco). Correção: interface
+   `GlyphTinter` injetada (`canvas2d-backend.ts`) + `createAtlasTinter()` no renderer (1 cópia tingida
+   por RGB, recortada à faixa viva `atlas.usedHeight` em blocos de 256 px, `source-in` preserva o
+   alpha); `clear()` no toggle de tema.
+2. **Realce pedido com a `source` do boot** — o closure de `requestHighlight` lia
+   `source.revision` (fonte da demo, revisão **0**) enquanto a sessão aberta tem a fonte da sessão
+   (revisão **1**, reinicia por documento): `HighlightStore.set()` descartava **toda** resposta por
+   revisão diferente e re-pedia para sempre (o teto de retentativas nunca contava). Correção:
+   `activeSource()` = `controller?.current?.source ?? source` (`src/renderer/main.ts`).
+3. **`packageRoots` apontava para `assets/grammars`** — o `FileSystemResourceScanner` só desce em
+   **diretórios** (cada raiz é um *contentor de pacotes*) e ignora arquivos soltos na raiz ⇒ a
+   gramática de brinde **nunca era registrada** e `syntax.highlight` respondia sempre sem spans
+   (degradação silenciosa: tudo na cor default). Correção: raiz = `join(appPath, "assets")` ⇐ pacote
+   `grammars` (`src/main/index.ts`; função **exportada** para teste de regressão).
+
+### Verificação
+
+- Gates: `typecheck`/`lint`/`build` exit 0 · **449 testes / 44 arquivos** (baseline 443; +6: `usedHeight`,
+  4 de tingimento no `canvas2d`, 1 de regressão da raiz de pacote em `test/syntax-highlight.test.ts`).
+- **Visual por CDP** (`Page.captureScreenshot`, sem window manager): layout exato (rail `48`, painel
+  `240`, status `h22`, dpr 1.25), colapso do painel → `editor-area x48 w976`, troca de tema mudando
+  casca + canvas + minimap juntos, e **cores de sintaxe** confirmadas por histograma do canvas
+  (`#926C95` keyword, `#94715F` string, `#99B9D0` variável, `#6a9955`/`#008000` comentário) nos dois temas.
+- Script de verificação: `/tmp/opencode/cdp4.mjs` (aceita porta e caminho do arquivo; abre `?file=`,
+  fotografa dark/light). App: `electron . --no-sandbox --remote-debugging-port=9333` (a porta 9222 é
+  do Chrome do usuário).
+
+### Residual declarado (para a próxima sessão)
+
+- **Não reservamos largura do minimap** (fora de escopo) — o texto passa por baixo dele.
+- O **modo demo** (sem `?file=`) não tem gramática nem sessão ⇒ sem realce, por construção.
+- A gramática de brinde só cobre a extensão **`.demo`** (`assets/grammars/scribe-demo.sublime-syntax`) —
+  abrir um `.ts` **não** tem realce (não é bug, é a gramática de brinquedo).
+- `MAX_TOKENIZE_LINE_LENGTH = 4096` e o custo O(`end`) da tokenização continuam como já documentado
+  (§P2.4b residual): o teto é por linha, não por documento.
+- **Pendência de git**: nada foi commitado — a árvore mistura o trabalho desta sessão com WIP do
+  usuário (ver **🗂️ Estado do repositório**).
+
+---
+
 ## ▶️ Como retomar
 
 ```bash
@@ -431,7 +502,20 @@ Material de apoio: skill `reverse-engineer-anything` (+ `references/native-and-a
 
 ## 🗂️ Estado do repositório
 
-- Repo **git** inicializado (não era antes). Working tree limpo (`git log --oneline` para o histórico).
+- Repo **git** inicializado (não era antes). `git log --oneline` para o histórico.
+- ⚠️ **Working tree COM pendências** (2026-10-17, fim da sessão da repaginação — **nada commitado**):
+  - **Desta sessão (design + 3 bugs)**: `src/renderer/{index.html,index.css,main.ts,minimap.ts}`,
+    `src/shared/{theme-contract.ts,themes.ts}`, `src/core/syntax/theme.ts`,
+    `src/core/render/{atlas.ts,canvas2d-backend.ts}`, `src/main/index.ts`,
+    `src/core/render/{atlas,canvas2d-backend}.test.ts`, `test/syntax-highlight.test.ts`.
+  - **WIP do usuário** (já estava antes desta sessão, NÃO é meu): refactor backspace/delete →
+    `controller.replaceText` em `src/renderer/main.ts` (mesmo arquivo!); `.idea/runConfigurations/*` e
+    `test/smoke.test.ts` **staged** (`git add` feito pelo usuário); `release/*` (AppImage/asar rebuildados);
+    `.gitignore` (para versionar `.idea/runConfigurations/`).
+  - Por isso a sessão **não commitou**: separar exigiria `git add -p` interativo. **Sugestão**: commit do
+    design+bugs primeiro (as mudanças de `main.ts` desta sessão são rastreáveis: `applyChromeTheme`,
+    `createAtlasTinter`, `activeSource`, `syntaxTheme`, sidebar/breadcrumbs) e o WIP do usuário depois.
+  - Baseline verde no fim da sessão: `typecheck`/`lint`/`build` exit 0 · **449 testes / 44 arquivos**.
 - `.gitignore` cobre `target/`, `tools/`, `setup/env.sh`, artefatos Ghidra, venvs, `dist/`,
   `node_modules/`, caches de IDE e `.serena/`.
 - **Stack do scaffold (Fase 3):** `package.json` + `package-lock.json` versionados; `dist/` e

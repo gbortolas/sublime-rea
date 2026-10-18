@@ -9,6 +9,8 @@ import { Canvas2DBackend, type Canvas2DContextLike } from "./canvas2d-backend";
 class FakeContext implements Canvas2DContextLike {
   readonly calls: string[] = [];
   readonly alphas: number[] = [];
+  /** Superfície usada em cada `drawImage` (prova qual cópia do atlas foi desenhada). */
+  readonly images: unknown[] = [];
   fillStyle: string | CanvasGradient | CanvasPattern = "";
   strokeStyle: string | CanvasGradient | CanvasPattern = "";
   globalAlpha = 1;
@@ -69,6 +71,7 @@ class FakeContext implements Canvas2DContextLike {
   ): void {
     this.calls.push(`drawImage(${sx},${sy},${sw},${sh}->${dx},${dy},${dw},${dh})`);
     this.alphas.push(this.globalAlpha);
+    this.images.push(_image);
   }
 }
 
@@ -143,6 +146,58 @@ describe("Canvas2DBackend — glifos (atlas via drawImage)", () => {
     expect(draws[1]).toBe("drawImage(1,2,8,12->5.3,6,8,12)");
     expect(draws[2]).toBe("drawImage(1,2,8,12->5.6,6,8,12)");
     for (const alpha of ctx.alphas) expect(alpha).toBeCloseTo(0x80 / 255 / 3, 5);
+  });
+});
+
+describe("Canvas2DBackend — tingimento dos glifos por cor", () => {
+  it("sem tinter, desenha a tinta do atlas (branca)", () => {
+    const { backend, ctx } = makeBackend();
+    backend.beginFrame(viewport);
+    backend.pushGlyphs([glyph()]);
+    backend.present([]);
+    expect(ctx.images).toEqual([image]);
+  });
+
+  it("com tinter, desenha a cópia tingida e passa a cor da instância", () => {
+    const tinted = {} as unknown as CanvasImageSource;
+    const seen: number[] = [];
+    const ctx = new FakeContext();
+    const backend = new Canvas2DBackend(ctx, new GlyphAtlas(), {
+      image,
+      tint: {
+        imageFor: (rgba) => {
+          seen.push(rgba);
+          return tinted;
+        },
+      },
+    });
+    backend.beginFrame(viewport);
+    backend.pushGlyphs([glyph()]);
+    backend.present([]);
+    expect(seen).toEqual([0xffffff80]);
+    expect(ctx.images).toEqual([tinted]);
+  });
+
+  it("tinter que não responde cai na tinta do atlas (nunca deixa de desenhar)", () => {
+    const ctx = new FakeContext();
+    const backend = new Canvas2DBackend(ctx, new GlyphAtlas(), {
+      image,
+      tint: { imageFor: () => undefined },
+    });
+    backend.beginFrame(viewport);
+    backend.pushGlyphs([glyph()]);
+    backend.present([]);
+    expect(ctx.images).toEqual([image]);
+  });
+
+  it("subpixel também usa a cópia tingida nos 3 desenhos", () => {
+    const tinted = {} as unknown as CanvasImageSource;
+    const ctx = new FakeContext();
+    const backend = new Canvas2DBackend(ctx, new GlyphAtlas(), { image, tint: { imageFor: () => tinted } });
+    backend.beginFrame(viewport);
+    backend.pushGlyphs([subpixelGlyph([0, 0.3, 0.6])]);
+    backend.present([]);
+    expect(ctx.images).toEqual([tinted, tinted, tinted]);
   });
 });
 

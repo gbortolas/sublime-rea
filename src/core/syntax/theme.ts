@@ -77,3 +77,28 @@ export function createDefaultTheme(): ThemeResolverImpl {
   theme.add("entity.name", { color: 0xdcdcaaff as RGBA });
   return theme;
 }
+
+/**
+ * Tema de sintaxe CLARO: par do `createDefaultTheme()` para quando o tema do editor é claro.
+ *
+ * Motivo de existir: as cores do par escuro são **claras** (para fundo escuro) e ficam
+ * praticamente invisíveis sobre fundo branco — o texto vira uma mancha ilegível. Cobre
+ * exatamente os mesmos escopos do tema escuro, mudando só a paleta.
+ */
+export function createLightTheme(): ThemeResolverImpl {
+  const theme = new ThemeResolverImpl();
+  theme.add("comment", { color: 0x008000ff as RGBA, italic: true });
+  theme.add("keyword", { color: 0xaf00dbff as RGBA });
+  theme.add("string", { color: 0xa31515ff as RGBA });
+  theme.add("constant.numeric", { color: 0x098658ff as RGBA });
+  theme.add("constant.character.escape", { color: 0xee0000ff as RGBA });
+  theme.add("variable", { color: 0x001080ff as RGBA });
+  theme.add("punctuation", { color: 0x666666ff as RGBA });
+  theme.add("entity.name", { color: 0x795e26ff as RGBA });
+  return theme;
+}
+
+/** Tema de sintaxe adequado ao tipo do tema do editor (`dark` → default, `light` → claro). */
+export function createSyntaxTheme(kind: "dark" | "light"): ThemeResolverImpl {
+  return kind === "light" ? createLightTheme() : createDefaultTheme();
+}

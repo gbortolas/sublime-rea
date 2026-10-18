@@ -304,6 +304,38 @@ Problemas identificados ao testar o AppImage pela primeira vez:
 - [ ] **P1 — Performance dos menus lentos**: menus nativos do Electron com muitos itens podem estar causando lentidão. Investigar e simplificar.
 - [x] **P1 — Sem indicação de como abrir arquivo**: welcome screen exibe atalhos (Ctrl+O, Ctrl+N) e hint "Arraste um arquivo para abrir". Status bar mostra "Nenhum arquivo aberto". ✅ (2026-10-17)
 
+## 🎨 UX — Repaginação do design (2026-10-17, pedido do usuário)
+
+> Pedido: *"o app tá meio capenga, temos que trabalhar o design, deixar mais elegante e moderno"*.
+> Direção escolhida pelo usuário: **moderno tipo VS Code** (activity bar, breadcrumbs, densidade, ícones de linha).
+
+- [x] **Casca VS Code-like** ✅ — grid `#workbench` = [rail de atividades | painel lateral | área do
+      editor] + status bar; **breadcrumbs** com o último segmento destacado; find bar em **duas linhas**
+      (Buscar/Substituir); **ícones SVG inline** (herdam `currentColor`, acompanham o tema sem JS);
+      abas com close + estado `dirty`; undo/redo da status bar viraram **botões reais** (antes eram
+      enfeite sem handler); rail só com o que existe de fato (Explorer `Ctrl+B`, Search, Palette, tema).
+      Painel colapsado devolve a largura ao editor (`grid-template-columns: … auto minmax(0,1fr)`).
+- [x] **Tema como fonte única** ✅ — `EditorTheme` (já dono das "cores da UI") virou a **fonte única** e é
+      espelhado em CSS custom properties `--s-*` por `applyChromeTheme()`; estados (hover/pressed/muted/
+      selecionado/ring) derivados com `color-mix(in srgb, var(--s-fg) N%, transparent)` — sem token por
+      combinação; paletas Dark/Light Modern (casca `#18191b`/`#f8f8f8`, accent `#3794ff`/`#005fb8`);
+      **minimap** passou a receber as cores do tema; `loadTheme` persiste só `{name,kind}` e reidrata o
+      builtin (paleta velha não congela no `sessionStorage`); tema de **sintaxe** claro próprio
+      (`createLightTheme`), senão o par escuro (cores claras) sumiria sobre fundo branco.
+- [x] **3 bugs reais achados/corrigidos no caminho** ✅ — detalhados em **HANDOFF §Fase 3.4**:
+      (1) `Canvas2DBackend` **nunca tingia** os glifos (atlas é tinta branca; só `globalAlpha` era
+      aplicado) ⇒ coloração de sintaxe nunca aparecia no backend **default** e o tema claro ficava com
+      texto invisível; (2) o realce era pedido com a `source` **do boot** (revisão 0) em vez da sessão
+      ativa (revisão 1) ⇒ toda resposta descartada e re-pedida para sempre; (3) `packageRoots` apontava
+      para `assets/grammars`, que o scanner **ignora** (raiz = contentor de pacotes) ⇒ gramática de
+      brinde nunca registrada e `syntax.highlight` sempre sem spans.
+- [x] **Verificação** ✅ — `typecheck`/`lint`/`build` exit 0 · **449 testes / 44 arquivos** (baseline
+      443; +6 novos: `usedHeight`, 4 de tingimento no `canvas2d`, 1 de regressão de raiz de pacote) ·
+      validação visual por **CDP** (`Page.captureScreenshot`, sem window manager): layout exato
+      (rail 48 / painel 240 / status h22), colapso do painel devolvendo `x48 w976`, troca de tema
+      (casca + canvas + minimap juntos) e **cores de sintaxe** confirmadas por histograma
+      (`#926C95` keyword, `#94715F` string, `#99B9D0` variável, `#008000`/`#6a9955` comentário).
+
 ## 🧹 P3 — Housekeeping / dívidas
 
 - [x] **P3.10 — Bundlar o worker de `TaskPool` no build (matar a duplicação do scanner de busca)** ✅

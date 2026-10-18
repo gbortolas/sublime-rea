@@ -176,6 +176,17 @@ export class GlyphAtlas {
     return this.regions.size;
   }
 
+  /**
+   * Altura ocupada pelas *shelves* já alocadas (px lógicos, de cima para baixo).
+   *
+   * O atlas preenche do topo para baixo e **nunca** reescreve uma região: logo, tudo que foi
+   * subido até agora cabe em `[0, usedHeight)`. Serve para quem precisa copiar só a parte viva
+   * do atlas (ex.: a cópia tingida por cor do backend `canvas2d`) sem pagar a página inteira.
+   */
+  get usedHeight(): number {
+    return Math.min(this.size, this.shelfY + this.shelfHeight);
+  }
+
   /** Superfície de desenho acoplada (se houver) — o `Canvas2DBackend` desenha a partir dela. */
   get image(): CanvasImageSource | undefined {
     return this.surface?.image;

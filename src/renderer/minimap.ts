@@ -12,8 +12,21 @@ const MINIMAP_WIDTH = 72;
 const BAR_MIN_HEIGHT = 1;
 const LINE_EMPTY_ALPHA = 0.1;
 const LINE_CONTENT_ALPHA = 0.45;
-const VIEWPORT_BG = "rgba(255,255,255,0.08)";
-const VIEWPORT_BORDER = "rgba(255,255,255,0.25)";
+
+/**
+ * Paleta do minimap, resolvida a cada `paint()`. O minimap desenha o seu próprio canvas, então
+ * precisa receber a paleta do tema ativo — sem isso vira uma tarja escura sobre o tema claro.
+ */
+export interface MinimapColors {
+  /** Fundo da faixa (a cor do editor). */
+  readonly background: string;
+  /** Cor das barras que representam as linhas. */
+  readonly line: string;
+  /** Realce da viewport atual. */
+  readonly viewport: string;
+  /** Borda do realce da viewport. */
+  readonly viewportBorder: string;
+}
 
 export interface MinimapSource {
   /** Número total de linhas no documento. */
@@ -28,6 +41,8 @@ export interface MinimapDeps {
   lineHeight: number;
   /** Função que retorna a altura atual da viewport em px (pode mudar com resize). */
   getViewportHeight: () => number;
+  /** Paleta corrente (consultada a cada desenho, então acompanha a troca de tema). */
+  colors: () => MinimapColors;
 }
 
 /** Resultado do `attachMinimap`: para desligar. */
@@ -64,8 +79,10 @@ export function attachMinimap(deps: MinimapDeps): MinimapBinding {
     const viewportHeight = getViewportHeight();
     const lineCount = source.lineCount();
 
+    const colors = deps.colors();
+
     // Fundo
-    ctx.fillStyle = "#1a1a1e";
+    ctx.fillStyle = colors.background;
     ctx.fillRect(0, 0, w, h);
 
     if (lineCount === 0) return;
@@ -78,10 +95,11 @@ export function attachMinimap(deps: MinimapDeps): MinimapBinding {
     for (let i = 0; i < lineCount; i++) {
       const y = i * lineH;
       const text = source.line(i);
-      const alpha = text.trim().length > 0 ? LINE_CONTENT_ALPHA : LINE_EMPTY_ALPHA;
-      ctx.fillStyle = `rgba(200,200,200,${alpha})`;
+      ctx.globalAlpha = text.trim().length > 0 ? LINE_CONTENT_ALPHA : LINE_EMPTY_ALPHA;
+      ctx.fillStyle = colors.line;
       ctx.fillRect(2, y, barW, Math.max(1, Math.ceil(lineH)));
     }
+    ctx.globalAlpha = 1;
 
     // Viewport highlight
     const scrollLine = viewport.scrollOffsetPx() / lineHeight;
@@ -89,9 +107,9 @@ export function attachMinimap(deps: MinimapDeps): MinimapBinding {
     const vpY = scrollLine * lineH;
     const vpH = Math.min(visibleLines * lineH, h - vpY);
 
-    ctx.fillStyle = VIEWPORT_BG;
+    ctx.fillStyle = colors.viewport;
     ctx.fillRect(0, vpY, w, vpH);
-    ctx.strokeStyle = VIEWPORT_BORDER;
+    ctx.strokeStyle = colors.viewportBorder;
     ctx.lineWidth = 1;
     ctx.strokeRect(0.5, vpY, w - 1, vpH);
   };

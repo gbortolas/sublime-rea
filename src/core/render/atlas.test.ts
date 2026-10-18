@@ -22,6 +22,18 @@ function bitmap(w: number, h: number, alpha = 200): GlyphBitmap {
 
 const style: TextStyle = { family: "mono", sizePx: 16, weight: 400, italic: false };
 
+describe("GlyphAtlas — faixa viva (usedHeight)", () => {
+  it("acompanha as prateleiras alocadas e nunca passa do lado do atlas", () => {
+    const atlas = new GlyphAtlas({ size: 32 as AtlasSize });
+    expect(atlas.usedHeight).toBe(0);
+    for (let i = 0; i < 6; i++) atlas.upload(`g${i}`, bitmap(4, 8));
+    expect(atlas.usedHeight).toBe(8); // tudo na primeira prateleira
+    atlas.upload("g6", bitmap(4, 8)); // estoura a prateleira → abre a linha de baixo (y = 9)
+    expect(atlas.usedHeight).toBe(17);
+    expect(atlas.usedHeight).toBeLessThanOrEqual(32);
+  });
+});
+
 describe("GlyphAtlas — packing determinístico (shelf)", () => {
   it("empacota lado a lado na mesma prateleira com 1px de padding", () => {
     const atlas = new GlyphAtlas({ size: 1024 });

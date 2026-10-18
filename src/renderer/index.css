@@ -1,16 +1,91 @@
 /*
- * Scribe — estilos mínimos da casca (shell).
+ * ══════════════════════════════════════════════════════════════════════════════
+ * Scribe — estilos da casca (shell).
  *
  * A superfície do documento é o <canvas>; nada aqui influencia o desenho do texto
  * (isso é responsabilidade do RenderPipeline). Regra de arquitetura: `ui` só cerca
  * conteúdo, nunca estiliza o conteúdo — ver docs/architecture/04-render-e-ui.md.
+ *
+ * Duas camadas:
+ *   1. **Tokens** (`--s-*`): geometria, tipografia e movimento são fixos; as CORES são derivadas
+ *      do tema ativo. O renderer escreve as cores via `applyChromeTheme()` (style em `:root`),
+ *      tornando `EditorTheme` a fonte única para canvas E casca. Os valores em `:root` abaixo são
+ *      apenas o fallback de primeiro paint (dark).
+ *   2. **Componentes**: rail, painel, abas, breadcrumbs, welcome, busca, paleta e rodapé.
+ *
+ * `color-mix(in srgb, var(--s-fg) N%, transparent)` gera estados (hover/selecionado/texto
+ * secundário) translúcidos que funcionam sobre QUALQUER superfície, sem precisar de um token por
+ * combinação — e sem depender de o tema ser claro ou escuro.
+ * ══════════════════════════════════════════════════════════════════════════════
  */
 
 :root {
   color-scheme: dark;
-  --scribe-bg: #1e1f22;
-  --scribe-fg: #d4d4d4;
-  --scribe-status-bg: #2b2d30;
+
+  /* ── Tipografia ───────────────────────────────────────────────────────── */
+  --s-font-ui: system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", sans-serif;
+  --s-font-mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, "Liberation Mono", monospace;
+  --s-fs-xs: 11px;
+  --s-fs-sm: 12px;
+  --s-fs-md: 13px;
+  --s-fs-lg: 15px;
+
+  /* ── Geometria ────────────────────────────────────────────────────────── */
+  --s-radius-sm: 3px;
+  --s-radius: 5px;
+  --s-radius-lg: 8px;
+  --s-space-1: 4px;
+  --s-space-2: 8px;
+  --s-space-3: 12px;
+  --s-space-4: 16px;
+  --s-activitybar-w: 48px;
+  --s-sidebar-w: 240px;
+  --s-tabbar-h: 35px;
+  --s-breadcrumbs-h: 24px;
+  --s-statusbar-h: 22px;
+  --s-minimap-w: 72px;
+
+  /* ── Movimento ────────────────────────────────────────────────────────── */
+  --s-dur: 120ms;
+  --s-ease: cubic-bezier(0.2, 0.8, 0.2, 1);
+
+  /* ── Cores: fallback (dark) — sobrescritas pelo renderer ──────────────── */
+  --s-bg: #1e1f22;
+  --s-fg: #d4d4d4;
+  --s-accent: #3794ff;
+  --s-gutter: #2b2d30;
+  --s-gutter-fg: #6e6e6e;
+  --s-border: #2b2d30;
+  --s-activitybar: #18191b;
+  --s-sidebar: #18191b;
+  --s-statusbar: #18191b;
+  --s-tabbar: #18191b;
+  --s-tabactive: #1e1f22;
+  --s-tabinactive: #18191b;
+
+  /* ── Derivados (translúcidos, agnósticos de tema) ─────────────────────── */
+  --s-muted: color-mix(in srgb, var(--s-fg) 62%, transparent);
+  --s-subtle: color-mix(in srgb, var(--s-fg) 40%, transparent);
+  --s-hover: color-mix(in srgb, var(--s-fg) 8%, transparent);
+  --s-pressed: color-mix(in srgb, var(--s-fg) 15%, transparent);
+  --s-selected: color-mix(in srgb, var(--s-accent) 26%, transparent);
+  --s-ring: color-mix(in srgb, var(--s-accent) 70%, transparent);
+  --s-warn: #e0a44a;
+
+  /* ── Sombras (por tema: `[data-theme="light"]` abaixo) ────────────────── */
+  --s-shadow: 0 12px 32px rgb(0 0 0 / 0.5), 0 2px 8px rgb(0 0 0 / 0.35);
+}
+
+[data-theme="light"] {
+  color-scheme: light;
+  --s-shadow: 0 12px 32px rgb(0 0 0 / 0.16), 0 2px 8px rgb(0 0 0 / 0.08);
+  --s-warn: #a86a00;
+}
+
+/* ══ Base ══════════════════════════════════════════════════════════════════ */
+
+* {
+  box-sizing: border-box;
 }
 
 html,
@@ -18,250 +93,404 @@ body {
   margin: 0;
   padding: 0;
   height: 100%;
-  background: var(--scribe-bg);
-  color: var(--scribe-fg);
-  font-family: system-ui, sans-serif;
   overflow: hidden;
+  background: var(--s-bg);
+  color: var(--s-fg);
+  font-family: var(--s-font-ui);
+  font-size: var(--s-fs-md);
+  -webkit-font-smoothing: antialiased;
 }
 
+/* ══ Layout ════════════════════════════════════════════════════════════════ */
+
 #app {
-  position: relative;
+  display: grid;
+  /* `minmax(0, 1fr)` no lugar de `1fr`: impede que o min-content do filho (canvas, breadcrumbs)
+     infle a trilha e empurre a status bar para fora da janela. */
+  grid-template-rows: minmax(0, 1fr) var(--s-statusbar-h);
   width: 100vw;
   height: 100vh;
 }
 
+#workbench {
+  display: grid;
+  /* A terceira trilha é `minmax(0, 1fr)` (e não `1fr`) para o min-content do canvas não inflar
+     a coluna. O editor é posicionado EXPLICITAMENTE na coluna 3: com o painel em `display: none`
+     a auto-alocação jogaria o editor para a coluna 2 (a `auto`) e ele não expandiria. */
+  grid-template-columns: var(--s-activitybar-w) auto minmax(0, 1fr);
+  min-width: 0;
+  min-height: 0;
+}
+
+#editor-area {
+  grid-column: 3;
+  display: grid;
+  grid-template-rows: var(--s-tabbar-h) var(--s-breadcrumbs-h) minmax(0, 1fr);
+  min-width: 0;
+  min-height: 0;
+}
+
+#editor-stack {
+  position: relative;
+  overflow: hidden;
+  min-width: 0;
+  min-height: 0;
+}
+
 #editor-surface {
+  /* Absoluto: assim o canvas não contribui com tamanho INTRÍNSECO para a grade (o
+     `canvas.width/height` em px, gravado por `ScribeRenderer.resize()`, inflava a trilha `auto`). */
+  position: absolute;
+  inset: 0;
   display: block;
   width: 100%;
-  height: calc(100% - 32px); /* tab bar height */
+  height: 100%;
   outline: none;
 }
+
+/* ══ Barra de atividades (rail) ════════════════════════════════════════════ */
+
+#activity-bar {
+  display: flex;
+  flex-direction: column;
+  background: var(--s-activitybar);
+  border-right: 1px solid var(--s-border);
+  user-select: none;
+}
+
+.activity-spacer {
+  flex: 1;
+}
+
+.activity-item {
+  position: relative;
+  display: grid;
+  place-items: center;
+  height: var(--s-activitybar-w);
+  padding: 0;
+  border: none;
+  background: transparent;
+  color: var(--s-subtle);
+  cursor: pointer;
+  transition: color var(--s-dur) var(--s-ease);
+}
+
+.activity-item:hover {
+  color: var(--s-fg);
+}
+
+.activity-item.active,
+.activity-item[aria-pressed="true"] {
+  color: var(--s-fg);
+}
+
+/* Marcador de item ativo: barra de acento na borda esquerda (padrão VS Code). */
+.activity-item.active::before,
+.activity-item[aria-pressed="true"]::before {
+  content: "";
+  position: absolute;
+  left: 0;
+  top: 0;
+  bottom: 0;
+  width: 2px;
+  background: var(--s-accent);
+}
+
+#theme-toggle .icon-sun,
+[data-theme="light"] #theme-toggle .icon-moon {
+  display: none;
+}
+
+[data-theme="light"] #theme-toggle .icon-sun {
+  display: block;
+}
+
+/* ══ Painel lateral (explorador) ═══════════════════════════════════════════ */
+
+#sidebar {
+  display: flex;
+  flex-direction: column;
+  width: var(--s-sidebar-w);
+  min-width: 0;
+  background: var(--s-sidebar);
+  border-right: 1px solid var(--s-border);
+  overflow: hidden;
+}
+
+#sidebar[hidden] {
+  display: none;
+}
+
+.sidebar-header {
+  display: flex;
+  align-items: center;
+  gap: var(--s-space-1);
+  width: 100%;
+  height: 26px;
+  flex: none;
+  padding: 0 var(--s-space-2) 0 2px;
+  border: none;
+  background: transparent;
+  color: var(--s-muted);
+  font: inherit;
+  font-size: var(--s-fs-xs);
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  user-select: none;
+  cursor: pointer;
+}
+
+.sidebar-header:hover {
+  color: var(--s-fg);
+}
+
+.sidebar-chevron {
+  flex: none;
+  transition: transform var(--s-dur) var(--s-ease);
+}
+
+.sidebar-header[aria-expanded="false"] .sidebar-chevron {
+  transform: rotate(-90deg);
+}
+
+.sidebar-title {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.sidebar-count {
+  margin-left: auto;
+  padding-right: var(--s-space-1);
+  font-weight: 500;
+  font-variant-numeric: tabular-nums;
+}
+
+.sidebar-list {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  padding-bottom: var(--s-space-2);
+}
+
+.sidebar-list[hidden] {
+  display: none;
+}
+
+.sidebar-item {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  width: 100%;
+  padding: 4px var(--s-space-2) 4px var(--s-space-3);
+  border: none;
+  background: transparent;
+  color: var(--s-muted);
+  font: inherit;
+  font-size: var(--s-fs-sm);
+  text-align: left;
+  cursor: pointer;
+}
+
+.sidebar-item:hover {
+  background: var(--s-hover);
+  color: var(--s-fg);
+}
+
+.sidebar-item.active {
+  background: var(--s-selected);
+  color: var(--s-fg);
+}
+
+.sidebar-item .item-name {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.sidebar-item .item-dot {
+  flex: none;
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--s-warn);
+}
+
+/* ══ Abas ══════════════════════════════════════════════════════════════════ */
+
+#tab-bar {
+  display: flex;
+  align-items: stretch;
+  background: var(--s-tabbar);
+  overflow-x: auto;
+  overflow-y: hidden;
+  scrollbar-width: none;
+  /* Divisória pintada pelo fundo do elemento: a aba ativa (opaca) cobre a sua parte. */
+  box-shadow: inset 0 -1px 0 var(--s-border);
+}
+
+#tab-bar::-webkit-scrollbar {
+  display: none;
+}
+
+.tab {
+  position: relative;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex: none;
+  min-width: 0;
+  max-width: 180px;
+  height: 100%;
+  padding: 0 var(--s-space-2) 0 var(--s-space-3);
+  border: none;
+  border-right: 1px solid var(--s-border);
+  background: var(--s-tabinactive);
+  color: var(--s-muted);
+  font: inherit;
+  font-size: var(--s-fs-sm);
+  white-space: nowrap;
+  user-select: none;
+  cursor: pointer;
+  transition:
+    background var(--s-dur) var(--s-ease),
+    color var(--s-dur) var(--s-ease);
+}
+
+.tab:hover {
+  background: var(--s-hover);
+  color: var(--s-fg);
+}
+
+.tab.active {
+  background: var(--s-tabactive);
+  color: var(--s-fg);
+  /* Realce superior em acento (padrão "Modern" do VS Code). */
+  box-shadow: inset 0 1px 0 0 var(--s-accent);
+}
+
+.tab .tab-label {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* "Sujo" = bolinha antes do nome; some no hover, quando o botão de fechar toma o lugar. */
+.tab.dirty .tab-label::before {
+  content: "";
+  display: inline-block;
+  width: 7px;
+  height: 7px;
+  margin-right: 6px;
+  border-radius: 50%;
+  vertical-align: 1px;
+  background: var(--s-warn);
+}
+
+.tab.dirty:hover .tab-label::before {
+  display: none;
+}
+
+.tab .tab-close {
+  display: none;
+  flex: none;
+  place-items: center;
+  width: 18px;
+  height: 18px;
+  padding: 0;
+  border: none;
+  border-radius: var(--s-radius-sm);
+  background: transparent;
+  color: var(--s-muted);
+  cursor: pointer;
+}
+
+.tab:hover .tab-close,
+.tab.active .tab-close {
+  display: grid;
+}
+
+.tab .tab-close:hover {
+  background: var(--s-pressed);
+  color: var(--s-fg);
+}
+
+/* ══ Breadcrumbs ═══════════════════════════════════════════════════════════ */
+
+#breadcrumbs {
+  display: flex;
+  align-items: center;
+  gap: var(--s-space-2);
+  padding: 0 var(--s-space-3);
+  background: var(--s-bg);
+  border-bottom: 1px solid var(--s-border);
+  color: var(--s-muted);
+  font-size: var(--s-fs-sm);
+  white-space: nowrap;
+  overflow: hidden;
+  user-select: none;
+}
+
+.bc-path {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  min-width: 0;
+  overflow: hidden;
+}
+
+.bc-seg {
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.bc-seg:last-child {
+  color: var(--s-fg);
+}
+
+.bc-sep {
+  display: grid;
+  place-items: center;
+  flex: none;
+  color: var(--s-subtle);
+}
+
+.bc-sep svg {
+  width: 12px;
+  height: 12px;
+}
+
+.bc-position {
+  margin-left: auto;
+  flex: none;
+  padding-left: var(--s-space-2);
+  color: var(--s-subtle);
+  font-variant-numeric: tabular-nums;
+}
+
+/* ══ Overlay / canvas ══════════════════════════════════════════════════════ */
 
 #ui-overlay {
   position: absolute;
   inset: 0;
+  z-index: 2;
   pointer-events: none;
-  display: flex;
-  flex-direction: column;
-  justify-content: flex-end;
 }
 
-#status-bar {
-  pointer-events: auto;
-  display: flex;
-  gap: 1.5rem;
-  padding: 0.35rem 0.75rem;
-  background: var(--scribe-status-bg);
-  font-size: 0.8rem;
-  font-variant-numeric: tabular-nums;
-  position: relative;
-  z-index: 15;
-}
+/* ══ Welcome screen ════════════════════════════════════════════════════════ */
 
-/* Indicadores de undo/redo: apagados quando indisponíveis (o renderer alterna .disabled). */
-#status-undo,
-#status-redo {
-  font-variant-numeric: normal;
-  transition: opacity 120ms ease-out;
-}
-
-#status-bar .disabled {
-  opacity: 0.35;
-}
-
-#status-bar .clickable {
-  cursor: pointer;
-  user-select: none;
-}
-#status-bar .clickable:hover {
-  opacity: 0.8;
-}
-
-#status-dirty.dirty {
-  color: #e8a838;
-  font-weight: bold;
-}
-
-/*
- * Find bar: flutua no topo à direita do overlay. `pointer-events: auto` reativa o mouse (o overlay
- * é `pointer-events: none`). O atributo `hidden` esconde — o seletor de atributo vence `display:flex`.
- */
-#find-bar {
-  pointer-events: auto;
-  position: absolute;
-  top: 0.5rem;
-  right: 0.5rem;
-  display: flex;
-  gap: 0.35rem;
-  align-items: center;
-  padding: 0.35rem 0.5rem;
-  background: var(--scribe-status-bg);
-  border: 1px solid #3a3d41;
-  border-radius: 4px;
-  font-size: 0.8rem;
-}
-
-#find-bar[hidden] {
-  display: none;
-}
-
-#find-bar input {
-  width: 12rem;
-  padding: 0.2rem 0.35rem;
-  color: var(--scribe-fg);
-  background: var(--scribe-bg);
-  border: 1px solid #3a3d41;
-  border-radius: 3px;
-  font: inherit;
-}
-
-#find-bar input:focus {
-  outline: 1px solid var(--scribe-caret, #7fb3ff);
-}
-
-#find-count,
-#find-status {
-  font-variant-numeric: tabular-nums;
-  white-space: nowrap;
-}
-
-#find-status {
-  color: #9aa0a6;
-}
-
-#find-bar button {
-  padding: 0.2rem 0.4rem;
-  color: var(--scribe-fg);
-  background: #3a3d41;
-  border: 1px solid #4a4d51;
-  border-radius: 3px;
-  font: inherit;
-  cursor: pointer;
-}
-
-#find-bar button:hover {
-  background: #4a4d51;
-}
-
-/* Botões de toggle (case-sensitive, regex, whole word) — estado inativo monocromático, ativo azul. */
-.find-toggles {
-  display: flex;
-  gap: 2px;
-  margin: 0 4px;
-}
-.find-toggle {
-  background: transparent;
-  border: 1px solid transparent;
-  color: #8a8a8a;
-  cursor: pointer;
-  padding: 2px 6px;
-  font-size: 12px;
-  font-family: monospace;
-  border-radius: 3px;
-  min-width: 24px;
-  text-align: center;
-  line-height: 1.4;
-}
-.find-toggle:hover {
-  border-color: #555;
-  color: #ccc;
-}
-.find-toggle.active {
-  background: #2a4a6a;
-  border-color: #4a7aaa;
-  color: #fff;
-}
-
-/* ── Tab bar ─────────────────────────────────────────────────── */
-#tab-bar {
-  pointer-events: auto;
-  display: flex;
-  align-items: stretch;
-  height: 32px;
-  background: #25272b;
-  overflow-x: auto;
-  overflow-y: hidden;
-  scrollbar-width: thin;
-  gap: 0;
-  flex-shrink: 0;
-}
-#tab-bar::-webkit-scrollbar { height: 3px; }
-#tab-bar::-webkit-scrollbar-thumb { background: #555; border-radius: 2px; }
-
-.tab {
-  pointer-events: auto;
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  padding: 0 12px;
-  min-width: 60px;
-  max-width: 180px;
-  font-size: 0.78rem;
-  color: #999;
-  background: transparent;
-  border: none;
-  border-right: 1px solid #333;
-  cursor: pointer;
-  white-space: nowrap;
-  user-select: none;
-  flex-shrink: 0;
-  position: relative;
-}
-.tab:hover {
-  color: #ccc;
-  background: #2d2f33;
-}
-.tab.active {
-  color: #e0e0e0;
-  background: var(--scribe-bg, #1e1f22);
-  border-bottom: 2px solid #7fb3ff;
-}
-.tab .tab-label {
-  overflow: hidden;
-  text-overflow: ellipsis;
-  flex: 1;
-}
-.tab .tab-dirty {
-  color: #e8a838;
-  font-size: 1.2rem;
-  line-height: 1;
-}
-.tab .tab-close {
-  display: none;
-  align-items: center;
-  justify-content: center;
-  width: 16px;
-  height: 16px;
-  border-radius: 3px;
-  font-size: 0.7rem;
-  color: #999;
-  cursor: pointer;
-  border: none;
-  background: transparent;
-  padding: 0;
-  line-height: 1;
-}
-.tab:hover .tab-close {
-  display: flex;
-}
-.tab .tab-close:hover {
-  background: #555;
-  color: #fff;
-}
-
-/* ── Welcome screen ────────────────────────────────────────────── */
 #welcome-screen {
   pointer-events: auto;
   position: absolute;
-  top: 32px;  /* abaixo da tab bar */
-  left: 0;
-  right: 0;
-  bottom: 0;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  background: var(--scribe-bg);
-  z-index: 10;
+  inset: 0;
+  z-index: 2;
+  display: grid;
+  place-items: center;
+  background: var(--s-bg);
 }
 
 #welcome-screen[hidden] {
@@ -269,76 +498,231 @@ body {
 }
 
 .welcome-content {
+  max-width: 420px;
+  padding: var(--s-space-4);
   text-align: center;
-  max-width: 400px;
   user-select: none;
 }
 
 .welcome-logo {
-  font-size: 3rem;
-  font-weight: 300;
-  color: #7fb3ff;
-  margin: 0 0 0.25rem;
-  letter-spacing: 0.3em;
+  margin: 0;
+  font-size: 2.6rem;
+  font-weight: 200;
+  letter-spacing: 0.34em;
+  text-indent: 0.34em; /* compensa o letter-spacing final, mantendo o centro óptico */
   text-transform: uppercase;
+  color: var(--s-fg);
+}
+
+.welcome-logo::after {
+  content: "";
+  display: block;
+  width: 54px;
+  height: 2px;
+  margin: var(--s-space-3) auto 0;
+  border-radius: 2px;
+  background: var(--s-accent);
 }
 
 .welcome-subtitle {
-  font-size: 0.9rem;
-  color: #888;
-  margin: 0 0 2rem;
+  margin: var(--s-space-3) 0 var(--s-space-4);
+  font-size: var(--s-fs-lg);
+  color: var(--s-muted);
 }
 
 .welcome-shortcuts {
-  display: flex;
-  flex-direction: column;
-  gap: 0.5rem;
-  margin-bottom: 1.5rem;
+  display: grid;
+  gap: 6px;
+  margin-bottom: var(--s-space-4);
 }
 
 .shortcut-row {
-  display: flex;
-  justify-content: center;
+  display: grid;
+  grid-template-columns: 9.5rem 1fr;
   align-items: center;
-  gap: 0.75rem;
-  font-size: 0.85rem;
+  gap: var(--s-space-2);
+  font-size: var(--s-fs-sm);
 }
 
 .shortcut-row kbd {
-  display: inline-block;
-  min-width: 5rem;
-  padding: 0.2rem 0.5rem;
-  background: #2b2d30;
-  border: 1px solid #3a3d41;
-  border-radius: 4px;
-  font-family: monospace;
-  font-size: 0.78rem;
-  color: #ccc;
+  display: block;
+  padding: 3px var(--s-space-2);
+  border: 1px solid var(--s-border);
+  border-radius: var(--s-radius);
+  background: var(--s-hover);
+  color: var(--s-fg);
+  font-family: var(--s-font-mono);
+  font-size: var(--s-fs-xs);
   text-align: center;
 }
 
 .shortcut-row span {
-  color: #999;
+  color: var(--s-muted);
+  text-align: left;
 }
 
 .welcome-hint {
-  font-size: 0.78rem;
-  color: #666;
+  margin: 0;
+  font-size: var(--s-fs-sm);
+  color: var(--s-subtle);
 }
 
-/* ── Command Palette ──────────────────────────────────────────── */
+/* ══ Minimap ══════════════════════════════════════════════════════════════ */
+
+#minimap {
+  position: absolute;
+  top: 0;
+  right: 0;
+  bottom: 0;
+  z-index: 1;
+  width: var(--s-minimap-w);
+  background: var(--s-bg);
+  border-left: 1px solid var(--s-border);
+  overflow: hidden;
+  pointer-events: auto;
+}
+
+#minimap[hidden] {
+  display: none;
+}
+
+#minimap-surface {
+  display: block;
+  width: 100%;
+  height: 100%;
+}
+
+/* ══ Find bar ═════════════════════════════════════════════════════════════ */
+
+#find-bar {
+  pointer-events: auto;
+  position: absolute;
+  top: var(--s-space-2);
+  right: calc(var(--s-minimap-w) + var(--s-space-3));
+  z-index: 3;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: var(--s-space-2);
+  border: 1px solid var(--s-border);
+  border-radius: var(--s-radius-lg);
+  background: var(--s-sidebar);
+  box-shadow: var(--s-shadow);
+}
+
+#find-bar[hidden] {
+  display: none;
+}
+
+.find-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+#find-bar input {
+  flex: 1;
+  min-width: 9rem;
+  padding: 5px var(--s-space-2);
+  border: 1px solid var(--s-border);
+  border-radius: var(--s-radius);
+  background: var(--s-bg);
+  color: var(--s-fg);
+  font: inherit;
+  font-size: var(--s-fs-sm);
+}
+
+#find-bar input::placeholder {
+  color: var(--s-subtle);
+}
+
+#find-count,
+#find-status {
+  white-space: nowrap;
+  font-size: var(--s-fs-xs);
+  font-variant-numeric: tabular-nums;
+  color: var(--s-muted);
+}
+
+#find-status:empty {
+  display: none;
+}
+
+#find-bar button {
+  padding: 4px var(--s-space-2);
+  border: 1px solid var(--s-border);
+  border-radius: var(--s-radius);
+  background: var(--s-hover);
+  color: var(--s-fg);
+  font: inherit;
+  font-size: var(--s-fs-sm);
+  cursor: pointer;
+  transition: background var(--s-dur) var(--s-ease);
+}
+
+#find-bar button:hover {
+  background: var(--s-pressed);
+}
+
+#find-close {
+  display: grid;
+  flex: none;
+  place-items: center;
+  padding: 4px;
+  border-color: transparent;
+  background: transparent;
+  color: var(--s-muted);
+}
+
+#find-close:hover {
+  background: var(--s-hover);
+  color: var(--s-fg);
+}
+
+/* Botões de toggle (case-sensitive, regex, whole word): inativo monocromático, ativo em acento. */
+.find-toggles {
+  display: flex;
+  flex: none;
+  gap: 2px;
+}
+
+.find-toggle {
+  min-width: 24px;
+  padding: 3px var(--s-space-1) !important;
+  border-color: transparent !important;
+  background: transparent !important;
+  color: var(--s-subtle) !important;
+  font-family: var(--s-font-mono);
+  font-size: var(--s-fs-xs) !important;
+  line-height: 1.5;
+  text-align: center;
+}
+
+.find-toggle:hover {
+  background: var(--s-hover) !important;
+  color: var(--s-fg) !important;
+}
+
+.find-toggle.active {
+  background: var(--s-selected) !important;
+  border-color: var(--s-accent) !important;
+  color: var(--s-fg) !important;
+}
+
+/* ══ Command palette ══════════════════════════════════════════════════════ */
+
 #command-palette {
   pointer-events: auto;
   position: absolute;
-  top: 2rem;
+  top: var(--s-space-4);
   left: 50%;
+  z-index: 5;
+  width: min(560px, calc(100% - 2 * var(--s-space-4)));
   transform: translateX(-50%);
-  width: 480px;
-  background: #2b2d30;
-  border: 1px solid #3a3d41;
-  border-radius: 6px;
-  box-shadow: 0 8px 24px rgba(0,0,0,0.4);
-  z-index: 20;
+  border: 1px solid var(--s-border);
+  border-radius: var(--s-radius-lg);
+  background: var(--s-sidebar);
+  box-shadow: var(--s-shadow);
   overflow: hidden;
 }
 
@@ -348,75 +732,179 @@ body {
 
 #palette-input {
   width: 100%;
-  padding: 0.6rem 0.75rem;
+  padding: var(--s-space-3);
   border: none;
-  border-bottom: 1px solid #3a3d41;
+  border-bottom: 1px solid var(--s-border);
   background: transparent;
-  color: #e0e0e0;
-  font-size: 0.9rem;
+  color: var(--s-fg);
+  font: inherit;
+  font-size: var(--s-fs-lg);
   outline: none;
-  box-sizing: border-box;
 }
 
 #palette-input::placeholder {
-  color: #666;
+  color: var(--s-subtle);
 }
 
 #palette-results {
-  max-height: 280px;
+  max-height: 320px;
   overflow-y: auto;
+  padding: var(--s-space-1);
 }
 
 .palette-item {
   display: flex;
-  justify-content: space-between;
   align-items: center;
-  padding: 0.4rem 0.75rem;
+  gap: var(--s-space-2);
+  padding: 6px var(--s-space-2);
+  border-radius: var(--s-radius);
+  font-size: var(--s-fs-sm);
   cursor: pointer;
-  font-size: 0.85rem;
 }
 
 .palette-item:hover,
 .palette-item.selected {
-  background: #3a3d41;
+  background: var(--s-selected);
 }
 
 .palette-item .cmd-label {
-  color: #e0e0e0;
-}
-
-.palette-item .cmd-accel {
-  color: #666;
-  font-size: 0.75rem;
-  margin-left: 1rem;
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--s-fg);
 }
 
 .palette-item .cmd-category {
-  color: #7fb3ff;
-  font-size: 0.7rem;
-  margin-left: 0.5rem;
+  flex: none;
+  order: 2;
+  padding: 1px 5px;
+  border-radius: var(--s-radius-sm);
+  background: var(--s-hover);
+  color: var(--s-accent);
+  font-size: var(--s-fs-xs);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
 }
 
-/* ── Minimap ─────────────────────────────────────────── */
-#minimap {
-  position: absolute;
-  top: 32px;           /* tab bar height */
-  right: 0;
-  width: 72px;
-  bottom: 0;
-  background: #1a1a1e;
-  border-left: 1px solid #2a2a2e;
-  z-index: 10;
-  pointer-events: auto;
+.palette-item .cmd-accel {
+  flex: none;
+  order: 3;
+  color: var(--s-subtle);
+  font-family: var(--s-font-mono);
+  font-size: var(--s-fs-xs);
+}
+
+/* ══ Status bar ════════════════════════════════════════════════════════════ */
+
+#status-bar {
+  display: flex;
+  align-items: center;
+  gap: var(--s-space-1);
+  height: var(--s-statusbar-h);
+  padding: 0 var(--s-space-1);
+  background: var(--s-statusbar);
+  border-top: 1px solid var(--s-border);
+  color: var(--s-muted);
+  font-size: var(--s-fs-sm);
+  user-select: none;
+}
+
+.status-group {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  min-width: 0;
+}
+
+.status-right {
+  margin-left: auto;
+}
+
+.status-item {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--s-space-1);
+  height: calc(var(--s-statusbar-h) - 4px);
+  padding: 0 6px;
+  border: none;
+  border-radius: var(--s-radius-sm);
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
   overflow: hidden;
+  text-overflow: ellipsis;
 }
 
-#minimap[hidden] {
-  display: none;
+.status-item.clickable {
+  cursor: pointer;
+  transition: background var(--s-dur) var(--s-ease), color var(--s-dur) var(--s-ease);
 }
 
-#minimap-surface {
-  width: 100%;
-  height: 100%;
-  display: block;
+.status-item.clickable:hover {
+  background: var(--s-hover);
+  color: var(--s-fg);
+}
+
+.status-item.disabled {
+  opacity: 0.35;
+}
+
+.status-item.disabled.clickable {
+  cursor: default;
+}
+
+#status-dirty.dirty {
+  color: var(--s-warn);
+  font-weight: 600;
+}
+
+/* ══ Foco e acessibilidade ════════════════════════════════════════════════ */
+
+:focus {
+  outline: none;
+}
+
+:focus-visible {
+  outline: 1px solid var(--s-ring);
+  outline-offset: -1px;
+}
+
+#editor-surface:focus-visible {
+  outline: none;
+}
+
+#palette-input:focus-visible {
+  border-bottom-color: var(--s-accent);
+}
+
+/* ══ Scrollbars ═══════════════════════════════════════════════════════════ */
+
+#palette-results::-webkit-scrollbar,
+.sidebar-list::-webkit-scrollbar {
+  width: 10px;
+}
+
+#palette-results::-webkit-scrollbar-thumb,
+.sidebar-list::-webkit-scrollbar-thumb {
+  border: 3px solid transparent;
+  border-radius: 6px;
+  background-clip: padding-box;
+  background-color: color-mix(in srgb, var(--s-fg) 22%, transparent);
+}
+
+#palette-results::-webkit-scrollbar-thumb:hover,
+.sidebar-list::-webkit-scrollbar-thumb:hover {
+  background-color: color-mix(in srgb, var(--s-fg) 36%, transparent);
+}
+
+/* ══ Movimento reduzido ═══════════════════════════════════════════════════ */
+
+@media (prefers-reduced-motion: reduce) {
+  * {
+    transition-duration: 0ms !important;
+  }
 }
