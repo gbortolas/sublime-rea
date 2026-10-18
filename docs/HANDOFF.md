@@ -20,7 +20,7 @@ P2.4b/c ✅ · P2.5 (salvar) ✅ · P3.10/11/12 (dívidas) ✅ · P1#1 (seleçã
 **P2#7 (drag & drop) ✅ · Infra (GitHub repo + CI/Release) ✅ · P2#6 (abas) ✅ · P2#8 (temas) ✅** ·
 **P3#12 (go to line) ✅ · P3#13 (auto-pair) ✅ · P3#14 (bracket matching) ✅ · PyCharm ✅** ·
 **🐛 UX: welcome screen ✅ · menu bar ✅ · branding/ícone ✅ · dica abrir arquivo ✅** ·
-**P3#11 Command Palette ✅** · **P2#9 Minimap ✅** · **P3#15 Indentation Guides ✅** · **cursor line highlight ✅** · **smooth mouse wheel ✅** · **P4#18 Snippets ✅** · **🎨 repaginação do design (casca VS Code-like + tema como fonte única + sintaxe clara) ✅** · **🐛 3 bugs de render/realce (tint do `canvas2d`, revisão do realce, raiz de pacote) ✅** · **🐛 **P1 — Performance dos menus (Cut/Copy/Paste implementados, menu simplificado) ✅**
+**P3#11 Command Palette ✅** · **P2#9 Minimap ✅** · **P3#15 Indentation Guides ✅** · **cursor line highlight ✅** · **smooth mouse wheel ✅** · **P4#18 Snippets ✅** · **🎨 repaginação do design (casca VS Code-like + tema como fonte única + sintaxe clara) ✅** · **🐛 3 bugs de render/realce (tint do `canvas2d`, revisão do realce, raiz de pacote) ✅** · **🐛 P1 — Performance dos menus (Cut/Copy/Paste implementados, menu simplificado) ✅** · **P3#10 — Plugin host (entry point + wiring + bridging) ✅**
 
 **✅ Passo operacional resolvido (2026-10-16).** O `setup.py` foi rodado e o MCP `rea` foi relançado
 **já com `REA_GHIDRA_STARTUP_TIMEOUT_MS=900000`** (confirmado em `/proc/*/environ`) — **não** é mais
@@ -34,7 +34,7 @@ python3 setup/setup.py        # idempotente: reescreve setup/env.sh + environmen
 Sem o deadline maior, `open_binary`/`analyze` **via MCP** volta a estourar os 330 s (a análise leva
 ~355 s).
 
-**Próxima tarefa recomendada:** **P3#10 — Plugin host** (extensão isolada via `utilityProcess`). A infra do `ExtensionHost` (handshake + FSM + OPS bridge) existe em `src/core/extension/` mas **nunca rodou com uma extensão real**. É a feature mais significativa do roadmap que ainda não foi tocada. Alternativa: **P3.6 — Snapshot de análise do REA** (baixa prioridade: o projeto Ghidra persistente já cobre).
+**Próxima tarefa recomendada:** **P3#15 — Soft wrap (wrap de linha)**. É o próximo item do roadmap P3 (Pós-MVP) ainda não tocado: quebra visual sem quebrar o texto, métrica do viewport adaptada. Alternativa: **P3.6 — Snapshot de análise do REA** (baixa prioridade: o projeto Ghidra persistente já cobre).
 
 > ✅ **Pegadinha resolvida (2026-10-16, P3.9):** o `setup.py` agora **detecta** um JDK ≥ 21
 > compatível (`JAVA_HOME`, PATH, sdkman, `/usr/lib/jvm`) e escreve um **`export JAVA_HOME=…` ativo**

@@ -344,6 +344,16 @@ Problemas identificados ao testar o AppImage pela primeira vez:
 
 ## 🧹 P3 — Housekeeping / dívidas
 
+- [x] **P3#10 — Plugin host** (extensão isolada via `utilityProcess`) ✅ **fechado** (2026-10-17). A infra `ExtensionHostImpl` + `createMethodHandlers` + bridge existiam em `src/core/extension/` mas **nunca rodaram com uma extensão real**. Agora:
+  - **`plugin-host-entry.ts`** — entry bundlado do `utilityProcess`: recebe bootstrap (port transfer), cria bridge do lado host, faz handshake com `ready`/`opsHash`, mantém o processo vivo
+  - **`EditorCore.startPluginHost(entry, opts)`** — cria `ExtensionHostImpl` sob demanda, spawna o processo com `createMethodHandlers`, gerencia sessão (tracking + cleanup)
+  - **`forwardChangedToHosts`** — a cada `document.changed`, envia `emit { kind: "emit", event: "changed", payload: {handle, delta} }` para todas as sessões `ready`
+  - **`startMainProcess`** — no boot, spawna `dist/core/extension/plugin-host-entry.js` com nome `scribe-plugin-host`
+  - **Build** — etapa 3.6: esbuild CJS do entry (18.4 kB)
+  - **3 testes** de integração: handshake com fake process, bridge `emit` core→host, forwarding de `changed`
+  - Gates: typecheck/test/build passam (452 testes, 45 arquivos)
+  - Commit: `d079b1f`
+
 - [x] **P3.10 — Bundlar o worker de `TaskPool` no build (matar a duplicação do scanner de busca)** ✅
       **fechado** (2026-10-17): a duplicata de `scanText`/`normalizeSearchQuery` no worker-entry.ts
       **morreu**. Agora o worker importa direto de `../../shared/search-contract` e o bundler
