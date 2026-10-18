@@ -20,7 +20,7 @@ P2.4b/c ✅ · P2.5 (salvar) ✅ · P3.10/11/12 (dívidas) ✅ · P1#1 (seleçã
 **P2#7 (drag & drop) ✅ · Infra (GitHub repo + CI/Release) ✅ · P2#6 (abas) ✅ · P2#8 (temas) ✅** ·
 **P3#12 (go to line) ✅ · P3#13 (auto-pair) ✅ · P3#14 (bracket matching) ✅ · PyCharm ✅** ·
 **🐛 UX: welcome screen ✅ · menu bar ✅ · branding/ícone ✅ · dica abrir arquivo ✅** ·
-**P3#11 Command Palette ✅** · **P2#9 Minimap ✅** · **P3#15 Indentation Guides ✅** · **cursor line highlight ✅** · **smooth mouse wheel ✅** · **P4#18 Snippets ✅** · **🎨 repaginação do design (casca VS Code-like + tema como fonte única + sintaxe clara) ✅** · **🐛 3 bugs de render/realce (tint do `canvas2d`, revisão do realce, raiz de pacote) ✅** · **🐛 P1 — Performance dos menus (Cut/Copy/Paste implementados, menu simplificado) ✅** · **P3#10 — Plugin host (entry point + wiring + bridging) ✅** · **P3#15 — Soft wrap (wrap de linha visual, quebra oportunista) ✅** · **P4#16 — LSP Client (servidores builtin: TypeScript, Python; diagnóstico, completação, hover) ✅** · **P3.6 — Snapshot de análise REA (8.87 MB, 3 evidências) ✅** · **P4#17 — Diagnósticos no gutter (ícones de severidade na faixa de linha) ✅** · **P4#18 — Go-to-definition (F12/Ctrl+click) ✅** · **P4#19 — Signature help (popup ao digitar `(`) ✅**
+**P3#11 Command Palette ✅** · **P2#9 Minimap ✅** · **P3#15 Indentation Guides ✅** · **cursor line highlight ✅** · **smooth mouse wheel ✅** · **P4#18 Snippets ✅** · **🎨 repaginação do design (casca VS Code-like + tema como fonte única + sintaxe clara) ✅** · **🐛 3 bugs de render/realce (tint do `canvas2d`, revisão do realce, raiz de pacote) ✅** · **🐛 P1 — Performance dos menus (Cut/Copy/Paste implementados, menu simplificado) ✅** · **P3#10 — Plugin host (entry point + wiring + bridging) ✅** · **P3#15 — Soft wrap (wrap de linha visual, quebra oportunista) ✅** · **P4#16 — LSP Client (servidores builtin: TypeScript, Python; diagnóstico, completação, hover) ✅** · **P3.6 — Snapshot de análise REA (8.87 MB, 3 evidências) ✅** · **P4#17 — Diagnósticos no gutter (ícones de severidade na faixa de linha) ✅** · **P4#18 — Go-to-definition (F12/Ctrl+click) ✅** · **P4#19 — Signature help (popup ao digitar `(`) ✅** · **P4#20 — Document symbols (Ctrl+Shift+O, popup com filtro) ✅**
 
 **✅ Passo operacional resolvido (2026-10-16).** O `setup.py` foi rodado e o MCP `rea` foi relançado
 **já com `REA_GHIDRA_STARTUP_TIMEOUT_MS=900000`** (confirmado em `/proc/*/environ`) — **não** é mais
@@ -34,8 +34,11 @@ python3 setup/setup.py        # idempotente: reescreve setup/env.sh + environmen
 Sem o deadline maior, `open_binary`/`analyze` **via MCP** volta a estourar os 330 s (a análise leva
 ~355 s).
 
-**Próxima tarefa recomendada:** **P4#20 — Document symbols** (`textDocument/documentSymbol` na
-command palette) ou revisão final do P4 (todos os items de P4#16 a P4#19 fechados nesta sessão).
+**Próxima tarefa recomendada:** Todos os itens **P4#16 a P4#20** estão fechados. O roadmap
+de features de linguagem baseadas em LSP está completo. Próximos passos possíveis:
+- **Revisão geral** (testar o app com servidores LSP reais)
+- Voltar ao **P3.5 — Provisionar Rizin** (se quiser voltar ao RE analysis)
+- Iniciar **refinamentos de UX** ou **performance**
 
 > ✅ **Pegadinha resolvida (2026-10-16, P3.9):** o `setup.py` agora **detecta** um JDK ≥ 21
 > compatível (`JAVA_HOME`, PATH, sdkman, `/usr/lib/jvm`) e escreve um **`export JAVA_HOME=…` ativo**

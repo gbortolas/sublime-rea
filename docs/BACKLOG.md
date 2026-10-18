@@ -479,4 +479,11 @@ Problemas identificados ao testar o AppImage pela primeira vez:
       - `src/renderer/signature-help.ts` — popup DOM com label, documentação, parâmetros
       - Parâmetro ativo destacado (cor do accent), contador de assinaturas
       - Trigger automático ao digitar `(` (posicionado no cursor)
-- [ ] **P4#20 — Document symbols** (`textDocument/documentSymbol` na command palette)
+- [x] **P4#20 — Document symbols** ✅ **fechado** (2026-10-18). Lista e navegação de símbolos
+      do documento via `textDocument/documentSymbol`:
+      - **Ctrl+Shift+O** abre popup com filtro incremental
+      - Ícones SVG por tipo (class, method, function, variable, enum, etc.)
+      - Navegação por setas/Enter/Esc
+      - Seleção navega caret + scroll para o símbolo
+      - `src/renderer/document-symbols.ts` — popup DOM com input e lista
+      - Árvore de símbolos achatada com indentação por profundidade
