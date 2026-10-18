@@ -433,6 +433,11 @@ Problemas identificados ao testar o AppImage pela primeira vez:
       como transação única (1 revisão, 1 `document.changed`). Flush automático antes de operações
       que precisam de estado consistente (replaceText, undo/redo, save, open, close, activate,
       snippet). **520 testes / 50 arquivos** (mesmo baseline).
+- [x] **P2#9b — Minimap Hover Preview** ✅ **fechado** (2026-10-18). Tooltip com código real
+      e syntax highlighting ao passar o mouse no minimap. Usa `bridge.highlight()` para obter
+      spans, `syntaxTheme.styleFor()` para resolver cores, renderiza como `<span style="color:">`
+      em tooltip DOM. Debounce de 100ms, cache do último range. Fallback para texto puro enquanto
+      a requisição não chega. **520 testes / 50 arquivos**.
 - [x] **P3.7 — `~/sr-tools` (symlink)** ✅ **fechado** (2026-10-17): o symlink `~/sr-tools → $REA_TOOLS_DIR`
       agora é criado/manutenido pelo `setup.py` (não só pelo `ghidra-preanalyze.sh`). O Ghidra
       recusa path com `.`, e `$REA_TOOLS_DIR` vive em `~/.local/…` — o symlink contorna isso.

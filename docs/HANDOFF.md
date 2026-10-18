@@ -29,7 +29,9 @@ P2.4b/c ✅ · P2.5 (salvar) ✅ · P3.10/11/12 (dívidas) ✅ · P1#1 (seleçã
 **⚡ Input latency: resultado rico do `document.insert` elimina 2/3 IPC roundtrips por tecla ✅** -
 (insert retorna `{revision, text, canUndo, canRedo}` — mata `bridge.text()` e `refreshUndoStatus()`) ·
 **⚡ Batching de teclas (Fase B): keystrokes aplicados localmente (0 latência) e enviados como
-lote no próximo rAF — transação única, 1 revisão, 1 `document.changed` ✅**
+lote no próximo rAF — transação única, 1 revisão, 1 `document.changed` ✅** ·
+**🔍 Minimap Hover Preview: tooltip com código real e syntax highlighting ao passar o mouse
+no minimap — "lupa" estilo VS Code ✅**
 
 **✅ Passo operacional resolvido (2026-10-16).** O `setup.py` foi rodado e o MCP `rea` foi relançado
 **já com `REA_GHIDRA_STARTUP_TIMEOUT_MS=900000`** (confirmado em `/proc/*/environ`) — **não** é mais
@@ -45,16 +47,15 @@ Sem o deadline maior, `open_binary`/`analyze` **via MCP** volta a estourar os 33
 
 **Próximas tarefas (escolha do usuário na próxima sessão):**
 
-> Esta sessão fechou a **input latency — Fase A** (resultado rico do `document.insert`).
-> 3 IPC roundtrips por tecla → **1**: elimina `bridge.text()` e `refreshUndoStatus()`.
-> A próxima fronteira é:
+> Esta sessão fechou a **input latency (Fase A + B)** + **Minimap Hover Preview**.
+> A digitação agora é local (zero IPC por tecla, batch em rAF) e o minimap tem
+> preview com syntax highlighting ao passar o mouse. A próxima fronteira é:
 
-1. **⌨️ Input latency (Fase B — batching de teclas)** — acumular keystrokes entre rAF e enviar
-   como lote único (`document.batchInsert`). Depois da Fase A, o roundtrip restante é o `insert`.
-   Batching múltiplas teclas num só IPC cortaria ainda mais a latência em digitação contínua.
-2. **🔧 P3.5 — Provisionar Rizin** — instalar Rizin (alternativa open-source ao Ghidra) como
+1. **🔧 P3.5 — Provisionar Rizin** — instalar Rizin (alternativa open-source ao Ghidra) como
    segundo provider de análise pro REA. O REA faz `spawn("rizin")` e não há nenhum instalado.
-3. **📦 Release** — cortar um release do Scribe com as melhorias acumuladas.
+2. **📦 Release** — cortar um release do Scribe com as melhorias acumuladas.
+3. **🎯 Minimap aprimorado** — syntax colorida no canvas do minimap, highlight de busca,
+   indicadores de diagnóstico, zoom configurável.
 
 > ✅ **Pegadinha resolvida (2026-10-16, P3.9):** o `setup.py` agora **detecta** um JDK ≥ 21
 > compatível (`JAVA_HOME`, PATH, sdkman, `/usr/lib/jvm`) e escreve um **`export JAVA_HOME=…` ativo**
@@ -706,6 +707,33 @@ via `document.batchInsert` — o main aplica tudo como **transação única** (1
 
 *Zero roundtrips durante a digitação. O lote é enviado no próximo frame de rAF, que tipicamente
 acontece ~16 ms depois — mas não bloqueia a tecla seguinte. A latência *percebida* cai para virtualmente zero. O main reconcilia em background.
+
+---
+
+## 🔍 Minimap Hover Preview (2026-10-18)
+
+**O que é:** ao passar o mouse sobre o minimap, um tooltip aparece mostrando o código-fonte
+real em **tamanho legível com syntax highlighting** — tipo a "lupa" do VS Code.
+
+**Como funciona:**
+
+1. `mousemove` no canvas do minimap → calcula a linha sob o cursor
+2. Mostra preview **imediato** com texto puro (sem realce, latência zero)
+3. Dispara requisição `syntax.highlight` (debounce de 100 ms) para o range de ~7 linhas
+4. Quando a resposta chega, substitui o tooltip com **HTML colorido** (`<span style="color:#xxx">`)
+5. Cacheia o resultado — se o mouse volta para o mesmo range, usa cache
+
+**Arquivos alterados:**
+
+| Arquivo | Mudança |
+|---|---|
+| `src/renderer/minimap.ts` | `attachMinimapHover()` — tooltip DOM com posicionamento, `buildColoredContent()` com `rgbaToHex()`, debounce, cache |
+| `src/renderer/main.ts` | Fiação: cria `attachMinimapHover` com `bridge.highlight`, `syntaxTheme`, `TEXT_STYLE` |
+
+**Limitações declaradas:**
+- Preview sem realce enquanto a requisição de highlight não chega (~100ms debounce + IPC)
+- O tooltip não segue o mouse verticalmente depois de mostrado (fica fixo até próximo hover)
+- Sem suporte a teclas de atalho para fixar o preview
 
 ---
 

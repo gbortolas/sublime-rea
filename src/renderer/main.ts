@@ -55,6 +55,7 @@ import { attachCommandPalette } from "./command-palette";
 import type { CommandPaletteApi, CommandPaletteBinding } from "./command-palette";
 import { createCompletionPopup } from "./completions";
 import type { CompletionPopupBinding } from "./completions";
+import { attachMinimapHover } from "./minimap";
 import { createHoverTooltip } from "./hover-tooltip";
 import type { HoverTooltipBinding } from "./hover-tooltip";
 import { createSignatureHelp } from "./signature-help";
@@ -2103,6 +2104,32 @@ export async function bootRenderer(): Promise<boolean> {
     },
   });
   renderer.attachMinimap(minimap);
+
+  // Minimap Hover Preview (P2#9b): mostra código real com syntax highlight ao passar o mouse.
+  // ── Minimap Hover Preview (P2#9b) ──────────────────────────────────────
+  const minimapCanvas = minimap.container.querySelector<HTMLCanvasElement>("#minimap-surface");
+  if (minimapCanvas !== null && bridge?.highlight !== undefined) {
+    const hoverBinding = attachMinimapHover({
+      source: {
+        lineCount: () => controller?.current?.source.lineCount() ?? source.lineCount(),
+        line: (i: number) => controller?.current?.source.line(i) ?? source.line(i),
+      },
+      container: minimap.container,
+      canvas: minimapCanvas,
+      fontFamily: TEXT_STYLE.family,
+      fontSize: TEXT_STYLE.sizePx,
+      syntaxTheme,
+      getHandle: () => controller?.current?.handle,
+      bgColor: rgbToCss(THEME.current.colors.background),
+      requestHighlight: async (first: number, count: number) => {
+        const handle = controller?.current?.handle;
+        if (handle === undefined) return { revision: -1, first: 0, lines: [] };
+        return bridge.highlight!(handle, first, count);
+      },
+    });
+    // Cleanup no fechamento da janela
+    window.addEventListener("beforeunload", () => hoverBinding.dispose());
+  }
 
   // Toggle tema (Ctrl+Shift+T): casca (CSS vars) e canvas (`THEME.current`) trocam juntos.
   document.getElementById("theme-toggle")?.addEventListener("click", () => {

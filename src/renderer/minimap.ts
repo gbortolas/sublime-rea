@@ -1,17 +1,26 @@
 /**
- * Scribe — Minimap: visão geral do documento (P2#9).
+ * Scribe — Minimap: visão geral do documento (P2#9) + Hover Preview (P2#9b).
  *
  * Canvas secundário sobreposto ao editor. Renderiza cada linha como uma barra
  * colorida de 1–2px e destaca a viewport atual. Suporte a clique/arrasto para
  * navegar.
+ *
+ * O Hover Preview exibe um tooltip com o código-fonte real (syntax highlighted)
+ * ao passar o mouse sobre o minimap — tipo "lupa" do VS Code.
  */
 
-import type { Viewport } from "../shared";
+import type { Viewport, DocumentHighlight, HighlightSpan, ThemeResolver, RGBA } from "../shared";
 
 const MINIMAP_WIDTH = 72;
 const BAR_MIN_HEIGHT = 1;
 const LINE_EMPTY_ALPHA = 0.1;
 const LINE_CONTENT_ALPHA = 0.45;
+const HOVER_PREVIEW_LINES = 7;
+const HOVER_DEBOUNCE_MS = 100;
+
+// ---------------------------------------------------------------------------
+// Minimap base (pintura do canvas)
+// ---------------------------------------------------------------------------
 
 /**
  * Paleta do minimap, resolvida a cada `paint()`. O minimap desenha o seu próprio canvas, então
@@ -154,6 +163,242 @@ export function attachMinimap(deps: MinimapDeps): MinimapBinding {
       window.removeEventListener("mousemove", onMouseMove);
       window.removeEventListener("mouseup", onMouseUp);
       container.remove();
+    },
+  };
+}
+
+// ---------------------------------------------------------------------------
+// Minimap Hover Preview — "lupa" com código real e syntax highlighting
+// ---------------------------------------------------------------------------
+
+export interface MinimapHoverDeps {
+  source: MinimapSource;
+  /** Container do minimap (para eventos de mouse). */
+  container: HTMLElement;
+  /** Canvas do minimap (para eventos de mouse). */
+  canvas: HTMLCanvasElement;
+  /** Fonte monospace do editor (para o tooltip). */
+  fontFamily: string;
+  /** Tamanho da fonte em px para o tooltip. */
+  fontSize: number;
+  /** Resolvedor de escopo → cor (syntaxTheme). */
+  syntaxTheme: ThemeResolver;
+  /** Função para pedir realce de um range (usa o bridge.highlight internamente). */
+  requestHighlight: (first: number, count: number) => Promise<DocumentHighlight>;
+  /** Handle do documento ativo, ou undefined sem documento. */
+  getHandle: () => number | undefined;
+  /** Cor de fundo do editor (vem do tema). */
+  bgColor: string;
+}
+
+/** Resultado do `attachMinimapHover`: para desligar. */
+export interface MinimapHoverBinding {
+  dispose(): void;
+}
+
+export function attachMinimapHover(deps: MinimapHoverDeps): MinimapHoverBinding {
+  let tooltipEl: HTMLElement | null = null;
+  let hoverTimer: ReturnType<typeof setTimeout> | null = null;
+  let lastFirstLine = -1;
+  let lastCount = 0;
+  let cachedContent: string | null = null;
+
+  const removeTooltip = (): void => {
+    if (tooltipEl !== null) {
+      tooltipEl.remove();
+      tooltipEl = null;
+    }
+    lastFirstLine = -1;
+    lastCount = 0;
+    cachedContent = null;
+  };
+
+  const lineAtY = (pageY: number): number | undefined => {
+    const rect = deps.container.getBoundingClientRect();
+    const h = rect.height;
+    if (h <= 0) return undefined;
+    const localY = pageY - rect.top;
+    const ratio = localY / h;
+    const line = Math.round(ratio * deps.source.lineCount());
+    if (line < 0 || line >= deps.source.lineCount()) return undefined;
+    return line;
+  };
+
+  const rgbaToHex = (rgba: RGBA): string => {
+    const v = rgba >>> 0;
+    const r = ((v >>> 24) & 0xff).toString(16).padStart(2, "0");
+    const g = ((v >>> 16) & 0xff).toString(16).padStart(2, "0");
+    const b = ((v >>> 8) & 0xff).toString(16).padStart(2, "0");
+    return `#${r}${g}${b}`;
+  };
+
+  const escapeHtml = (text: string): string =>
+    text.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+
+  const buildContent = (firstLine: number, count: number): string => {
+    let html = "";
+    for (let i = 0; i < count; i++) {
+      const line = firstLine + i;
+      const text = deps.source.line(line);
+      if (text === undefined || text === null) {
+        html += "<div class=\"mm-hover-line\">&nbsp;</div>\n";
+        continue;
+      }
+      html += "<div class=\"mm-hover-line\">";
+      // Tentar aplicar syntax highlighting via ThemeResolver
+      // Sem acesso direto aos spans do HighlightStore, usamos o ThemeResolver
+      // com uma heurística simples: se o `requestHighlight` já retornou dados,
+      // eles foram cacheados — mas como não temos o HighlightStore aqui,
+      // renderizamos o texto puro com cor default.
+      // OBS: futuramente podemos passar um callback `spansFor(line)` para colorir.
+      html += escapeHtml(text);
+      html += "</div>\n";
+    }
+    return html;
+  };
+
+  const buildColoredContent = (
+    firstLine: number,
+    highlight: DocumentHighlight,
+  ): string => {
+    let html = "";
+    const lineMap = new Map<number, readonly HighlightSpan[]>();
+    for (const hl of highlight.lines) {
+      lineMap.set(hl.line, hl.spans);
+    }
+    for (let i = 0; i < highlight.lines.length; i++) {
+      const line = firstLine + i;
+      const text = deps.source.line(line);
+      const spans = lineMap.get(line) ?? [];
+      html += "<div class=\"mm-hover-line\">";
+      if (spans.length > 0) {
+        let pos = 0;
+        for (const span of spans) {
+          if (span.start > pos) {
+            html += escapeHtml(text.slice(pos, span.start));
+          }
+          const scopeText = text.slice(span.start, span.end);
+          const style = deps.syntaxTheme.styleFor(span.scope);
+          const color = style?.color;
+          if (color !== undefined) {
+            html += `<span style="color:${rgbaToHex(color)}">${escapeHtml(scopeText)}</span>`;
+          } else {
+            html += escapeHtml(scopeText);
+          }
+          pos = span.end;
+        }
+        if (pos < text.length) {
+          html += escapeHtml(text.slice(pos));
+        }
+      } else {
+        html += escapeHtml(text);
+      }
+      html += "</div>\n";
+    }
+    return html;
+  };
+
+  const showTooltip = (content: string, pageY: number): void => {
+    const rect = deps.container.getBoundingClientRect();
+    if (tooltipEl === null) {
+      tooltipEl = document.createElement("div");
+      tooltipEl.className = "minimap-hover-tooltip";
+      document.body.appendChild(tooltipEl);
+    }
+    tooltipEl.innerHTML = content;
+    // Estilização inline para não depender de CSS externo
+    const font = `${deps.fontSize}px ${deps.fontFamily}`;
+    tooltipEl.style.cssText = `
+      position: fixed;
+      z-index: 10000;
+      background: ${deps.bgColor};
+      border: 1px solid var(--s-border, #555);
+      border-radius: 6px;
+      box-shadow: 0 4px 16px rgba(0,0,0,0.4);
+      padding: 6px 10px;
+      font: ${font};
+      line-height: 1.5;
+      white-space: pre;
+      pointer-events: none;
+      max-height: 320px;
+      overflow: hidden;
+      min-width: 100px;
+    `;
+    // Posiciona à esquerda do minimap
+    const tooltipX = rect.left - 8;
+    const tooltipH = tooltipEl.offsetHeight || 200;
+    let tooltipY = pageY - tooltipH / 2;
+    tooltipY = Math.max(8, Math.min(tooltipY, window.innerHeight - tooltipH - 8));
+    tooltipEl.style.left = `${tooltipX}px`;
+    tooltipEl.style.top = `${tooltipY}px`;
+    // Translada para a esquerda (largura total do tooltip)
+    tooltipEl.style.transform = "translateX(-100%)";
+  };
+
+  const updateTooltip = (pageY: number): void => {
+    const line = lineAtY(pageY);
+    if (line === undefined) {
+      removeTooltip();
+      return;
+    }
+    const half = Math.floor(HOVER_PREVIEW_LINES / 2);
+    const firstLine = Math.max(0, line - half);
+    const count = Math.min(HOVER_PREVIEW_LINES, deps.source.lineCount() - firstLine);
+    if (count <= 0) {
+      removeTooltip();
+      return;
+    }
+
+    // Se já temos o mesmo range em cache, mostra imediatamente
+    if (firstLine === lastFirstLine && count === lastCount && cachedContent !== null) {
+      showTooltip(cachedContent, pageY);
+      return;
+    }
+
+    // Mostra preview sem realce enquanto carrega
+    const plainContent = buildContent(firstLine, count);
+    showTooltip(plainContent, pageY);
+    lastFirstLine = firstLine;
+    lastCount = count;
+
+    // Agenda requisição de realce
+    if (hoverTimer !== null) clearTimeout(hoverTimer);
+    hoverTimer = setTimeout(() => {
+      hoverTimer = null;
+      const handle = deps.getHandle();
+      if (handle === undefined) return;
+      deps.requestHighlight(firstLine, count)
+        .then((highlight) => {
+          if (highlight.revision < 0) return; // resposta inválida
+          const colored = buildColoredContent(firstLine, highlight);
+          cachedContent = colored;
+          // Se o tooltip ainda está visível, atualiza com as cores
+          if (tooltipEl !== null) {
+            showTooltip(colored, pageY);
+          }
+        })
+        .catch(() => {
+          // Fallback: mantém o preview sem cores
+        });
+    }, HOVER_DEBOUNCE_MS);
+  };
+
+  deps.canvas.addEventListener("mousemove", (e: MouseEvent) => {
+    updateTooltip(e.pageY);
+  });
+
+  deps.canvas.addEventListener("mouseleave", () => {
+    if (hoverTimer !== null) {
+      clearTimeout(hoverTimer);
+      hoverTimer = null;
+    }
+    removeTooltip();
+  });
+
+  return {
+    dispose: (): void => {
+      if (hoverTimer !== null) clearTimeout(hoverTimer);
+      if (tooltipEl !== null) tooltipEl.remove();
     },
   };
 }
