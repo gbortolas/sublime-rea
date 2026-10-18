@@ -47,15 +47,15 @@ Sem o deadline maior, `open_binary`/`analyze` **via MCP** volta a estourar os 33
 
 **Próximas tarefas (escolha do usuário na próxima sessão):**
 
-> Esta sessão fechou a **input latency (Fase A + B)** + **Minimap Hover Preview**.
-> A digitação agora é local (zero IPC por tecla, batch em rAF) e o minimap tem
-> preview com syntax highlighting ao passar o mouse. A próxima fronteira é:
+> Esta sessão fechou a **input latency (Fase A + B)** + **Minimap Hover Preview**
+> com refinamentos de UX (segue mouse, posicionamento inteligente, CSS no tema).
+> A próxima fronteira (recomendada pelo handoff) é:
 
 1. **🔧 P3.5 — Provisionar Rizin** — instalar Rizin (alternativa open-source ao Ghidra) como
-   segundo provider de análise pro REA. O REA faz `spawn("rizin")` e não há nenhum instalado.
+   segundo provider de análise pro REA.
 2. **📦 Release** — cortar um release do Scribe com as melhorias acumuladas.
-3. **🎯 Minimap aprimorado** — syntax colorida no canvas do minimap, highlight de busca,
-   indicadores de diagnóstico, zoom configurável.
+3. **🎯 Minimap avançado** — syntax colorida no canvas do minimap, highlight de busca,
+   indicadores de diagnóstico.
 
 > ✅ **Pegadinha resolvida (2026-10-16, P3.9):** o `setup.py` agora **detecta** um JDK ≥ 21
 > compatível (`JAVA_HOME`, PATH, sdkman, `/usr/lib/jvm`) e escreve um **`export JAVA_HOME=…` ativo**
