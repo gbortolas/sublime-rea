@@ -2279,33 +2279,12 @@ function attachInputListeners(
           const next = text[pos]!;
           if (AUTO_PAIRS[prev] === next) {
             // Deleta ambos (par vazio)
-            session.caret = pos - 1;
-            session.selection = SelectionOps.collapsed(pos - 1);
-            session.selections = SelectionSetOps.singular(pos - 1);
-            void (async () => {
-              await session.bridge.insert(session.handle, pos - 1, "", "user");
-              updateCaretStatus(session.source, session.caret);
-              renderer.start();
-            })();
+            void controller.replaceText(pos - 1, 2, "");
           } else {
-            void (async () => {
-              await session.bridge.insert(session.handle, pos - 1, "", "user");
-              session.caret = pos - 1;
-              session.selection = SelectionOps.collapsed(pos - 1);
-              session.selections = SelectionSetOps.singular(pos - 1);
-              updateCaretStatus(session.source, session.caret);
-              renderer.start();
-            })();
+            void controller.replaceText(pos - 1, 1, "");
           }
         } else if (pos > 0) {
-          void (async () => {
-            await session.bridge.insert(session.handle, pos - 1, "", "user");
-            session.caret = pos - 1;
-            session.selection = SelectionOps.collapsed(pos - 1);
-            session.selections = SelectionSetOps.singular(pos - 1);
-            updateCaretStatus(session.source, session.caret);
-            renderer.start();
-          })();
+          void controller.replaceText(pos - 1, 1, "");
         }
       }
       return;
@@ -2320,6 +2299,10 @@ function attachInputListeners(
         void controller.insertText("");
         renderer.start();
         return;
+      }
+      const pos = session.caret;
+      if (pos < session.source.text.length) {
+        void controller.replaceText(pos, 1, "");
       }
       return;
     }
