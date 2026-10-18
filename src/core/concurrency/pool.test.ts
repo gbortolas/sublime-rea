@@ -10,10 +10,14 @@ import {
   makeHandle,
   normalizeSearchQuery,
   scanText,
+  type DocumentHighlight,
+  type SerializedGrammar,
 } from "../../shared";
 import type { SearchQuery } from "../../shared";
 import { PoolShutdownError, StaleGenerationError, TaskPoolImpl } from "./pool";
 import type { TaskPoolOptions } from "./pool";
+import { tokenizeCompiledLine } from "../syntax/tokenizer";
+import type { CompiledGrammar, CompiledPattern } from "../syntax/tokenizer";
 
 let dir: string;
 let pools: TaskPoolImpl[] = [];
@@ -486,5 +490,141 @@ describe("paridade worker <-> shared (tabela discriminante, worker real)", () =>
       code: "search.tooLarge",
       message: `SearchInputError[search.tooLarge]: o texto excede o teto de ${SEARCH_MAX_TEXT_LENGTH} code units`,
     });
+  });
+});
+
+// ── Paridade worker <-> sync: tokenização de sintaxe ───────────────────────────────────────────
+
+/**
+ * Gramática serializada mínima para teste de paridade: tokens `keyword`, `number` e `comment`
+ * com os mesmos padrões de `scribe-demo.sublime-syntax`.
+ */
+const PARITY_GRAMMAR: SerializedGrammar = {
+  logicalName: "test-parity",
+  scope: "text.test",
+  extensions: ["test"],
+  contextScopes: { main: "text.test", "prototype": "text.test" },
+  contexts: {
+    main: {
+      patterns: [
+        { match: "\\bconst\\b", matchFlags: "dy", scope: "keyword.control.test" },
+        { match: "\\bif\\b", matchFlags: "dy", scope: "keyword.control.test" },
+        { match: "\\breturn\\b", matchFlags: "dy", scope: "keyword.control.test" },
+        { match: "\\btrue\\b", matchFlags: "dy", scope: "constant.language.test" },
+        { match: "\\bfalse\\b", matchFlags: "dy", scope: "constant.language.test" },
+        { match: "\\bnull\\b", matchFlags: "dy", scope: "constant.language.test" },
+        { match: "\\d+\\.?\\d*", matchFlags: "dy", scope: "constant.numeric.test" },
+        { match: "//[^\\n]*", matchFlags: "dy", scope: "comment.line.double-slash.test" },
+      ],
+    },
+    prototype: {
+      patterns: [],
+    },
+  },
+};
+
+/** Constrói a mesma gramática em forma compilada para tokenização síncrona. */
+function buildReferenceGrammar(): CompiledGrammar {
+  const patterns: CompiledPattern[] = [
+    { matcher: /\bconst\b/dy, scope: "keyword.control.test", captures: [], include: null, push: null, set: null, pop: false },
+    { matcher: /\bif\b/dy, scope: "keyword.control.test", captures: [], include: null, push: null, set: null, pop: false },
+    { matcher: /\breturn\b/dy, scope: "keyword.control.test", captures: [], include: null, push: null, set: null, pop: false },
+    { matcher: /\btrue\b/dy, scope: "constant.language.test", captures: [], include: null, push: null, set: null, pop: false },
+    { matcher: /\bfalse\b/dy, scope: "constant.language.test", captures: [], include: null, push: null, set: null, pop: false },
+    { matcher: /\bnull\b/dy, scope: "constant.language.test", captures: [], include: null, push: null, set: null, pop: false },
+    { matcher: /\d+\.?\d*/dy, scope: "constant.numeric.test", captures: [], include: null, push: null, set: null, pop: false },
+    { matcher: /\/\/[^\n]*/dy, scope: "comment.line.double-slash.test", captures: [], include: null, push: null, set: null, pop: false },
+  ];
+  return {
+    logicalName: "test-parity",
+    name: "test-parity",
+    scope: "text.test",
+    fileExtensions: ["test"],
+    contexts: new Map([["main", patterns], ["prototype", []]]),
+    contextScopes: new Map([["main", "text.test"], ["prototype", "text.test"]]),
+  };
+}
+
+/** Extrai `lineStarts` do array de linhas (texto completo sem `\n`). */
+function lineStartsOf(lines: string[]): number[] {
+  const starts: number[] = [0];
+  for (let i = 0; i < lines.length - 1; i++) {
+    starts.push(starts[i]! + lines[i]!.length + 1);
+  }
+  return starts;
+}
+
+describe("paridade worker <-> sync: tokenização de sintaxe (syntaxTokens)", () => {
+  let pool: TaskPoolImpl;
+  let seq = 0;
+  const reference = buildReferenceGrammar();
+
+  beforeAll(() => {
+    pool = new TaskPoolImpl({ availableParallelism: 4, maxBackgroundThreads: 2 });
+  });
+
+  afterAll(async () => {
+    await pool.shutdown();
+  });
+
+  /** Roda tokenização síncrona (referência) e via worker e compara. */
+  async function assertParity(
+    text: string,
+    first: number,
+    count: number,
+  ): Promise<void> {
+    seq += 1;
+    const doc = makeHandle<"DocumentHandle">(600, seq);
+    const lines = text.split("\n");
+    const starts = lineStartsOf(lines);
+
+    // Tokenização síncrona de referência
+    const refLines: { line: number; spans: readonly import("../../shared").HighlightSpan[] }[] = [];
+    let refState: unknown = undefined;
+    for (let i = first; i < first + count; i++) {
+      const line = lines[i] ?? "";
+      const tokenized = tokenizeCompiledLine(reference, line, refState);
+      refLines.push({ line: i, spans: tokenized.spans });
+      refState = tokenized.state;
+    }
+
+    // Tokenização via worker
+    pool.registerText(doc, seq, text);
+    const fromWorker: DocumentHighlight = await pool.run({
+      kind: "syntaxTokens",
+      doc,
+      generation: seq,
+      first,
+      count,
+      text,
+      lineStarts: starts,
+      states: [],
+      grammar: PARITY_GRAMMAR,
+    }).done;
+
+    expect(fromWorker.revision).toBe(seq);
+    expect(fromWorker.first).toBe(first);
+    expect(fromWorker.lines.map((l) => ({ line: l.line, spans: l.spans }))).toEqual(refLines);
+    expect(fromWorker.truncated).toBe(false);
+  }
+
+  it("tokeniza palavra-chave (keyword) em worker idêntico ao sync", async () => {
+    await assertParity("const x = 1;\n", 0, 1);
+  });
+
+  it("tokeniza múltiplas linhas com estado incremental", async () => {
+    await assertParity("const x = 1;\n// comentário\nreturn true;\n", 0, 3);
+  });
+
+  it("tokeniza a partir de um offset (first>0) com estado inicial", async () => {
+    await assertParity("a\nb\nconst x = 42;\n// fim\n", 2, 2);
+  });
+
+  it("tokeniza range no meio do documento", async () => {
+    await assertParity("linha0\nlinha1\nconst z = false;\n// fim\n", 1, 2);
+  });
+
+  it("documento sem matches devolve spans vazios", async () => {
+    await assertParity("abc def\n123\nxyz\n", 0, 2);
   });
 });

@@ -112,7 +112,7 @@ describe("realce de sintaxe de ponta a ponta (PackageResolver → gramática →
       // Pede o destaque **antes** de `syntaxReady`: ainda não há gramática (spans vazios).
       const handle = await core.openDocument("/notas.demo");
       const revision = core.revisionOf(handle);
-      const before = core.highlightDocument(handle, 0, 1);
+      const before = await core.highlightDocument(handle, 0, 1);
       expect(before.revision).toBe(revision);
       expect(before.lines[0]?.spans).toEqual([]);
 
@@ -120,7 +120,7 @@ describe("realce de sintaxe de ponta a ponta (PackageResolver → gramática →
 
       // Mesma revisão, mas a gramática agora existe: a chave do cache inclui a identidade dela,
       // então o texto é retokenizado (sem isto, os spans vazios ficariam presos para sempre).
-      const after = core.highlightDocument(handle, 0, 1);
+      const after = await core.highlightDocument(handle, 0, 1);
       expect(after.revision).toBe(revision);
       expect(after.lines[0]?.spans.some((span) => span.scope === "keyword.control.demo")).toBe(true);
     } finally {
@@ -136,7 +136,7 @@ describe("realce de sintaxe de ponta a ponta (PackageResolver → gramática →
       const rev0 = core.revisionOf(handle);
 
       // 1) Tokeniza TODAS as 3 linhas — enche o cache.
-      const full0 = core.highlightDocument(handle, 0, 3);
+      const full0 = await core.highlightDocument(handle, 0, 3);
       expect(full0.revision).toBe(rev0);
       expect(full0.lines).toHaveLength(3);
       // Linha 0 é keyword
@@ -150,7 +150,7 @@ describe("realce de sintaxe de ponta a ponta (PackageResolver → gramática →
 
       // 3) Pede destaque de novo — linhas 0 e 1 agora visíveis (2 linhas).
       cached: {
-        const partial = core.highlightDocument(handle, 0, 2);
+        const partial = await core.highlightDocument(handle, 0, 2);
         expect(partial.revision).toBe(rev1.revision);
 
         // Linha 0 NÃO foi tocada → spans originais preservados (cache incremental).
@@ -162,7 +162,7 @@ describe("realce de sintaxe de ponta a ponta (PackageResolver → gramática →
 
       // 4) Garante que linha 2 (agora fora do range 0..2) continua sem spans corrompidos
       //    quando o cache for estendido depois.
-      const full1 = core.highlightDocument(handle, 0, 3);
+      const full1 = await core.highlightDocument(handle, 0, 3);
       expect(full1.lines[2]?.spans.some((s) => s.scope === "keyword.control.demo")).toBe(true);
     } finally {
       core.dispose();
@@ -175,7 +175,7 @@ describe("realce de sintaxe de ponta a ponta (PackageResolver → gramática →
       await core.syntaxReady;
       const handle = await core.openDocument("/notas.demo");
       const revision = core.revisionOf(handle);
-      const highlight = core.highlightDocument(handle, 0, 2);
+      const highlight = await core.highlightDocument(handle, 0, 2);
 
       expect(highlight.revision).toBe(revision);
       expect(highlight.lines.map((line) => line.line)).toEqual([0, 1]);
@@ -227,7 +227,7 @@ describe("realce de sintaxe de ponta a ponta (PackageResolver → gramática →
       await core.syntaxReady;
       const handle = await core.openDocument("/nota.txt");
       expect(core.grammarForDocument(handle)).toBeUndefined();
-      const highlight = core.highlightDocument(handle, 0, 1);
+      const highlight = await core.highlightDocument(handle, 0, 1);
       expect(highlight.lines).toEqual([{ line: 0, spans: [] }]);
     } finally {
       core.dispose();
@@ -290,7 +290,7 @@ describe("realce — raízes de pacote do app", () => {
       await core.syntaxReady;
       const handle = await core.openDocument("/notas.demo");
       expect(core.grammarForDocument(handle)?.name).toBe("Scribe Demo");
-      const highlight = core.highlightDocument(handle, 0, 1);
+      const highlight = await core.highlightDocument(handle, 0, 1);
       expect(highlight.lines[0]?.spans.some((span) => span.scope === "keyword.control.demo")).toBe(true);
     } finally {
       core.dispose();

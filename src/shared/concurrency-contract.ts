@@ -16,7 +16,7 @@
 import type { DocumentHandle } from "./handles";
 import type { IndexResult, LineScanResult } from "./buffer-contract";
 import type { SearchQuery, SearchResult } from "./search-contract";
-import type { DocumentHighlight, HighlightSpan } from "./syntax-contract";
+import type { DocumentHighlight } from "./syntax-contract";
 
 /** Lanes de trabalho (DEC-CON-5): `io` = N fixo, `fileRead` ≤ 2 on-demand, `index` = cold-start. */
 export type PoolLane = "io" | "index" | "fileRead";

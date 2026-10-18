@@ -107,8 +107,8 @@ function tokenizeSyntaxTask(
   let previousState: unknown;
   if (first > 0) {
     const prevIdx = first - 1;
-    const serialized = prevIdx < payload.states.length ? payload.states[prevIdx] : null;
-    previousState = serialized !== null ? { stack: serialized.split(",") } : undefined;
+    const prevState = prevIdx < payload.states.length ? payload.states[prevIdx] : null;
+    previousState = prevState !== undefined && prevState !== null ? { stack: prevState.split(",") } : undefined;
   }
 
   for (let i = 0; i < count; i++) {
@@ -116,7 +116,7 @@ function tokenizeSyntaxTask(
     const start = lineStarts[lineIndex];
     // Se não for a última linha, o `-1` remove o `\n` do final. Última linha não tem `\n`.
     const endOffset = lineIndex + 1 < lineStarts.length ? lineStarts[lineIndex + 1]! - 1 : text.length;
-    const lineText = text.slice(start, end);
+    const lineText = text.slice(start, endOffset);
 
     const tokenized = tokenizeCompiledLine(grammar, lineText, previousState);
 
