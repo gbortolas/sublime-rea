@@ -52,13 +52,15 @@ Sem o deadline maior, `open_binary`/`analyze` **via MCP** volta a estourar os 33
 
 **Próximas tarefas:**
 
-> Esta sessão resolveu a **dívida P2.4b** (tokenização em worker com deadline) e expandiu o
-> **LSP Client** com Code Actions, References e Rename — 3 features novas, 543 testes verdes.
-> O Scribe agora tem um LSP Client comparável a editores profissionais.
+> Esta sessão cortou a **release v0.4.0** (AppImage gerado, tag criada) — todas as melhorias
+> acumuladas desde 0.3.1 (LSP, minimap, tokenização em worker, performance, design).
 
-1. **📦 Release** — cortar um release do Scribe com todas as melhorias acumuladas.
-2. **🧩 P5 — Próximas features LSP** — Formatting (`textDocument/formatting`), Folding, Inlay Hints.
-3. **🔬 Análise de novos binários** — usar o Rizin com o plugin host (`plugin_host-3.14`).
+1. **🧩 Formatting / Folding / Inlay Hints** — expandir o LSP Client com `textDocument/formatting`,
+   folding ranges e inlay hints.
+2. **🔬 Analisar `plugin_host` com Rizin** — usar o Rizin (já provisionado) para analisar o binário
+   do host de plugins (Track A complementar).
+3. **📦 Push da tag v0.4.0** — fazer `git push origin v0.4.0` para acionar o CI Release no GitHub
+   (build automático Windows + Linux).
 
 > ✅ **Pegadinha resolvida (2026-10-16, P3.9):** o `setup.py` agora **detecta** um JDK ≥ 21
 > compatível (`JAVA_HOME`, PATH, sdkman, `/usr/lib/jvm`) e escreve um **`export JAVA_HOME=…` ativo**
