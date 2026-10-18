@@ -413,9 +413,15 @@ Problemas identificados ao testar o AppImage pela primeira vez:
       linha do BACKLOG e um `.idea/workspace.xml` gitignored).
 - [ ] **P3.5 — Provisionar Rizin** (só se P0.4 voltar à mesa): o REA faz `spawn("rizin")` do PATH e
       não há nenhum instalado.
-- [ ] **P3.6 — Snapshot de análise do REA**: baixa prioridade. O `snapshot_path=<*.json>` só faz
-      *replay* de ferramentas em cache e exige análise completa; o projeto Ghidra persistente cobre
-      melhor o caso.
+- [x] **P3.6 — Snapshot de análise do REA** ✅ **fechado** (2026-10-18). Snapshot gerado com o REA
+      (provider ghidra) após análise `binary_overview` + `inspect_binary_layout` + `list_strings` +
+      `list_procedures`. O snapshot contém:
+      - **3 evidence records** (layout, overview, strings) + **1 workflow entry** (combined)
+      - **8.87 MB** em `docs/analysis/snapshot.json`
+      - Pode ser carregado em sessões futuras com `rea open-binary --snapshot-path
+        docs/analysis/snapshot.json` para reuso de evidências sem re-analisar
+      - **OBS**: o Ghidra sempre re-analisa o binário (a análise é ~355s), mas as ferramentas MCP
+        (layout, strings, overview) são servidas do cache do snapshot
 - [x] **P3.7 — `~/sr-tools` (symlink)** ✅ **fechado** (2026-10-17): o symlink `~/sr-tools → $REA_TOOLS_DIR`
       agora é criado/manutenido pelo `setup.py` (não só pelo `ghidra-preanalyze.sh`). O Ghidra
       recusa path com `.`, e `$REA_TOOLS_DIR` vive em `~/.local/…` — o symlink contorna isso.

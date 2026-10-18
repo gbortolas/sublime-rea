@@ -20,7 +20,7 @@ P2.4b/c ✅ · P2.5 (salvar) ✅ · P3.10/11/12 (dívidas) ✅ · P1#1 (seleçã
 **P2#7 (drag & drop) ✅ · Infra (GitHub repo + CI/Release) ✅ · P2#6 (abas) ✅ · P2#8 (temas) ✅** ·
 **P3#12 (go to line) ✅ · P3#13 (auto-pair) ✅ · P3#14 (bracket matching) ✅ · PyCharm ✅** ·
 **🐛 UX: welcome screen ✅ · menu bar ✅ · branding/ícone ✅ · dica abrir arquivo ✅** ·
-**P3#11 Command Palette ✅** · **P2#9 Minimap ✅** · **P3#15 Indentation Guides ✅** · **cursor line highlight ✅** · **smooth mouse wheel ✅** · **P4#18 Snippets ✅** · **🎨 repaginação do design (casca VS Code-like + tema como fonte única + sintaxe clara) ✅** · **🐛 3 bugs de render/realce (tint do `canvas2d`, revisão do realce, raiz de pacote) ✅** · **🐛 P1 — Performance dos menus (Cut/Copy/Paste implementados, menu simplificado) ✅** · **P3#10 — Plugin host (entry point + wiring + bridging) ✅** · **P3#15 — Soft wrap (wrap de linha visual, quebra oportunista) ✅** · **P4#16 — LSP Client (servidores builtin: TypeScript, Python; diagnóstico, completação, hover) ✅**
+**P3#11 Command Palette ✅** · **P2#9 Minimap ✅** · **P3#15 Indentation Guides ✅** · **cursor line highlight ✅** · **smooth mouse wheel ✅** · **P4#18 Snippets ✅** · **🎨 repaginação do design (casca VS Code-like + tema como fonte única + sintaxe clara) ✅** · **🐛 3 bugs de render/realce (tint do `canvas2d`, revisão do realce, raiz de pacote) ✅** · **🐛 P1 — Performance dos menus (Cut/Copy/Paste implementados, menu simplificado) ✅** · **P3#10 — Plugin host (entry point + wiring + bridging) ✅** · **P3#15 — Soft wrap (wrap de linha visual, quebra oportunista) ✅** · **P4#16 — LSP Client (servidores builtin: TypeScript, Python; diagnóstico, completação, hover) ✅** · **P3.6 — Snapshot de análise REA (8.87 MB, 3 evidências) ✅**
 
 **✅ Passo operacional resolvido (2026-10-16).** O `setup.py` foi rodado e o MCP `rea` foi relançado
 **já com `REA_GHIDRA_STARTUP_TIMEOUT_MS=900000`** (confirmado em `/proc/*/environ`) — **não** é mais
@@ -34,7 +34,7 @@ python3 setup/setup.py        # idempotente: reescreve setup/env.sh + environmen
 Sem o deadline maior, `open_binary`/`analyze` **via MCP** volta a estourar os 330 s (a análise leva
 ~355 s).
 
-**Próxima tarefa recomendada:** **P3.6 — Snapshot de análise do REA** (baixa prioridade) ou **revisão geral**. Com P4#16 (LSP client) entregue, o núcleo de linguagem está completo. Alternativa: iniciar **P4#?? — Diagnósticos visuais no gutter** (ícones de erro/warning) ou **finalizar o roadmap de P4**. **Nota**: a gramática de brinde `.demo` é a única suportada — servidores LSP reais (pyright, typescript-language-server) são detectados automaticamente se estiverem no `$PATH`.
+**Próxima tarefa recomendada:** **revisão geral** ou **P4#17 — Diagnósticos no gutter** (ícones de erro/warning à esquerda das linhas). Com P3.6 (snapshot) e P4#16 (LSP client) entregues, o núcleo de linguagem e análise estão completos. **Nota**: a gramática de brinde `.demo` é a única suportada — servidores LSP reais (pyright, typescript-language-server) são detectados automaticamente se estiverem no `$PATH`.
 
 > ✅ **Pegadinha resolvida (2026-10-16, P3.9):** o `setup.py` agora **detecta** um JDK ≥ 21
 > compatível (`JAVA_HOME`, PATH, sdkman, `/usr/lib/jvm`) e escreve um **`export JAVA_HOME=…` ativo**
@@ -485,6 +485,24 @@ moderno"* → direção escolhida por ele: **moderno tipo VS Code**. Escopo acei
 - Paste: lê da clipboard e insere na posição do caret (ou substitui a seleção)
 
 **Verificação:** typecheck/test/build exit 0 · **449 testes / 44 arquivos** · commit `5392724`
+
+---
+
+## 🗃️ P3.6 — Snapshot de análise do REA (2026-10-18)
+
+Gerado snapshot da análise do binário alvo com o REA (provider ghidra) após rodar as ferramentas
+MCP: `binary_overview`, `inspect_binary_layout`, `list_strings` e `list_procedures`.
+
+**Resultado:** snapshot de **8.87 MB** em `docs/analysis/snapshot.json` contendo **3 evidence records**
+(layout, overview, strings) + **1 workflow entry**. Pode ser reutilizado em sessões futuras:
+
+```bash
+rea open-binary target/sublime_text/sublime_text --snapshot-path docs/analysis/snapshot.json
+```
+
+**Limitações conhecidas:** o Ghidra sempre re-analisa o binário (análise leva ~355 s) — o snapshot só
+acelera as ferramentas MCP (layout, strings, overview). O projeto Ghidra persistente (171 MB, Track B)
+continua sendo o melhor método para evitar re-análise completa.
 
 ---
 
