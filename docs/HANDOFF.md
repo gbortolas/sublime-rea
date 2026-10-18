@@ -1,11 +1,10 @@
 # HANDOFF — sublime-rea
 
 > **Documento de handoff entre sessões** (leia antes de retomar). Atualizado em **2026-10-18**.
-> Status: **P3.5 Rizin provisionado ✅ + Minimap Avançado ✅**<br>
-> (Rizin v0.9.1 + setup.py 7/12 + env.sh/MCP; minimap: syntax colorida no canvas,
-> marcadores de busca e diagnóstico). Próximo: análise via Rizin.
-> (static binary, SHA-256 pinado, `setup.py` etapa 7/12, `env.sh` + MCP propagados,
-> `execute-rizin-command` verificado). Próximo: escolha do usuário.
+> Status: **🔬 Análise via Rizin concluída ✅**<br>
+> (13.312 funções catalogadas, 76.042 strings extraídas, shaders GLSL reais confirmados,
+> 17 evidências RZ-E1–E17 consolidadas em `docs/analysis/rizin-analysis.md`).
+> Próximo: tokenização em worker (dívida P2.4b) ou novo feature.
 
 ---
 
@@ -35,7 +34,7 @@ lote no próximo rAF — transação única, 1 revisão, 1 `document.changed` �
 **🔍 Minimap Hover Preview: tooltip com código real e syntax highlighting ao passar o mouse
 no minimap — "lupa" estilo VS Code ✅** ·
 **🎯 Minimap Avançado — syntax colorida no canvas + marcadores de busca + diagnóstico ✅** ·
-**🔧 P3.5 — Rizin provisionado ✅ (v0.9.1 estático, `setup.py` etapa 7/12, `REA_RIZIN_COMMAND` no env.sh + MCP, `execute-rizin-command` verificado)**
+**🔧 P3.5 — Rizin provisionado ✅ · 🔬 Análise via Rizin concluída ✅**
 
 **✅ Passo operacional resolvido (2026-10-16).** O `setup.py` foi rodado e o MCP `rea` foi relançado
 **já com `REA_GHIDRA_STARTUP_TIMEOUT_MS=900000`** (confirmado em `/proc/*/environ`) — **não** é mais
@@ -49,16 +48,17 @@ python3 setup/setup.py        # idempotente: reescreve setup/env.sh + environmen
 Sem o deadline maior, `open_binary`/`analyze` **via MCP** volta a estourar os 330 s (a análise leva
 ~355 s).
 
-**Próximas tarefas (escolha do usuário na próxima sessão):**
+**Próximas tarefas:**
 
-> Esta sessão instalou e integrou **Rizin v0.9.1** como provider de análise nativa do REA
-> e implementou **Minimap Avançado** (syntax colorida no canvas, marcadores de busca
-> e diagnóstico). O usuário indicou **análise via Rizin** como próximo passo.
+> Esta sessão executou a **primeira análise real via Rizin**, confirmando de forma independente
+> os achados da Fase 1 (shaders GLSL, GTK runtime, Skia, jemalloc, estrutura de packages,
+> threads POSIX, IPC via shm) e documentando 17 novas evidências (RZ-E1–E17).
 
-1. **🔬 Análise via Rizin** — usar o Rizin para análise complementar do binário
-   (explorar funções com `afl`, disassemblar trechos com `pD`,
-   comparar resultados com o Ghidra).
-2. **📦 Release** — cortar um release do Scribe com as melhorias acumuladas.
+1. **⚡ Tokenização em worker com deadline** — dívida declarada do P2.4b: `highlightDocument`
+   tokeniza do estado inicial até a linha visível (custo O(`end`)). Deep scroll + keystroke
+   re-tokeniza o prefixo inteiro. Correção = cap de `end` ou tokenização em `TaskPool` com prazo.
+2. **🧩 P5 — Novas features LSP** — Rename, Code Actions, References, Folding, Formatting.
+3. **📦 Release** — cortar um release do Scribe com as melhorias acumuladas.
 
 > ✅ **Pegadinha resolvida (2026-10-16, P3.9):** o `setup.py` agora **detecta** um JDK ≥ 21
 > compatível (`JAVA_HOME`, PATH, sdkman, `/usr/lib/jvm`) e escreve um **`export JAVA_HOME=…` ativo**

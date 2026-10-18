@@ -425,6 +425,17 @@ Problemas identificados ao testar o AppImage pela primeira vez:
       - **Verificado:** `rea execute-rizin-command` → `exit_code: 0`, `completion_status: complete`,
         provider `rizin` analisando o binário alvo (`iI` revela arch, bits, bintype, relro, nx, pie)
       - **Setup roda em 12 etapas** (sem quebras; dry-run e execução real validados)
+- [x] **🔬 P3.5b — Análise via Rizin** ✅ **fechado** (2026-10-18). Primeira análise real do binário
+      via Rizin, confirmando independentemente os achados da Fase 1 (Ghidra):
+      - **13.312 funções** catalogadas com `aac` (Rizin v0.9.1, binário stripped)
+      - **76.042 strings** extraídas com `izz`
+      - **Shaders GLSL reais** extraídos do `.rodata`: vertex shader (959 B, `0xcf8a5`) com
+        suporte a `TEXTURED`/`ROUNDED`/`BORDERED`/`REPEAT` e fragment shader sólido (82 B, `0xcfc64`)
+      - **433 imports** confirmados: GTK+GLib (50+), OpenGL (60+), pthreads (30+), POSIX IPC,
+        X11, jemalloc, Skia estática
+      - **17 evidências RZ-E1–E17** documentadas em `docs/analysis/rizin-analysis.md`
+      - Pipeline de render (P1.4), concorrência (P1.2), IPC (P1.3), empacotamento (P1.6) —
+        **todos confirmados**
 - [x] **🎯 Minimap Avançado** ✅ **fechado** (2026-10-18). Três melhorias no minimap:
       - **Syntax colorida no canvas**: cada linha do minimap agora exibe barras com as cores
         reais de syntax highlighting, dividindo a barra horizontal em segmentos proporcionais
