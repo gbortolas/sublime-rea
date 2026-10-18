@@ -427,6 +427,11 @@ interface ScribeBridge {
   text(handle: number): Promise<string>;
   revision(handle: number): Promise<number>;
   insert(handle: number, at: number, text: string, origin?: "plugin" | "user"): Promise<DocumentInsertResult>;
+  batchInsert(
+    handle: number,
+    inserts: ReadonlyArray<{ readonly at: number; readonly text: string }>,
+    origin?: "plugin" | "user",
+  ): Promise<DocumentInsertResult>;
   replaceOne(handle: number, at: number, remove: number, insert: string): Promise<DocumentInsertResult>;
   undo(handle: number): Promise<UndoStateDto>;
   redo(handle: number): Promise<UndoStateDto>;
@@ -820,6 +825,13 @@ class DocumentController {
   private activeIndex = -1;
   private opening: { readonly signalId: number; readonly path: string } | undefined;
 
+  /** Lote de inserções pendentes — acumula keystrokes entre frames. */
+  private pendingBatch: Array<{ at: number; text: string }> | null = null;
+  /** Revisão local estimada (incrementada a cada keystroke batched). */
+  private batchLocalRevision = 0;
+  /** Timer do rAF para flush do lote. */
+  private flushTimer: number | null = null;
+
   constructor(
     private readonly bridge: ScribeBridge,
     private readonly viewport: ViewportImpl,
@@ -854,6 +866,7 @@ class DocumentController {
 
   /** Abre `path`, cancelando qualquer abertura anterior. `true` = documento ligado. */
   async open(path: string): Promise<boolean> {
+    await this.flushBatch();
     this.cancelOpening();
     const signalId = this.bridge.nextSignalId();
     this.opening = { signalId, path };
@@ -933,6 +946,8 @@ class DocumentController {
 
   activate(index: number): void {
     if (index === this.activeIndex || index < 0 || index >= this.sessions.length) return;
+    // Flush lote pendente antes de trocar de documento
+    void this.flushBatch();
     // Salva estado da sessão atual
     const old = this.sessions[this.activeIndex];
     if (old !== undefined) {
@@ -958,6 +973,8 @@ class DocumentController {
 
   close(index: number): void {
     if (index < 0 || index >= this.sessions.length) return;
+    // Flush lote pendente antes de fechar
+    void this.flushBatch();
     const session = this.sessions[index]!;
     session.dispose();
     this.sessions.splice(index, 1);
@@ -1082,35 +1099,77 @@ class DocumentController {
     await this.runHistory("redo");
   }
 
-  /** Digitação mínima: insere no caret e aplica resultado rico localmente. */
+  /** Digitação mínima: aplica splice local e acumula no lote. */
   async insertText(text: string): Promise<void> {
     const session = this.current;
     if (session === undefined) return;
     try {
       const s = session.selection;
       if (!SelectionOps.isCollapsed(s)) {
+        // Seleção expandida: flush + replaceText imediato
+        await this.flushBatch();
         const { start, end } = SelectionOps.normalized(s);
         await this.replaceText(start, end - start, text);
         return;
       }
-      // Seleção colapsada: insere normalmente
+      // Aplica splice local (zero latência!)
       const insertAt = session.caret;
-      const result = await session.bridge.insert(session.handle, insertAt, text, "user");
+      const oldText = session.source.text;
+      const newText = oldText.slice(0, insertAt) + text + oldText.slice(insertAt);
+      this.batchLocalRevision += 1;
+      const localRev = this.batchLocalRevision;
+      session.source.setText(newText, localRev);
       session.caret = insertAt + text.length;
       session.selection = SelectionOps.collapsed(session.caret);
       session.selections = SelectionSetOps.singular(session.caret);
       this.renderer.setSelection(session.selection);
       this.renderer.setSelections(session.selections);
-      // Aplica o texto do resultado rico — elimina roundtrip bridge.text()
-      session.source.setText(result.text, result.revision);
       this.viewport.setMetrics({ lineCount: session.source.lineCount() });
       updateCaretStatus(session.source, session.caret);
       session.dirty = true;
-      // Undo status vem no resultado — elimina roundtrip refreshUndoStatus()
-      setUndoStatus(result.canUndo, result.canRedo);
+      // Undo status fica indeterminado até o flush — mantém o anterior.
+      // Acumula no lote e agenda flush
+      (this.pendingBatch ??= []).push({ at: insertAt, text });
+      this.scheduleBatchFlush();
       this.renderer.start();
     } catch (error) {
       console.error("Scribe: falha ao inserir texto no documento", error);
+    }
+  }
+
+  /** Agenda flush do lote no próximo rAF. */
+  private scheduleBatchFlush(): void {
+    if (this.flushTimer !== null) return;
+    this.flushTimer = requestAnimationFrame(() => {
+      this.flushTimer = null;
+      void this.flushBatch();
+    });
+  }
+
+  /** Envia o lote acumulado para o main e reconcilia. Chamado externamente antes de operações IPC. */
+  async flushBatch(): Promise<void> {
+    const batch = this.pendingBatch;
+    if (batch === null || batch.length === 0) return;
+    this.pendingBatch = null;
+    this.batchLocalRevision = 0;
+    const session = this.current;
+    if (session === undefined) return;
+    try {
+      const result = await session.bridge.batchInsert(
+        session.handle, batch, "user",
+      );
+      // Reconcilia revisão real do servidor
+      session.source.setText(result.text, result.revision);
+      setUndoStatus(result.canUndo, result.canRedo);
+    } catch (error) {
+      console.error("Scribe: falha ao enviar lote de inserções", error);
+      // Fallback: lê o documento inteiro para recuperar consistência
+      try {
+        const text = await session.bridge.text(session.handle);
+        session.source.setText(text, -1);
+      } catch {
+        // Silêncio — não há o que fazer sem a ponte
+      }
     }
   }
 
@@ -1119,6 +1178,8 @@ class DocumentController {
    * Atualiza o caret, seleção, viewport e estado dirty — undo status vem no resultado rico.
    */
   async replaceText(at: number, remove: number, insert: string): Promise<void> {
+    // Flush antes de operação que vai direto ao main
+    await this.flushBatch();
     const session = this.current;
     if (session === undefined) return;
     try {
@@ -1140,6 +1201,7 @@ class DocumentController {
   }
 
   private async runHistory(action: "undo" | "redo"): Promise<void> {
+    await this.flushBatch();
     const session = this.current;
     if (session === undefined) return;
     try {
@@ -1178,6 +1240,7 @@ class DocumentController {
   }
 
   async save(): Promise<void> {
+    await this.flushBatch();
     const session = this.current;
     if (session === undefined) return;
     try {
@@ -2717,6 +2780,8 @@ function attachInputListeners(
           event.preventDefault();
           const expansion = parseSnippet(snippet.template);
           void (async () => {
+            // Flush lote pendente antes de operação que vai direto ao main
+            await controller?.flushBatch?.();
             // Usa replaceOne para deletar o trigger + inserir o template
             const triggerLen = word.length;
             const result = await session.bridge.replaceOne(

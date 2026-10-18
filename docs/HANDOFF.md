@@ -27,7 +27,9 @@ P2.4b/c ✅ · P2.5 (salvar) ✅ · P3.10/11/12 (dívidas) ✅ · P1#1 (seleçã
 **⚡ Tokenização: cache incremental (diff de linhas, trunca só da 1ª alterada) ✅** ·
 **📊 Performance profiling: startup 203ms, render 280 FPS, memória 15.4 MB, zero leaks ✅** ·
 **⚡ Input latency: resultado rico do `document.insert` elimina 2/3 IPC roundtrips por tecla ✅** -
-(insert retorna `{revision, text, canUndo, canRedo}` — mata `bridge.text()` e `refreshUndoStatus()`)
+(insert retorna `{revision, text, canUndo, canRedo}` — mata `bridge.text()` e `refreshUndoStatus()`) ·
+**⚡ Batching de teclas (Fase B): keystrokes aplicados localmente (0 latência) e enviados como
+lote no próximo rAF — transação única, 1 revisão, 1 `document.changed` ✅**
 
 **✅ Passo operacional resolvido (2026-10-16).** O `setup.py` foi rodado e o MCP `rea` foi relançado
 **já com `REA_GHIDRA_STARTUP_TIMEOUT_MS=900000`** (confirmado em `/proc/*/environ`) — **não** é mais
@@ -667,11 +669,43 @@ rico (`DocumentInsertResult`) contendo `{revision, text, canUndo, canRedo}` em v
 - Gates: `typecheck`/`lint`/`build` exit 0 · **520 testes / 50 arquivos** (baseline 519)
 - Retoques nos testes que comparavam `insertText` como número (`after.revision`)
 
-### Segunda fase (Fase B)
+### ✅ Fase B — Batching de teclas (2026-10-18)
 
-O próximo passo é **batching de teclas** (`document.batchInsert`): acumular keystrokes entre
-frames de rAF e enviar como lote único, eliminando por completo o roundtrip por caractere em
-digitação contínua.
+**Antes (mesmo com Fase A):** cada caractere digitado fazia 1 IPC roundtrip (`document.insert`).
+Em digitação rápida (>60 keystrokes/s), o roundtrip acumulado podia travar.
+
+**Depois:** keystrokes são **aplicados localmente** via splice de string (zero IPC, latência zero)
+e acumulados num buffer. No próximo `requestAnimationFrame`, o buffer é enviado como lote único
+via `document.batchInsert` — o main aplica tudo como **transação única** (1 revisão, 1 evento
+`document.changed`, 1 passo de undo).
+
+**Alterações pontuais:**
+
+| Camada | Mudança |
+|---|---|
+| `src/shared/ipc-contract.ts` | `document.batchInsert` no `IpcMethods` |
+| `src/core/editor/editor-core.ts` | `runBatchInsert` com `coalesceDocumentChanges`; interface + implementação |
+| `src/main/index.ts` | Dispatch para `document.batchInsert` |
+| `src/preload/index.ts` | `batchInsert()` na ponte |
+| `src/renderer/main.ts` | `DocumentController.pendingBatch` + `flushBatch()` + `scheduleBatchFlush()`. `insertText` aplica splice local e acumula. Flush automático antes de: `replaceText`, `runHistory` (undo/redo), `save`, `open`, `close`, `activate`, snippet expansion. |
+
+### Verificação
+
+- Gates: `typecheck`/`build` exit 0 · **520 testes / 50 arquivos** (mesmo baseline)
+- Auto-pair continua enviando par como uma entrada do lote (2 chars, 1 posição)
+- Navegação local (setas, home/end, pgup/dn) não é afetada
+- Fallback em caso de falha do batch: lê o documento inteiro para recuperar consistência
+
+### Resumo da latência de digitação (antes → depois)
+
+| Fase | IPC/tecla | Latência estimada | Técnica |
+|---|---|---|---|
+| Original | **3 roundtrips** | ~16.5 ms | insert + text + undoStatus |
+| Fase A | **1 roundtrip** | ~5.5 ms | resultado rico do insert |
+| **Fase B** | **0 roundtrips*** | **~0 ms** | aplicação local + batching em rAF |
+
+*Zero roundtrips durante a digitação. O lote é enviado no próximo frame de rAF, que tipicamente
+acontece ~16 ms depois — mas não bloqueia a tecla seguinte. A latência *percebida* cai para virtualmente zero. O main reconcilia em background.
 
 ---
 

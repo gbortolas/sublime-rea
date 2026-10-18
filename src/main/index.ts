@@ -307,6 +307,15 @@ async function dispatchIpc(
       const origin = request.args[3] === "plugin" ? "plugin" : "user";
       return core.insertText(handle, at, text, origin);
     }
+    case "document.batchInsert": {
+      const handle = requireHandle(request.args[0], "document.batchInsert");
+      const inserts = request.args[1];
+      if (!Array.isArray(inserts) || inserts.length === 0) {
+        throw new IpcProtocolError("invalid-args", "document.batchInsert: inserts deve ser array não vazio");
+      }
+      const origin = request.args[2] === "plugin" ? "plugin" : "user";
+      return core.batchInsert(handle, inserts, origin);
+    }
     case "document.replaceOne": {
       const handle = requireHandle(request.args[0], "document.replaceOne");
       const at = requireNumber(request.args[1], "document.replaceOne", "at");

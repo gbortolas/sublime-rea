@@ -181,6 +181,15 @@ export interface EditorCore {
    * Devolve resultado rico (revisão, texto completo, undo/redo).
    */
   replaceOne(handle: DocumentHandle, at: number, remove: number, insert: string): Promise<DocumentInsertResult>;
+  /**
+   * Lote de inserções atômicas: aplica cada `{at, text}` em sequência, como
+   * uma única transação de undo. Retorna o resultado consolidado.
+   */
+  batchInsert(
+    handle: DocumentHandle,
+    inserts: ReadonlyArray<{ readonly at: number; readonly text: string }>,
+    origin?: "plugin" | "user",
+  ): Promise<DocumentInsertResult>;
   revisionOf(handle: DocumentHandle): number;
   saveDocument(handle: DocumentHandle, signal?: AbortSignal): Promise<void>;
   isDirty(handle: DocumentHandle): boolean;
@@ -1044,6 +1053,56 @@ export function createEditorCore(options: EditorCoreOptions = {}): EditorCore {
   }
 
   /**
+   * Lote de inserções atômicas: aplica cada `{at, text}` em sequência, tudo
+   * dentro de um único `coalesceDocumentChanges` (1 evento `document.changed`).
+   */
+  async function runBatchInsert(
+    handle: DocumentHandle,
+    inserts: ReadonlyArray<{ readonly at: number; readonly text: string }>,
+    origin: "plugin" | "user",
+  ): Promise<DocumentInsertResult> {
+    assertNotDisposed();
+    const buffer = resolveBuffer(handle);
+    state.pendingHandle = handle;
+    try {
+      return await coalesceDocumentChanges(handle, async () => {
+        for (const { at, text } of inserts) {
+          const result = await commands.run(
+            INSERT_COMMAND_ID,
+            { handle, at, text },
+            { origin, group: `type:${handle}` },
+          );
+          if (!result.handled) {
+            throw new EditorArgumentError(
+              "command-missing",
+              `comando não registrado: ${INSERT_COMMAND_ID}`,
+            );
+          }
+        }
+        state.caret = inserts[inserts.length - 1]!.at + inserts[inserts.length - 1]!.text.length;
+        state.selection = SelectionOps.collapsed(state.caret);
+        state.selections = SelectionSetOps.singular(state.caret);
+        registry.setDirty(handle, true);
+        if (lspManager !== null) {
+          const st = registry.get(handle);
+          if (st !== undefined) {
+            const uri = toFileUri(st.uri);
+            lspManager.changeDocument(uri, buffer.text(), buffer.revision);
+          }
+        }
+        return {
+          revision: buffer.revision,
+          text: buffer.text(),
+          canUndo: commands.undoStack.undoDepth > 0,
+          canRedo: commands.undoStack.redoDepth > 0,
+        };
+      });
+    } finally {
+      state.pendingHandle = undefined;
+    }
+  }
+
+  /**
    * Estado de undo/redo do documento + cursor. A pilha (`UndoStack`) é do `CommandBus`; aqui só
    * lemos as profundidades (não inventamos API que o núcleo não suporta).
    */
@@ -1159,6 +1218,14 @@ export function createEditorCore(options: EditorCoreOptions = {}): EditorCore {
       insert: string,
     ): Promise<DocumentInsertResult> {
       return enqueue(() => runReplaceOne(handle, at, remove, insert));
+    },
+
+    batchInsert(
+      handle: DocumentHandle,
+      inserts: ReadonlyArray<{ readonly at: number; readonly text: string }>,
+      origin: "plugin" | "user" = "user",
+    ): Promise<DocumentInsertResult> {
+      return enqueue(() => runBatchInsert(handle, inserts, origin));
     },
 
     revisionOf(handle: DocumentHandle): number {

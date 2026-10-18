@@ -101,6 +101,16 @@ export interface IpcMethods {
     text: string,
     origin: "plugin" | "user",
   ): DocumentInsertResult;
+  /**
+   * Lote de inserções: aplica múltiplos `{at, text}` como uma transação única.
+   * Cada `at` é absoluto (considera inserts anteriores do lote).
+   * Retorna o resultado consolidado (revisão final, texto final, undo/redo).
+   */
+  "document.batchInsert"(
+    handle: DocumentHandle,
+    inserts: ReadonlyArray<{ readonly at: number; readonly text: string }>,
+    origin: "plugin" | "user",
+  ): DocumentInsertResult;
   "document.replaceOne"(handle: DocumentHandle, at: number, remove: number, insert: string): DocumentInsertResult;
   "editor.undo"(handle: DocumentHandle): DocumentUndoState;
   "editor.redo"(handle: DocumentHandle): DocumentUndoState;
@@ -155,6 +165,7 @@ export const IPC_METHODS = [
   "document.save",
   "document.isDirty",
   "document.insert",
+  "document.batchInsert",
   "document.replaceOne",
   "editor.undo",
   "editor.redo",

@@ -57,6 +57,12 @@ export interface ScribePreloadApi {
     text: string,
     origin?: InsertOrigin,
   ): Promise<DocumentInsertResult>;
+  /** Lote de inserções: aplica tudo como transação única. */
+  batchInsert(
+    handle: DocumentHandle,
+    inserts: ReadonlyArray<{ readonly at: number; readonly text: string }>,
+    origin?: InsertOrigin,
+  ): Promise<DocumentInsertResult>;
   replaceOne(handle: DocumentHandle, at: number, remove: number, insert: string): Promise<DocumentInsertResult>;
   undo(handle: DocumentHandle): Promise<DocumentUndoState>;
   redo(handle: DocumentHandle): Promise<DocumentUndoState>;
@@ -188,6 +194,12 @@ const api: ScribePreloadApi = {
   ): Promise<DocumentInsertResult> => call<DocumentInsertResult>("document.insert", [handle, at, text, origin]),
   replaceOne: (handle: DocumentHandle, at: number, remove: number, insert: string): Promise<DocumentInsertResult> =>
     call<DocumentInsertResult>("document.replaceOne", [handle, at, remove, insert]),
+  batchInsert: (
+    handle: DocumentHandle,
+    inserts: ReadonlyArray<{ readonly at: number; readonly text: string }>,
+    origin: InsertOrigin = "user",
+  ): Promise<DocumentInsertResult> =>
+    call<DocumentInsertResult>("document.batchInsert", [handle, inserts, origin]),
   undo: (handle: DocumentHandle): Promise<DocumentUndoState> =>
     call<DocumentUndoState>("editor.undo", [handle]),
   redo: (handle: DocumentHandle): Promise<DocumentUndoState> =>

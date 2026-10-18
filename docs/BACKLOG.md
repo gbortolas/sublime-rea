@@ -427,7 +427,12 @@ Problemas identificados ao testar o AppImage pela primeira vez:
       `document.insert` devolve `{revision, text, canUndo, canRedo}` de uma vez — **1 roundtrip
       apenas** (redução de 66%). Elimina as chamadas de `bridge.text()` e `refreshUndoStatus()`
       após cada tecla, e pula o `document.changed` redundante. **520 testes / 50 arquivos**.
-      **Fase B** (batching de teclas entre rAF) segue como próximo passo.
+- [x] **Input latency — Fase B (batching de teclas)** ✅ **fechado** (2026-10-18).
+      Keystrokes são aplicados localmente via splice de string (latência zero) e acumulados num
+      buffer. No próximo `requestAnimationFrame`, o lote é enviado ao main via `document.batchInsert`
+      como transação única (1 revisão, 1 `document.changed`). Flush automático antes de operações
+      que precisam de estado consistente (replaceText, undo/redo, save, open, close, activate,
+      snippet). **520 testes / 50 arquivos** (mesmo baseline).
 - [x] **P3.7 — `~/sr-tools` (symlink)** ✅ **fechado** (2026-10-17): o symlink `~/sr-tools → $REA_TOOLS_DIR`
       agora é criado/manutenido pelo `setup.py` (não só pelo `ghidra-preanalyze.sh`). O Ghidra
       recusa path com `.`, e `$REA_TOOLS_DIR` vive em `~/.local/…` — o symlink contorna isso.
