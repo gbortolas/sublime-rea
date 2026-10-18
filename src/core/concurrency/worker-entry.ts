@@ -114,7 +114,8 @@ function tokenizeSyntaxTask(
   for (let i = 0; i < count; i++) {
     const lineIndex = first + i;
     const start = lineStarts[lineIndex];
-    const end = lineIndex + 1 < lineStarts.length ? lineStarts[lineIndex + 1] - 1 : text.length;
+    // Se não for a última linha, o `-1` remove o `\n` do final. Última linha não tem `\n`.
+    const endOffset = lineIndex + 1 < lineStarts.length ? lineStarts[lineIndex + 1]! - 1 : text.length;
     const lineText = text.slice(start, end);
 
     const tokenized = tokenizeCompiledLine(grammar, lineText, previousState);

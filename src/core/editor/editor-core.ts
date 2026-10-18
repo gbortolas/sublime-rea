@@ -928,9 +928,10 @@ export function createEditorCore(options: EditorCoreOptions = {}): EditorCore {
     }
     const contexts: Record<string, import("../../shared").SerializedContext> = {};
     for (const [name, patterns] of compiled.contexts) {
+      const metaScope = compiled.contextScopes.get(name);
       contexts[name] = {
         patterns: patterns.map(serializePattern),
-        metaScope: compiled.contextScopes.get(name),
+        ...(metaScope !== undefined ? { metaScope } : {}),
       };
     }
     const contextScopes: Record<string, string> = {};
@@ -1002,6 +1003,7 @@ export function createEditorCore(options: EditorCoreOptions = {}): EditorCore {
     if (result.states) {
       for (let i = 0; i < result.states.length; i++) {
         const serial = result.states[i];
+        if (serial === undefined) continue;
         entry.states.push(serial !== null ? { stack: serial.split(",") } : undefined);
       }
     }
@@ -1450,7 +1452,7 @@ export function createEditorCore(options: EditorCoreOptions = {}): EditorCore {
       for (let line = start; line < end; line++) {
         lines.push({ line, spans: entry.spans[line] ?? [] });
       }
-      return { revision, first: start, lines, truncated: truncated || undefined };
+      return { revision, first: start, lines, ...(truncated ? { truncated: true } : {}) };
     },
 
     async searchDocument(
@@ -1823,8 +1825,9 @@ export function createEditorCore(options: EditorCoreOptions = {}): EditorCore {
           };
         }
         if (ca.command !== undefined) {
-          item.command = { command: ca.command.command };
-          if (ca.command.arguments !== undefined) item.command.arguments = ca.command.arguments;
+          const cmd: Record<string, unknown> = { command: ca.command.command };
+          if (ca.command.arguments !== undefined) cmd.arguments = ca.command.arguments;
+          item.command = cmd;
         }
         return item as unknown as LspCodeAction;
       });
