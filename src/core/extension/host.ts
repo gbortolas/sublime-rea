@@ -197,8 +197,18 @@ export class ExtensionHostImpl implements ExtensionHost {
       this.protocolErrorSink(new ProtocolError("host.process-error", `host "${name}": ${error.message}`));
     });
 
+    // Suppress ready.promise rejection if we never get to await it
+    // (e.g., postMessage throws before we reach the await).
+    ready.promise.catch(() => {});
+
     // O núcleo cria o canal e o transfere; o host só conecta (DEC-IPC-2).
-    child.postMessage({ kind: "bootstrap", name, port: pair.host }, [pair.host]);
+    try {
+      child.postMessage({ kind: "bootstrap", name, port: pair.host }, [pair.host]);
+    } catch (err) {
+      child.kill();
+      await bridge.close();
+      throw toError(err);
+    }
 
     const timer = (this.timer ?? defaultTimer).setTimeout(() => {
       if (!ready.settled) {

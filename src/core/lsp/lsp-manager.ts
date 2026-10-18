@@ -73,6 +73,7 @@ export class LspManager implements Disposable {
       capabilities: {},
       clientInfo: { name: "Scribe" },
       rootUri: null,
+      initializationOptions: config.initializationOptions,
     };
 
     await client.connect(initParams);

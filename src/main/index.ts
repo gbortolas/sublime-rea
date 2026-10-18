@@ -686,17 +686,37 @@ export async function startMainProcess(): Promise<void> {
   });
   // Inicia cada servidor builtin com try/catch (pode não estar instalado)
   const lspInitPromises = [];
-  for (const config of BUILTIN_LSP_SERVERS) {
-    if (config.enabled) {
-      lspInitPromises.push(
-        lspManager.startServer(config).then((client) => {
-          console.info(`Scribe: servidor LSP "${config.name}" iniciado`);
-          return client;
-        }).catch((error: unknown) => {
-          console.warn(`Scribe: servidor LSP "${config.name}" não disponível:`, error instanceof Error ? error.message : String(error));
-        }),
-      );
+  for (const baseConfig of BUILTIN_LSP_SERVERS) {
+    if (!baseConfig.enabled) continue;
+
+    // Para o TypeScript server: injeta o path do `typescript` local como
+    // `initializationOptions.tsserver.path` (o server global precisa saber
+    // onde está o `tsserver.js` — sem isso ele rejeita o handshake).
+    let config = baseConfig;
+    if (baseConfig.languageId === "typescript") {
+      try {
+        const tsserverPath = require.resolve("typescript/lib/tsserver.js");
+        config = {
+          ...baseConfig,
+          initializationOptions: {
+            ...baseConfig.initializationOptions,
+            tsserver: { path: tsserverPath },
+          },
+        };
+      } catch {
+        // typescript não instalado — deixa o config original; o catch do
+        // `startServer` exibirá o warning padrão.
+      }
     }
+
+    lspInitPromises.push(
+      lspManager.startServer(config).then((client) => {
+        console.info(`Scribe: servidor LSP "${config.name}" iniciado`);
+        return client;
+      }).catch((error: unknown) => {
+        console.warn(`Scribe: servidor LSP "${config.name}" não disponível:`, error instanceof Error ? error.message : String(error));
+      }),
+    );
   }
   // Aguarda todos os servidores tentarem iniciar e depois associa ao core
   void Promise.allSettled(lspInitPromises).then(() => {

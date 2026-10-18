@@ -330,6 +330,8 @@ export interface InitializeParams {
   readonly clientInfo?: { readonly name: string; readonly version?: string };
   readonly capabilities: unknown;
   readonly rootUri?: string | null;
+  /** Opções específicas do servidor (ex.: `tsserver.path` para TypeScript). */
+  readonly initializationOptions?: unknown;
 }
 
 export interface InitializeResult {
