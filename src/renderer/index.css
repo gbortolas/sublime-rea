@@ -910,6 +910,23 @@ body {
   display: none;
 }
 
+/* Minimap Hover Preview — tooltip com código real ao passar mouse no minimap */
+.minimap-hover-tooltip {
+  position: fixed;
+  z-index: 10000;
+  background: var(--s-bg);
+  border: 1px solid var(--s-border, #555);
+  border-radius: 6px;
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.4);
+  padding: 6px 10px;
+  line-height: 1.5;
+  white-space: pre;
+  pointer-events: none;
+  max-height: 320px;
+  overflow: hidden;
+  min-width: 100px;
+}
+
 .hover-body {
   display: flex;
   flex-direction: column;

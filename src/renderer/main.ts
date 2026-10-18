@@ -2120,7 +2120,6 @@ export async function bootRenderer(): Promise<boolean> {
       fontSize: TEXT_STYLE.sizePx,
       syntaxTheme,
       getHandle: () => controller?.current?.handle,
-      bgColor: rgbToCss(THEME.current.colors.background),
       requestHighlight: async (first: number, count: number) => {
         const handle = controller?.current?.handle;
         if (handle === undefined) return { revision: -1, first: 0, lines: [] };

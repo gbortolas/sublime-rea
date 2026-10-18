@@ -177,7 +177,7 @@ export interface MinimapHoverDeps {
   container: HTMLElement;
   /** Canvas do minimap (para eventos de mouse). */
   canvas: HTMLCanvasElement;
-  /** Fonte monospace do editor (para o tooltip). */
+  /** Família da fonte monospace do editor (ex: "JetBrains Mono", "Consolas"). */
   fontFamily: string;
   /** Tamanho da fonte em px para o tooltip. */
   fontSize: number;
@@ -187,8 +187,6 @@ export interface MinimapHoverDeps {
   requestHighlight: (first: number, count: number) => Promise<DocumentHighlight>;
   /** Handle do documento ativo, ou undefined sem documento. */
   getHandle: () => number | undefined;
-  /** Cor de fundo do editor (vem do tema). */
-  bgColor: string;
 }
 
 /** Resultado do `attachMinimapHover`: para desligar. */
@@ -306,36 +304,46 @@ export function attachMinimapHover(deps: MinimapHoverDeps): MinimapHoverBinding 
       document.body.appendChild(tooltipEl);
     }
     tooltipEl.innerHTML = content;
-    // Estilização inline para não depender de CSS externo
-    const font = `${deps.fontSize}px ${deps.fontFamily}`;
-    tooltipEl.style.cssText = `
-      position: fixed;
-      z-index: 10000;
-      background: ${deps.bgColor};
-      border: 1px solid var(--s-border, #555);
-      border-radius: 6px;
-      box-shadow: 0 4px 16px rgba(0,0,0,0.4);
-      padding: 6px 10px;
-      font: ${font};
-      line-height: 1.5;
-      white-space: pre;
-      pointer-events: none;
-      max-height: 320px;
-      overflow: hidden;
-      min-width: 100px;
-    `;
-    // Posiciona à esquerda do minimap
-    const tooltipX = rect.left - 8;
+    // Só o font-size precisa vir de JS (vem da config do editor)
+    tooltipEl.style.fontSize = `${deps.fontSize}px`;
+    tooltipEl.style.fontFamily = deps.fontFamily;
+    // Posicionamento inteligente: à esquerda por padrão, à direita se não couber
+    const tooltipW = tooltipEl.offsetWidth || 200;
     const tooltipH = tooltipEl.offsetHeight || 200;
+    const gap = 8;
+    // Tenta esquerda primeiro
+    const leftSpace = rect.left - gap;
+    let tooltipX: number;
+    if (leftSpace >= tooltipW) {
+      tooltipX = rect.left - gap;
+    } else {
+      // Não coube à esquerda → mostra à direita
+      tooltipX = rect.right + gap;
+    }
     let tooltipY = pageY - tooltipH / 2;
     tooltipY = Math.max(8, Math.min(tooltipY, window.innerHeight - tooltipH - 8));
     tooltipEl.style.left = `${tooltipX}px`;
     tooltipEl.style.top = `${tooltipY}px`;
-    // Translada para a esquerda (largura total do tooltip)
-    tooltipEl.style.transform = "translateX(-100%)";
   };
 
   const updateTooltip = (pageY: number): void => {
+    // Atualiza posição vertical em tempo real (tooltip segue o mouse)
+    if (tooltipEl !== null && cachedContent !== null) {
+      const rect = deps.container.getBoundingClientRect();
+      const tooltipH = tooltipEl.offsetHeight || 200;
+      const gap = 8;
+      const leftSpace = rect.left - gap;
+      const tooltipW = tooltipEl.offsetWidth || 200;
+      if (leftSpace >= tooltipW) {
+        tooltipEl.style.left = `${rect.left - gap}px`;
+      } else {
+        tooltipEl.style.left = `${rect.right + gap}px`;
+      }
+      let tooltipY = pageY - tooltipH / 2;
+      tooltipY = Math.max(8, Math.min(tooltipY, window.innerHeight - tooltipH - 8));
+      tooltipEl.style.top = `${tooltipY}px`;
+    }
+
     const line = lineAtY(pageY);
     if (line === undefined) {
       removeTooltip();
