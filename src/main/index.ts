@@ -386,6 +386,8 @@ async function dispatchIpc(
       const triggerSig = request.args[3] as string | undefined;
       return core.requestSignatureHelp(handleSig, lineSig, colSig, triggerSig);
     }
+    case "lsp.documentSymbols":
+      return core.requestDocumentSymbols(requireHandle(request.args[0], "lsp.documentSymbols"));
     default:
       // Inalcançável: `parseIpcRequest` já validou o método; guarda contra regressão.
       throw new IpcProtocolError("unknown-method", "método desconhecido");

@@ -1019,6 +1019,110 @@ body {
   text-align: right;
 }
 
+/* ══ Document symbols popup ═════════════════════════════════════════════════ */
+
+#document-symbols-popup {
+  pointer-events: auto;
+  position: absolute;
+  z-index: 6;
+  min-width: 300px;
+  max-width: 480px;
+  max-height: 360px;
+  border: 1px solid var(--s-border);
+  border-radius: var(--s-radius-lg);
+  background: var(--s-sidebar);
+  box-shadow: var(--s-shadow);
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  top: var(--s-space-2);
+  left: 50%;
+  transform: translateX(-50%);
+}
+
+#document-symbols-popup[hidden] {
+  display: none;
+}
+
+.symbols-input {
+  flex: none;
+  width: 100%;
+  padding: var(--s-space-2) var(--s-space-3);
+  border: none;
+  border-bottom: 1px solid var(--s-border);
+  background: transparent;
+  color: var(--s-fg);
+  font-family: var(--s-font);
+  font-size: var(--s-fs-sm);
+  outline: none;
+  box-sizing: border-box;
+}
+
+.symbols-input::placeholder {
+  color: var(--s-muted);
+}
+
+.symbols-list {
+  flex: 1;
+  overflow-y: auto;
+  padding: var(--s-space-1);
+}
+
+.symbols-item {
+  display: flex;
+  align-items: center;
+  gap: var(--s-space-2);
+  padding: 5px var(--s-space-2);
+  border-radius: var(--s-radius);
+  cursor: pointer;
+  user-select: none;
+}
+
+.symbols-item:hover,
+.symbols-item.selected {
+  background: var(--s-selected);
+}
+
+.symbols-icon {
+  flex: none;
+  display: grid;
+  place-items: center;
+  width: 18px;
+  height: 18px;
+  color: var(--s-accent);
+  opacity: 0.8;
+}
+
+.symbols-name {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-family: var(--s-font-mono);
+  font-size: var(--s-fs-sm);
+  color: var(--s-fg);
+}
+
+.symbols-kind {
+  flex: none;
+  padding: 1px 5px;
+  border-radius: var(--s-radius-sm);
+  background: var(--s-hover);
+  color: var(--s-muted);
+  font-size: var(--s-fs-xs);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  white-space: nowrap;
+}
+
+.symbols-empty {
+  padding: var(--s-space-3);
+  text-align: center;
+  color: var(--s-muted);
+  font-size: var(--s-fs-sm);
+}
+
 /* ══ Status bar ════════════════════════════════════════════════════════════ */
 
 #status-bar {

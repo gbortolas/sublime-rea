@@ -79,9 +79,9 @@ import {
   type MethodHandlers,
 } from "../extension";
 import type { ExtensionHost } from "../../shared";
-import type { LspDiagnostic, LspCompletionItem, LspHoverResult, LspLocation, LspSignatureHelp } from "../../shared";
+import type { LspDiagnostic, LspCompletionItem, LspHoverResult, LspLocation, LspSignatureHelp, LspDocumentSymbol } from "../../shared";
 import { LspManager } from "../lsp";
-import type { Diagnostic, CompletionItem, Hover, Location, SignatureHelp } from "../lsp";
+import type { Diagnostic, CompletionItem, Hover, Location, SignatureHelp, DocumentSymbol } from "../lsp";
 
 /** Lane `index` (cold-start) — teto por propriedade (DEC-CON-6/9). */
 export const PROPERTY_INDEX_WORKERS = "index.indexWorkers";
@@ -257,6 +257,11 @@ export interface EditorCore {
     col: number,
     triggerCharacter?: string,
   ): Promise<LspSignatureHelp | null>;
+  /**
+   * Lista os símbolos do documento (funções, classes, variáveis) via LSP.
+   * Retorna array vazio se não houver servidor.
+   */
+  requestDocumentSymbols(handle: DocumentHandle): Promise<readonly LspDocumentSymbol[]>;
   /**
    * Diagnósticos LSP atuais do documento (do último `publishDiagnostics`).
    * Vazio se não houver servidor ou nenhum diagnóstico.
@@ -437,6 +442,39 @@ function convertSignatureHelp(help: SignatureHelp): LspSignatureHelp {
         : {}),
     })),
   };
+}
+
+/**
+ * Achata a árvore de `DocumentSymbol` numa lista plana de `LspDocumentSymbol`, na ordem
+ * de profundidade (pre-order). Cada nível é indentado com prefixo `··` no `detail`.
+ */
+function flattenDocumentSymbols(
+  symbols: readonly DocumentSymbol[],
+  depth = 0,
+): LspDocumentSymbol[] {
+  const result: LspDocumentSymbol[] = [];
+  for (const sym of symbols) {
+    const entry: Record<string, unknown> = {
+      name: sym.name,
+      kind: sym.kind,
+      range: {
+        startLine: sym.selectionRange.start.line,
+        startCol: sym.selectionRange.start.character,
+        endLine: sym.selectionRange.end.line,
+        endCol: sym.selectionRange.end.character,
+      },
+    };
+    if (depth > 0) {
+      entry.detail = "·".repeat(depth);
+    } else if (sym.detail !== undefined) {
+      entry.detail = sym.detail;
+    }
+    result.push(entry as unknown as LspDocumentSymbol);
+    if (sym.children !== undefined && sym.children.length > 0) {
+      result.push(...flattenDocumentSymbols(sym.children, depth + 1));
+    }
+  }
+  return result;
 }
 
 interface InsertArgs {
@@ -1378,6 +1416,15 @@ export function createEditorCore(options: EditorCoreOptions = {}): EditorCore {
       const help = await lspManager.requestSignatureHelp(uri, line, col, triggerCharacter);
       if (help === null) return null;
       return convertSignatureHelp(help);
+    },
+
+    async requestDocumentSymbols(handle: DocumentHandle): Promise<readonly LspDocumentSymbol[]> {
+      if (lspManager === null) return [];
+      const path = registry.get(handle)?.uri;
+      if (path === undefined) return [];
+      const uri = toFileUri(path);
+      const symbols = await lspManager.requestDocumentSymbols(uri);
+      return flattenDocumentSymbols(symbols);
     },
 
     documentDiagnostics(handle: DocumentHandle): readonly LspDiagnostic[] {

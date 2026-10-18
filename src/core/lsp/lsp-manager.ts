@@ -12,7 +12,7 @@ import type { LspServerConfig } from "../../shared/lsp-contract";
 import { LspClient } from "./lsp-client";
 import { LspStdioTransport } from "./lsp-transport";
 import { LspError } from "./lsp-protocol";
-import type { CompletionItem, Hover, Diagnostic, InitializeParams, Location, SignatureHelp } from "./lsp-protocol";
+import type { CompletionItem, Hover, Diagnostic, InitializeParams, Location, SignatureHelp, DocumentSymbol } from "./lsp-protocol";
 
 export class LspManager implements Disposable {
   private readonly clients = new Map<string, LspClient>();
@@ -220,6 +220,24 @@ export class LspManager implements Disposable {
 
     const result = await client.sendRequest("textDocument/signatureHelp", params);
     return (result as SignatureHelp | null) ?? null;
+  }
+
+  /**
+   * Solicita a lista de símbolos do documento (document symbols) ao servidor adequado.
+   * Retorna array vazio se não houver servidor.
+   */
+  async requestDocumentSymbols(uri: string): Promise<readonly DocumentSymbol[]> {
+    const ext = this.extensionFromUri(uri);
+    const client = this.getClient(ext);
+    if (!client) return [];
+
+    const result = await client.sendRequest("textDocument/documentSymbol", {
+      textDocument: { uri },
+    });
+
+    if (result === null || result === undefined) return [];
+    if (Array.isArray(result)) return result as DocumentSymbol[];
+    return [];
   }
 
   /** Desconecta todos os servidores LSP. */

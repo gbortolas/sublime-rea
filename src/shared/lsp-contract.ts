@@ -152,3 +152,23 @@ export interface LspSignatureHelp {
   readonly activeSignature: number;
   readonly activeParameter: number;
 }
+
+/** Um símbolo do documento (função, classe, variável, etc.) — simplificado para o renderer. */
+export interface LspDocumentSymbol {
+  readonly name: string;
+  readonly detail?: string;
+  readonly kind: number;
+  readonly range: {
+    readonly startLine: number;
+    readonly startCol: number;
+    readonly endLine: number;
+    readonly endCol: number;
+  };
+}
+
+/**
+ * Símbolo aninhado (com children) — usado no backend; o renderer recebe a lista achatada.
+ */
+export interface LspDocumentSymbolHierarchy extends LspDocumentSymbol {
+  readonly children?: readonly LspDocumentSymbolHierarchy[];
+}

@@ -21,6 +21,7 @@ import type {
   DocumentUndoState,
   LspCompletionItem,
   LspDiagnostic,
+  LspDocumentSymbol,
   LspHoverResult,
   LspLocation,
   LspSignatureHelp,
@@ -93,6 +94,8 @@ export interface ScribePreloadApi {
   definition(handle: DocumentHandle, line: number, col: number): Promise<LspLocation | null>;
   /** Signature help LSP. */
   signatureHelp(handle: DocumentHandle, line: number, col: number, triggerCharacter?: string): Promise<LspSignatureHelp | null>;
+  /** Lista símbolos do documento via LSP. */
+  documentSymbols(handle: DocumentHandle): Promise<LspDocumentSymbol[]>;
 }
 
 // Duplicado de propósito: o preload não importa `src/shared` em runtime (sandbox).
@@ -259,6 +262,8 @@ const api: ScribePreloadApi = {
     call<LspLocation | null>("lsp.definition", [handle, line, col]),
   signatureHelp: (handle: DocumentHandle, line: number, col: number, triggerCharacter?: string): Promise<LspSignatureHelp | null> =>
     call<LspSignatureHelp | null>("lsp.signatureHelp", [handle, line, col, triggerCharacter]),
+  documentSymbols: (handle: DocumentHandle): Promise<LspDocumentSymbol[]> =>
+    call<LspDocumentSymbol[]>("lsp.documentSymbols", [handle]),
 };
 
 contextBridge.exposeInMainWorld("scribe", api);

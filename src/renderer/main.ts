@@ -30,6 +30,7 @@ import type {
   HighlightSpan,
   LspCompletionItem,
   LspDiagnostic,
+  LspDocumentSymbol,
   LspHoverResult,
   LspLocation,
   LspSignatureHelp,
@@ -57,6 +58,8 @@ import { createHoverTooltip } from "./hover-tooltip";
 import type { HoverTooltipBinding } from "./hover-tooltip";
 import { createSignatureHelp } from "./signature-help";
 import type { SignatureHelpBinding } from "./signature-help";
+import { createDocumentSymbolsPopup } from "./document-symbols";
+import type { DocumentSymbolsBinding } from "./document-symbols";
 import { attachMinimap } from "./minimap";
 import type { MinimapBinding } from "./minimap";
 import { findSnippet, parseSnippet } from "./snippets";
@@ -458,6 +461,8 @@ interface ScribeBridge {
   definition?(handle: number, line: number, col: number): Promise<LspLocation | null>;
   /** Signature help LSP (opcional). */
   signatureHelp?(handle: number, line: number, col: number, triggerCharacter?: string): Promise<LspSignatureHelp | null>;
+  /** Símbolos do documento LSP (opcional). */
+  documentSymbols?(handle: number): Promise<LspDocumentSymbol[]>;
 }
 
 function readBridge(): ScribeBridge | undefined {
@@ -1995,19 +2000,21 @@ export async function bootRenderer(): Promise<boolean> {
   let completion: CompletionPopupBinding;
   let hoverTooltip: HoverTooltipBinding;
   let signatureHelpPopup: SignatureHelpBinding;
+  let documentSymbolsPopup: DocumentSymbolsBinding;
   try {
     completion = createCompletionPopup();
     hoverTooltip = createHoverTooltip();
     signatureHelpPopup = createSignatureHelp();
+    documentSymbolsPopup = createDocumentSymbolsPopup();
   } catch (error) {
     console.warn("Scribe: widgets LSP indisponíveis (DOM ausente)", error);
-    // Fallback: stubs que não fazem nada
     completion = createNullCompletionPopup();
     hoverTooltip = createNullHoverTooltip();
     signatureHelpPopup = { isOpen: false, show: () => {}, close: () => {}, dispose: () => {} };
+    documentSymbolsPopup = { isOpen: false, open: () => {}, close: () => {}, dispose: () => {} };
   }
 
-  attachInputListeners(surface, viewport, renderer, controller, findBar, palette, bridge, completion, hoverTooltip, signatureHelpPopup);
+  attachInputListeners(surface, viewport, renderer, controller, findBar, palette, bridge, completion, hoverTooltip, signatureHelpPopup, documentSymbolsPopup);
 
   // Minimap (P2#9): as cores vêm do tema ativo — sem isso a faixa fica preta no tema claro.
   const minimap = attachMinimap({
@@ -2318,6 +2325,7 @@ function attachInputListeners(
   completion: CompletionPopupBinding,
   hoverTooltip: HoverTooltipBinding,
   signatureHelpPopup: SignatureHelpBinding,
+  documentSymbolsPopup: DocumentSymbolsBinding,
 ): void {
   const lineHeight = Math.ceil(TEXT_STYLE.sizePx * 1.4);
   const currentLine = (): number => Math.floor(viewport.scrollOffsetPx() / lineHeight);
@@ -2592,6 +2600,34 @@ function attachInputListeners(
           }
         })();
       }, 0);
+    }
+
+    // Ctrl+Shift+O: símbolos do documento
+    if (primary && event.shiftKey && !event.altKey && (event.key === "o" || event.key === "O")) {
+      event.preventDefault();
+      const session = controller?.current;
+      if (session === undefined || bridge?.documentSymbols === undefined) return;
+      void (async () => {
+        try {
+          const symbols = await bridge.documentSymbols!(session.handle);
+          if (symbols.length === 0) return;
+          documentSymbolsPopup.open(symbols, (sym) => {
+            if (sym.range.startLine < session.source.lineCount()) {
+              const offset = session.source.offsetOf(sym.range.startLine, sym.range.startCol);
+              session.caret = offset;
+              session.selection = { anchor: offset, active: offset };
+              session.selections = [session.selection] as SelectionSet;
+              viewport.scrollTo(Math.max(0, sym.range.startLine - 5));
+              renderer.setSelection(session.selection);
+              renderer.setSelections(session.selections);
+              renderer.start();
+            }
+          });
+        } catch {
+          // Silencia
+        }
+      })();
+      return;
     }
 
     // Atalhos de documento: Ctrl/Cmd+O (abrir), Ctrl/Cmd+Z (undo), Ctrl/Cmd+Shift+Z / Ctrl/Cmd+Y
