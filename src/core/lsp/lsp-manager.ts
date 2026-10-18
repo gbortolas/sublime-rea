@@ -12,7 +12,7 @@ import type { LspServerConfig } from "../../shared/lsp-contract";
 import { LspClient } from "./lsp-client";
 import { LspStdioTransport } from "./lsp-transport";
 import { LspError } from "./lsp-protocol";
-import type { CompletionItem, Hover, Diagnostic, InitializeParams, Location, ReferenceParams, SignatureHelp, DocumentSymbol, RenameParams, PrepareRenameParams, WorkspaceEdit, Range, CodeAction, CodeActionParams, TextEdit, DocumentFormattingParams, FoldingRange, FoldingRangeParams, InlayHint, InlayHintParams } from "./lsp-protocol";
+import type { CompletionItem, Hover, Diagnostic, InitializeParams, Location, ReferenceParams, SignatureHelp, DocumentSymbol, RenameParams, PrepareRenameParams, WorkspaceEdit, Range, CodeAction, CodeActionParams, TextEdit, DocumentFormattingParams, FoldingRange, FoldingRangeParams, InlayHint, InlayHintParams, WorkspaceFolder } from "./lsp-protocol";
 
 export class LspManager implements Disposable {
   private readonly clients = new Map<string, LspClient>();
@@ -22,6 +22,32 @@ export class LspManager implements Disposable {
     readonly uri: string;
     readonly diagnostics: readonly Diagnostic[];
   }>();
+
+  /** Pastas de workspace atuais (null = nenhuma, array vazio = single-root sem pasta). */
+  private _workspaceFolders: readonly WorkspaceFolder[] | null = null;
+
+  /** Define as pastas de workspace. Envia `workspace/didChangeWorkspaceFolders` para servidores já conectados. */
+  setWorkspaceFolders(folders: readonly WorkspaceFolder[] | null): void {
+    const old = this._workspaceFolders;
+    this._workspaceFolders = folders;
+    if (old !== null && folders !== null) {
+      // Envia notificação de mudança para servidores já inicializados
+      const added = folders.filter((f) => !old.some((o) => o.uri === f.uri));
+      const removed = old.filter((o) => !folders.some((f) => f.uri === o.uri));
+      if (added.length > 0 || removed.length > 0) {
+        for (const client of this.clients.values()) {
+          if (client.initialized) {
+            client.sendNotification("workspace/didChangeWorkspaceFolders", {
+              event: {
+                added: added.map((f) => ({ uri: f.uri, name: f.name })),
+                removed: removed.map((f) => ({ uri: f.uri, name: f.name })),
+              },
+            });
+          }
+        }
+      }
+    }
+  }
 
   /**
    * Diagnósticos publicados por qualquer servidor LSP, agregados num único evento.
@@ -72,7 +98,10 @@ export class LspManager implements Disposable {
       processId: process.pid,
       capabilities: {},
       clientInfo: { name: "Scribe" },
-      rootUri: null,
+      rootUri: this._workspaceFolders !== null && this._workspaceFolders.length > 0
+        ? this._workspaceFolders[0]!.uri
+        : null,
+      workspaceFolders: this._workspaceFolders,
       initializationOptions: config.initializationOptions,
     };
 

@@ -717,6 +717,20 @@ export async function startMainProcess(): Promise<void> {
 
   // ── LSP: inicializa servidores ──────────────────────────────────────────────────────────────
   const lspManager = new LspManager(BUILTIN_LSP_SERVERS);
+
+  // Detecta pastas de workspace a partir do CWD (marcador: .git / package.json / pyproject.toml)
+  function detectWorkspaceFolders(): readonly { readonly uri: string; readonly name: string }[] {
+    const dir = process.cwd();
+    const markers = [dir + "/.git", dir + "/package.json", dir + "/pyproject.toml"];
+    const found = markers.some((p) => { try { statSync(p); return true; } catch { return false; } });
+    if (found) {
+      return [{ uri: "file://" + dir, name: dir.split("/").filter(Boolean).pop() ?? "workspace" }];
+    }
+    return [];
+  }
+  const wf = detectWorkspaceFolders();
+  if (wf.length > 0) lspManager.setWorkspaceFolders(wf);
+
   // Conecta diagnósticos ao broadcast IPC: resolve handle pela URI e dispara evento
   lspManager.onDiagnostics((params) => {
     const handle = activeCore.findHandleByUri(params.uri);

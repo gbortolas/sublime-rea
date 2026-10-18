@@ -455,11 +455,17 @@ export interface ServerCapabilities {
 
 // ── Initialize ──────────────────────────────────────────────────────────────────────────────
 
+export interface WorkspaceFolder {
+  readonly uri: string;
+  readonly name: string;
+}
+
 export interface InitializeParams {
   readonly processId: number | null;
   readonly clientInfo?: { readonly name: string; readonly version?: string };
   readonly capabilities: unknown;
   readonly rootUri?: string | null;
+  readonly workspaceFolders?: readonly WorkspaceFolder[] | null;
   /** Opções específicas do servidor (ex.: `tsserver.path` para TypeScript). */
   readonly initializationOptions?: unknown;
 }
