@@ -301,7 +301,13 @@ Problemas identificados ao testar o AppImage pela primeira vez:
 - [x] **P0 — Demo text pouco convidativo**: substituído por **welcome screen** com logo Scribe, atalhos (Ctrl+O, Ctrl+N, Ctrl+S, Ctrl+F, Ctrl+Shift+T) e hint de drag & drop. ✅ (2026-10-17)
 - [x] **P0 — Sem menu bar**: adicionado menu nativo do Electron em `src/main/index.ts` com File (Open/Save/Quit), Edit (Undo/Redo/Cut/Copy/Paste/Select All), Selection (Select All), Find (Find/Next/Previous), View (Toggle Theme). Ações enviadas ao renderer via IPC `scribe:menu:action`. ✅ (2026-10-17)
 - [x] **P0 — Aparência "Sublime" genérica**: janela titulada "Scribe" com `show: false` → `ready-to-show`; ícone SVG+PNG em `build/icon.svg`/`build/icon.png` (logo "S" azul); `electron-builder.yml` configurado para Linux/Windows/macOS. ✅ (2026-10-17)
-- [ ] **P1 — Performance dos menus lentos**: menus nativos do Electron com muitos itens podem estar causando lentidão. Investigar e simplificar.
+- [x] **P1 — Performance dos menus lentos**: menus nativos do Electron com muitos itens podem estar causando lentidão. Investigar e simplificar.
+  ✅ **Fechado (2026-10-17)**: A "lentidão" era UX falsa: 3 ações (Cut/Copy/Paste) eram **no-ops** — clicar e nada acontecer. E o menu **Selection** (só Select All) duplicava o Edit. Fix:
+  - Removeu menu Selection (redundante)
+  - Implementou Cut/Copy/Paste via `navigator.clipboard` (antes eram `break` vazio)
+  - Menu passou de 5 para 4 seções: File, Edit, Find, View
+  - Gates: typecheck/test/build passam (449 testes, 44 arquivos)
+  - Commit: `5392724`
 - [x] **P1 — Sem indicação de como abrir arquivo**: welcome screen exibe atalhos (Ctrl+O, Ctrl+N) e hint "Arraste um arquivo para abrir". Status bar mostra "Nenhum arquivo aberto". ✅ (2026-10-17)
 
 ## 🎨 UX — Repaginação do design (2026-10-17, pedido do usuário)
