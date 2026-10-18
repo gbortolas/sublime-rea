@@ -83,9 +83,9 @@ import {
   type MethodHandlers,
 } from "../extension";
 import type { ExtensionHost } from "../../shared";
-import type { LspDiagnostic, LspCompletionItem, LspHoverResult, LspLocation, LspSignatureHelp, LspDocumentSymbol, LspRenameResult, LspCodeAction } from "../../shared";
+import type { LspDiagnostic, LspCompletionItem, LspHoverResult, LspLocation, LspSignatureHelp, LspDocumentSymbol, LspRenameResult, LspCodeAction, LspTextEdit, LspFoldingRange, LspInlayHint } from "../../shared";
 import { LspManager } from "../lsp";
-import type { Diagnostic, CompletionItem, Hover, Location, SignatureHelp, DocumentSymbol } from "../lsp";
+import type { Diagnostic, CompletionItem, Hover, Location, SignatureHelp, DocumentSymbol, TextEdit, FoldingRange, InlayHint } from "../lsp";
 
 /** Lane `index` (cold-start) — teto por propriedade (DEC-CON-6/9). */
 export const PROPERTY_INDEX_WORKERS = "index.indexWorkers";
@@ -317,6 +317,28 @@ export interface EditorCore {
     col: number,
   ): Promise<readonly LspCodeAction[]>;
   /**
+   * Solicita formatação do documento inteiro via LSP (textDocument/formatting).
+   * Retorna array vazio se não houver servidor para a extensão.
+   */
+  requestFormatting(
+    handle: DocumentHandle,
+    options?: { readonly tabSize?: number; readonly insertSpaces?: boolean },
+  ): Promise<readonly LspTextEdit[]>;
+  /**
+   * Solicita folding ranges do documento via LSP (textDocument/foldingRange).
+   * Retorna array vazio se não houver servidor para a extensão.
+   */
+  requestFoldingRange(handle: DocumentHandle): Promise<readonly LspFoldingRange[]>;
+  /**
+   * Solicita inlay hints do documento via LSP (textDocument/inlayHint).
+   * Retorna array vazio se não houver servidor para a extensão.
+   */
+  requestInlayHints(
+    handle: DocumentHandle,
+    startLine?: number,
+    endLine?: number,
+  ): Promise<readonly LspInlayHint[]>;
+  /**
    * Diagnósticos LSP atuais do documento (do último `publishDiagnostics`).
    * Vazio se não houver servidor ou nenhum diagnóstico.
    */
@@ -531,6 +553,34 @@ function flattenDocumentSymbols(
     }
   }
   return result;
+}
+
+function convertTextEdit(edit: TextEdit): LspTextEdit {
+  return {
+    range: {
+      start: { line: edit.range.start.line, character: edit.range.start.character },
+      end: { line: edit.range.end.line, character: edit.range.end.character },
+    },
+    newText: edit.newText,
+  };
+}
+
+function convertFoldingRange(range: FoldingRange): LspFoldingRange {
+  return {
+    startLine: range.startLine,
+    endLine: range.endLine,
+    ...(range.kind !== undefined ? { kind: range.kind } : {}),
+  };
+}
+
+function convertInlayHint(hint: InlayHint): LspInlayHint {
+  return {
+    position: { line: hint.position.line, character: hint.position.character },
+    label: typeof hint.label === "string" ? hint.label : hint.label.map((p) => p.value).join(""),
+    ...(hint.kind !== undefined ? { kind: hint.kind } : {}),
+    ...(hint.paddingLeft !== undefined ? { paddingLeft: hint.paddingLeft } : {}),
+    ...(hint.paddingRight !== undefined ? { paddingRight: hint.paddingRight } : {}),
+  };
 }
 
 interface InsertArgs {
@@ -1831,6 +1881,43 @@ export function createEditorCore(options: EditorCoreOptions = {}): EditorCore {
         }
         return item as unknown as LspCodeAction;
       });
+    },
+
+    async requestFormatting(
+      handle: DocumentHandle,
+      options?: { readonly tabSize?: number; readonly insertSpaces?: boolean },
+    ): Promise<readonly LspTextEdit[]> {
+      if (lspManager === null) return [];
+      const path = registry.get(handle)?.uri;
+      if (path === undefined) return [];
+      const uri = toFileUri(path);
+      const result = await lspManager.requestFormatting(uri, options);
+      return (result ?? []).map(convertTextEdit);
+    },
+
+    async requestFoldingRange(handle: DocumentHandle): Promise<readonly LspFoldingRange[]> {
+      if (lspManager === null) return [];
+      const path = registry.get(handle)?.uri;
+      if (path === undefined) return [];
+      const uri = toFileUri(path);
+      const result = await lspManager.requestFoldingRange(uri);
+      return (result ?? []).map(convertFoldingRange);
+    },
+
+    async requestInlayHints(
+      handle: DocumentHandle,
+      startLine?: number,
+      endLine?: number,
+    ): Promise<readonly LspInlayHint[]> {
+      if (lspManager === null) return [];
+      const path = registry.get(handle)?.uri;
+      if (path === undefined) return [];
+      const uri = toFileUri(path);
+      const range = startLine !== undefined && endLine !== undefined
+        ? { startLine, startCol: 0, endLine, endCol: 0 }
+        : undefined;
+      const result = await lspManager.requestInlayHints(uri, range);
+      return (result ?? []).map(convertInlayHint);
     },
 
     documentDiagnostics(handle: DocumentHandle): readonly LspDiagnostic[] {

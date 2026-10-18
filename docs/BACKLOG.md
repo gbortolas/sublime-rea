@@ -582,3 +582,37 @@ Problemas identificados ao testar o AppImage pela primeira vez:
       - `showRenameInput()` (dialog) + `applyRenameEdits()` aplica TextEdits
       - Gatilho: F2
       - 4 novos testes (2 protocolo + 2 manager)
+
+## 🧩 P4#24 — LSP Formatting (2026-10-18)
+
+- [x] **P4#24 — Formatting** ✅ **fechado** (2026-10-18). Formata documento via `textDocument/formatting` com Ctrl+Shift+I:
+  - `DocumentFormattingParams`, `FormattingOptions` em `lsp-protocol.ts`
+  - `LspTextEdit` em `lsp-contract.ts`
+  - `LspManager.requestFormatting()` com defaults tabSize=2, insertSpaces=true
+  - `EditorCore.requestFormatting()` com conversão para `LspTextEdit[]`
+  - IPC `lsp.formatting` (main dispatch + preload + renderer bridge)
+  - Keybinding `Ctrl+Shift+I` + `applyFormattingEdits()` (aplica edits do fim p/ começo)
+  - Gates: typecheck/lint/test/build passam (543 testes, 50 arquivos)
+
+## 🧩 P4#25 — Folding (2026-10-18)
+
+- [x] **P4#25 — Folding** ✅ **fechado** (2026-10-18). Dobramento de blocos via `textDocument/foldingRange`:
+  - `FoldingRange`, `FoldingRangeKind`, `FoldingRangeParams` em `lsp-protocol.ts`
+  - `LspFoldingRange` em `lsp-contract.ts`
+  - `FoldRange`, `FoldingState` em `src/core/render/scene.ts` com `isCollapsed`
+  - `buildInstances` — pula linhas colapsadas, desenha `▾`/`▸` no gutter
+  - Estado de folding por handle no renderer
+  - Gutter click → toggle `isCollapsed` + re-render
+  - Fetch automático ao abrir/ativar documento
+  - Gates: typecheck/lint/test/build passam (543 testes, 50 arquivos)
+
+## 🧩 P4#26 — Inlay Hints (2026-10-18)
+
+- [x] **P4#26 — Inlay Hints** ✅ **fechado** (2026-10-18). Dicas inline de tipo/parâmetro via `textDocument/inlayHint`:
+  - `InlayHint`, `InlayHintKind`, `InlayHintParams`, `InlayHintLabelPart` em `lsp-protocol.ts`
+  - `LspInlayHint` em `lsp-contract.ts`
+  - `RenderInlayHint` em `src/core/render/scene.ts` com posições px
+  - `buildInstances` — desenha labels com 60% opacidade da cor default
+  - `fetchInlayHints()` — busca hints pro range visível, converte posições px
+  - Refresh ao scroll (debounce 200ms), abrir/ativar/editar documento
+  - Gates: typecheck/lint/test/build passam (543 testes, 50 arquivos)

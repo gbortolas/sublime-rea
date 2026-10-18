@@ -205,3 +205,27 @@ export interface LspRange {
 export interface LspRenameResult {
   readonly edits: Record<string, readonly { readonly range: LspRange; readonly newText: string }[]>;
 }
+
+// ── Formatting / Folding / Inlay Hints ─────────────────────────────────────────────────────
+
+/** Um TextEdit simplificado para o contrato IPC (formatting). */
+export interface LspTextEdit {
+  readonly range: LspRange;
+  readonly newText: string;
+}
+
+/** Um folding range simplificado para o contrato IPC. */
+export interface LspFoldingRange {
+  readonly startLine: number;
+  readonly endLine: number;
+  readonly kind?: string;
+}
+
+/** Um inlay hint simplificado para o contrato IPC. */
+export interface LspInlayHint {
+  readonly position: { readonly line: number; readonly character: number };
+  readonly label: string;
+  readonly kind?: number;
+  readonly paddingLeft?: boolean;
+  readonly paddingRight?: boolean;
+}

@@ -12,7 +12,7 @@ import type { LspServerConfig } from "../../shared/lsp-contract";
 import { LspClient } from "./lsp-client";
 import { LspStdioTransport } from "./lsp-transport";
 import { LspError } from "./lsp-protocol";
-import type { CompletionItem, Hover, Diagnostic, InitializeParams, Location, ReferenceParams, SignatureHelp, DocumentSymbol, RenameParams, PrepareRenameParams, WorkspaceEdit, Range, CodeAction, CodeActionParams } from "./lsp-protocol";
+import type { CompletionItem, Hover, Diagnostic, InitializeParams, Location, ReferenceParams, SignatureHelp, DocumentSymbol, RenameParams, PrepareRenameParams, WorkspaceEdit, Range, CodeAction, CodeActionParams, TextEdit, DocumentFormattingParams, FoldingRange, FoldingRangeParams, InlayHint, InlayHintParams } from "./lsp-protocol";
 
 export class LspManager implements Disposable {
   private readonly clients = new Map<string, LspClient>();
@@ -325,6 +325,70 @@ export class LspManager implements Disposable {
       context: { diagnostics },
     } satisfies CodeActionParams);
     return (result as CodeAction[]) ?? [];
+  }
+
+  /**
+   * Solicita formatação de documento inteiro ao servidor adequado.
+   * Retorna null se não houver servidor para a extensão.
+   */
+  async requestFormatting(
+    uri: string,
+    options?: { readonly tabSize?: number; readonly insertSpaces?: boolean },
+  ): Promise<readonly TextEdit[] | null> {
+    const ext = this.extensionFromUri(uri);
+    const client = this.getClient(ext);
+    if (!client) return null;
+
+    const result = await client.sendRequest("textDocument/formatting", {
+      textDocument: { uri },
+      options: {
+        tabSize: options?.tabSize ?? 2,
+        insertSpaces: options?.insertSpaces ?? true,
+      },
+    } satisfies DocumentFormattingParams);
+    return (result as TextEdit[]) ?? null;
+  }
+
+  /**
+   * Solicita folding ranges ao servidor adequado para o documento.
+   * Retorna array vazio se não houver servidor para a extensão.
+   */
+  async requestFoldingRange(uri: string): Promise<readonly FoldingRange[]> {
+    const ext = this.extensionFromUri(uri);
+    const client = this.getClient(ext);
+    if (!client) return [];
+
+    const result = await client.sendRequest("textDocument/foldingRange", {
+      textDocument: { uri },
+    } satisfies FoldingRangeParams);
+    return (result as FoldingRange[]) ?? [];
+  }
+
+  /**
+   * Solicita inlay hints ao servidor adequado para um range do documento.
+   * Retorna array vazio se não houver servidor para a extensão.
+   */
+  async requestInlayHints(
+    uri: string,
+    range?: { readonly startLine: number; readonly startCol: number; readonly endLine: number; readonly endCol: number },
+  ): Promise<readonly InlayHint[]> {
+    const ext = this.extensionFromUri(uri);
+    const client = this.getClient(ext);
+    if (!client) return [];
+
+    const params: InlayHintParams = {
+      textDocument: { uri },
+      ...(range !== undefined
+        ? {
+            range: {
+              start: { line: range.startLine, character: range.startCol },
+              end: { line: range.endLine, character: range.endCol },
+            },
+          }
+        : {}),
+    };
+    const result = await client.sendRequest("textDocument/inlayHint", params);
+    return (result as InlayHint[]) ?? [];
   }
 
   /** Desconecta todos os servidores LSP. */

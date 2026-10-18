@@ -109,6 +109,29 @@ export interface IndentGuide {
   readonly bottom: number;  // Y final
 }
 
+/** Um range de folding (bloco dobrável). */
+export interface FoldRange {
+  readonly startLine: number;
+  readonly endLine: number;
+  readonly kind: string | undefined;
+  readonly isCollapsed: boolean;
+}
+
+/** Estado de folding: lista de ranges (foldable) + quais estão colapsados. */
+export type FoldingState = readonly FoldRange[];
+
+/** Um inlay hint pronto para renderizar, com posição em px. */
+export interface RenderInlayHint {
+  readonly line: number;
+  /** Posição X em px (calculada pelo layout). */
+  readonly x: number;
+  /** Posição Y em px (linha * lineHeight - scrollOffset). */
+  readonly y: number;
+  readonly label: string;
+  readonly paddingLeft: boolean;
+  readonly paddingRight: boolean;
+}
+
 /** @internal exported only for tests. */
 
 /** Instâncias de um frame — entradas diretas do `RenderPipeline`. */
@@ -153,6 +176,10 @@ export function buildInstances(
   bracketMatch?: readonly [BracketPos, BracketPos] | undefined,
   /** `wrapWidth > 0` ativa soft wrap (P3#15) — injeta o `measureWidth` do atlas. */
   measureWidth?: (text: string) => number,
+  /** Estado de folding: ranges colapsáveis e seu estado (P3#16). */
+  folding?: FoldingState,
+  /** Inlay hints renderizados com posições em px (P4#19). */
+  inlayHints?: readonly RenderInlayHint[],
 ): SceneInstances {
   const rects: RectInstance[] = [
     { rect: layout.viewport, color: layout.background },
@@ -233,6 +260,19 @@ export function buildInstances(
   // ── Soft wrap: resolve linhas visuais ───────────────────────────────────────────────────────
   const mw = measureWidth;
   const wrap = layout.wrapWidth > 0 && mw !== undefined;
+
+  // Preenche linhas colapsadas
+  const collapsedLines = new Set<number>();
+  if (folding !== undefined) {
+    for (const fr of folding) {
+      if (fr.isCollapsed) {
+        for (let l = fr.startLine + 1; l <= fr.endLine; l++) {
+          collapsedLines.add(l);
+        }
+      }
+    }
+  }
+
   interface VisualLine {
     readonly docLine: number;
     readonly segIdx: number;       // índice do segmento nesta linha (0 = primeiro)
@@ -242,14 +282,18 @@ export function buildInstances(
   const visualLines: VisualLine[] = [];
   if (wrap) {
     for (let di = first; di < end; di++) {
-      const segs = splitLineIntoWraps(source.line(di), layout.wrapWidth, mw);
-      for (let si = 0; si < segs.length; si++) {
-        visualLines.push({ docLine: di, segIdx: si, segmentOffset: segs[si]!.start, segmentText: segs[si]!.text });
+      if (!collapsedLines.has(di)) {
+        const segs = splitLineIntoWraps(source.line(di), layout.wrapWidth, mw);
+        for (let si = 0; si < segs.length; si++) {
+          visualLines.push({ docLine: di, segIdx: si, segmentOffset: segs[si]!.start, segmentText: segs[si]!.text });
+        }
       }
     }
   } else {
     for (let di = first; di < end; di++) {
-      visualLines.push({ docLine: di, segIdx: 0, segmentOffset: 0, segmentText: source.line(di) });
+      if (!collapsedLines.has(di)) {
+        visualLines.push({ docLine: di, segIdx: 0, segmentOffset: 0, segmentText: source.line(di) });
+      }
     }
   }
   const visualEnd = visualLines.length;
@@ -285,6 +329,25 @@ export function buildInstances(
           color: layout.gutterColor,
         });
         nx += g.advance;
+      }
+
+      // Indicador de folding no gutter
+      if (folding !== undefined) {
+        const thisFold = folding.find((fr) => fr.startLine === index);
+        if (thisFold !== undefined) {
+          const indicator = thisFold.isCollapsed ? "▸" : "▾";
+          const indG = atlas.resolveGlyph(indicator, style);
+          const indX = layout.gutterWidth - 8 - numWidth - indG.advance - 4;
+          glyphs.push({
+            atlasX: indG.region.x,
+            atlasY: indG.region.y,
+            atlasW: indG.region.w,
+            atlasH: indG.region.h,
+            x: indX,
+            y,
+            color: layout.gutterColor,
+          });
+        }
       }
     }
 
@@ -352,6 +415,38 @@ export function buildInstances(
             rect: { x: bx, y: y + layout.lineHeight - 3, w: Math.max(charW, 4), h: 2 },
             color: layout.bracketMatchColor,
           });
+        }
+      }
+    }
+
+    // Inlay hints (P4#19): desenha label após a posição calculada, em cor mais clara.
+    if (inlayHints !== undefined) {
+      for (const ih of inlayHints) {
+        if (ih.line === index) {
+          let hx = ih.x;
+          // Se paddingLeft, adiciona um espaço extra antes do hint
+          if (ih.paddingLeft) hx += spaceAdvance;
+
+          // 60% de opacidade da cor padrão
+          const base = layout.defaultColor;
+          const hintAlpha = Math.round((base & 0xff) * 0.6);
+          const hintColor = ((base & 0xffffff00) | hintAlpha) >>> 0;
+
+          for (let ci = 0; ci < ih.label.length; ci++) {
+            const g = atlas.resolveGlyph(ih.label[ci] ?? " ", style);
+            if (ih.label[ci] !== " ") {
+              glyphs.push({
+                atlasX: g.region.x,
+                atlasY: g.region.y,
+                atlasW: g.region.w,
+                atlasH: g.region.h,
+                x: hx,
+                y,
+                color: hintColor,
+              });
+            }
+            hx += g.advance;
+          }
         }
       }
     }

@@ -33,10 +33,13 @@ import type {
   LspCompletionItem,
   LspDiagnostic,
   LspDocumentSymbol,
+  LspFoldingRange,
   LspHoverResult,
+  LspInlayHint,
   LspLocation,
   LspRenameResult,
   LspSignatureHelp,
+  LspTextEdit,
   RenderBackendKind,
   RGBA,
   ReplaceAllResult,
@@ -78,11 +81,13 @@ import {
   type AtlasSurface,
   type BracketPos,
   type CaretPosition,
+  type FoldRange,
   type GlyphBitmap,
   type GlyphRasterizer,
   type GlyphTinter,
   type LineLayout,
   type LineSource,
+  type RenderInlayHint,
   type SceneHighlight,
   type SearchHighlight,
   type TextMeasurer,
@@ -92,6 +97,9 @@ import { createSyntaxTheme } from "../core/syntax";
 
 const DEMO_LINE_COUNT = 200;
 const GLYPH_CHUNK = 2048;
+
+/** Estado de folding: ranges por handle do documento. */
+const foldingStates = new Map<number, readonly FoldRange[]>();
 
 /**
  * Encontra o bracket correspondente ao bracket na posicao offset.
@@ -480,6 +488,12 @@ interface ScribeBridge {
   references?(handle: number, line: number, col: number): Promise<LspLocation[]>;
   /** Code actions LSP (opcional). */
   codeActions?(handle: number, line: number, col: number): Promise<readonly LspCodeAction[]>;
+  /** Formata documento via LSP (Ctrl+Shift+I). */
+  formatting?(handle: number, tabSize?: number, insertSpaces?: boolean): Promise<LspTextEdit[]>;
+  /** Folding ranges via LSP. */
+  foldingRange?(handle: number): Promise<readonly LspFoldingRange[]>;
+  /** Inlay hints via LSP. */
+  inlayHints?(handle: number, startLine?: number, endLine?: number): Promise<readonly LspInlayHint[]>;
 }
 
 function readBridge(): ScribeBridge | undefined {
@@ -831,6 +845,85 @@ function documentPath(): string | undefined {
  * seam mínimo do slice). A abertura é **cancelável** por `signalId` (DEC-IPC-9): trocar de arquivo
  * (ou Esc) aborta a abertura anterior.
  */
+
+/**
+ * Busca folding ranges via LSP e atualiza o estado de folding do renderer.
+ */
+async function fetchFolding(
+  bridge: ScribeBridge | undefined,
+  renderer: ScribeRenderer,
+  handle: number,
+): Promise<void> {
+  if (bridge?.foldingRange === undefined) return;
+  try {
+    const ranges = await bridge.foldingRange(handle);
+    const folds: FoldRange[] = ranges.map((r) => ({
+      startLine: r.startLine,
+      endLine: r.endLine,
+      kind: r.kind,
+      isCollapsed: false,
+    }));
+    foldingStates.set(handle, folds);
+    renderer.setFolding(folds);
+  } catch {
+    /* silencia */
+  }
+}
+
+/**
+ * Busca inlay hints via LSP para o range visível e atualiza o renderer.
+ */
+async function fetchInlayHints(
+  session: TabSession,
+  bridge: ScribeBridge,
+  renderer: ScribeRenderer,
+  viewport: ViewportImpl,
+): Promise<void> {
+  if (bridge.inlayHints === undefined) return;
+  const lineHeight = Math.ceil(TEXT_STYLE.sizePx * 1.4);
+  const firstLine = Math.max(0, Math.floor((viewport.scrollOffsetPx() - 8) / lineHeight));
+  const visLines = Math.ceil(renderer.viewportHeight / lineHeight) + 1;
+  const lastLine = firstLine + visLines;
+  try {
+    const hints = await bridge.inlayHints(session.handle, firstLine, lastLine);
+    const lineCount = renderer.sourceLineCount();
+    const gutterDigits = Math.max(1, Math.floor(Math.log10(Math.max(1, lineCount))) + 1);
+    const gutterWidth = gutterDigits * 9 + 16;
+    const paddingLeft = gutterWidth + 8;
+    const paddingTop = 8;
+    const tabWidth = 4;
+    const rendered: RenderInlayHint[] = [];
+    for (const h of hints) {
+      if (h.position.line >= firstLine && h.position.line <= lastLine) {
+        const lineText = session.source.line(h.position.line);
+        let px = paddingLeft;
+        for (let ci = 0; ci < Math.min(h.position.character, lineText.length); ci++) {
+          const ch = lineText[ci] ?? " ";
+          if (ch === "\t") {
+            const stop = tabWidth - (ci % tabWidth);
+            px += TEXT_STYLE.sizePx * 0.6 * stop;
+          } else {
+            px += TEXT_STYLE.sizePx * 0.6;
+          }
+        }
+        const y = paddingTop + h.position.line * lineHeight - viewport.scrollOffsetPx();
+        rendered.push({
+          line: h.position.line,
+          x: px,
+          y,
+          label: h.label,
+          paddingLeft: h.paddingLeft ?? false,
+          paddingRight: h.paddingRight ?? false,
+        });
+      }
+    }
+    renderer.setInlayHints(rendered);
+    renderer.start();
+  } catch {
+    /* silencia */
+  }
+}
+
 class DocumentController {
   private sessions: TabSession[] = [];
   private activeIndex = -1;
@@ -916,6 +1009,11 @@ class DocumentController {
           this.viewport.setMetrics({ lineCount: source.lineCount() });
           setDirtyStatus(true);
           this.renderer.start();
+          // Re-busca inlay hints após alteração do documento
+          const cur = this.current;
+          if (cur !== undefined) {
+            void fetchInlayHints(cur, this.bridge, this.renderer, this.viewport);
+          }
         }
         this.renderTabBar();
       });
@@ -951,6 +1049,15 @@ class DocumentController {
     await this.refreshUndoStatus();
     this.renderTabBar();
     this.renderer.start();
+    // Busca folding ranges iniciais (LSP)
+    void fetchFolding(this.bridge, this.renderer, handle);
+    // Busca inlay hints iniciais (LSP)
+    {
+      const s = this.current;
+      if (s !== undefined) {
+        void fetchInlayHints(s, this.bridge, this.renderer, this.viewport);
+      }
+    }
     console.info(`Scribe: documento ligado via preload "${path}" (handle ${handle})`);
     return true;
   }
@@ -979,6 +1086,13 @@ class DocumentController {
     setDirtyStatus(session.dirty ?? false);
     this.refreshUndoStatus();
     this.renderTabBar();
+    // Restaura folding do documento ativado
+    const folds = foldingStates.get(session.handle);
+    if (folds !== undefined) {
+      this.renderer.setFolding(folds);
+    }
+    // Busca inlay hints para o range visível
+    void fetchInlayHints(session, this.bridge, this.renderer, this.viewport);
     this.renderer.start();
   }
 
@@ -988,9 +1102,11 @@ class DocumentController {
     void this.flushBatch();
     const session = this.sessions[index]!;
     session.dispose();
+    foldingStates.delete(session.handle);
     this.sessions.splice(index, 1);
     if (this.sessions.length === 0) {
       this.activeIndex = -1;
+      this.renderer.setInlayHints([]);
       setDocStatus("sem documento");
       setBreadcrumbs(undefined);
       setDirtyStatus(false);
@@ -1317,6 +1433,10 @@ class ScribeRenderer {
   private diagnosticsByHandle: Map<number, readonly LspDiagnostic[]> = new Map();
   /** Handle do documento ativo para desenhar diagnósticos. */
   private activeHandle: number | undefined;
+  /** Folding ranges ativos para o documento corrente. */
+  private currentFolding: readonly FoldRange[] | undefined;
+  /** Inlay hints ativos para o documento corrente. */
+  private currentInlayHints: readonly RenderInlayHint[] | undefined;
 
   constructor(
     private readonly canvas: HTMLCanvasElement,
@@ -1338,6 +1458,23 @@ class ScribeRenderer {
   /** Define as ocorrências de busca a destacar no canvas (P3.11). */
   setSearchMatches(highlight: SearchHighlight | undefined): void {
     this.searchHighlightValue = highlight;
+  }
+
+  /** Define os folding ranges para o documento ativo. */
+  setFolding(folding: readonly FoldRange[]): void {
+    this.currentFolding = folding;
+  }
+
+  /** Define os inlay hints para o documento ativo. */
+  setInlayHints(hints: readonly RenderInlayHint[]): void {
+    this.currentInlayHints = hints;
+  }
+
+  /** Largura atual do gutter em px. */
+  getGutterWidth(): number {
+    const lineCount = this.source.lineCount();
+    const gutterDigits = Math.max(1, Math.floor(Math.log10(Math.max(1, lineCount))) + 1);
+    return gutterDigits * 9 + 16;
   }
 
   /** Atualiza a seleção ativa para pintura no próximo frame. */
@@ -1510,6 +1647,8 @@ class ScribeRenderer {
         for (let i = 0; i < text.length; i++) w += this.atlas.resolveGlyph(text[i] ?? " ", this.style).advance;
         return w;
       },
+      this.currentFolding,
+      this.currentInlayHints,
     );
     this.requestHighlight?.(range.first, range.count);
 
@@ -1533,6 +1672,11 @@ class ScribeRenderer {
 
   private lineHeight(): number {
     return Math.ceil(this.style.sizePx * 1.4);
+  }
+
+  /** Número de linhas da fonte ativa. */
+  sourceLineCount(): number {
+    return this.source.lineCount();
   }
 
   /** Conecta o minimap ao renderer. */
@@ -2469,11 +2613,26 @@ function attachInputListeners(
     (event: WheelEvent) => {
       event.preventDefault();
       viewport.scrollTo(currentLine() + Math.sign(event.deltaY) * 3, { animate: true });
+      scheduleInlayHintRefresh();
     },
     { passive: false },
   );
 
   let mouseDragAnchor: number | undefined;
+
+  // Debounced refresh de inlay hints ao scrollar (P4#19).
+  let inlayHintScrollTimer: ReturnType<typeof setTimeout> | undefined;
+  const scheduleInlayHintRefresh = (): void => {
+    if (controller === undefined) return;
+    clearTimeout(inlayHintScrollTimer);
+    inlayHintScrollTimer = setTimeout(() => {
+      inlayHintScrollTimer = undefined;
+      const s = controller.current;
+      if (s !== undefined && bridge !== undefined && bridge.inlayHints !== undefined) {
+        void fetchInlayHints(s, bridge, renderer, viewport);
+      }
+    }, 200);
+  };
 
   // Command palette: Ctrl+Shift+P interceptado antes de chegar ao canvas.
   const openPalette = (): void => {
@@ -2510,6 +2669,7 @@ function attachInputListeners(
     const ratio = Math.max(0, Math.min(1, y / viewportH));
     const targetLine = Math.round(ratio * (totalPx / lineHeight));
     viewport.scrollTo(targetLine);
+    scheduleInlayHintRefresh();
     renderer.start();
   });
 
@@ -2518,6 +2678,26 @@ function attachInputListeners(
     if (session === undefined) return;
     const rect = surface.getBoundingClientRect();
     const x = event.clientX - rect.left;
+    // Detecta clique no gutter para folding
+    const gutterW = renderer.getGutterWidth?.() ?? 48;
+    if (x < gutterW) {
+      const y = event.clientY - rect.top;
+      const line = Math.floor((y + viewport.scrollOffsetPx() - TEXT_STYLE.sizePx * 0.7) / lineHeight);
+      if (line >= 0 && session) {
+        const folds = foldingStates.get(session.handle);
+        if (folds !== undefined) {
+          const fold = folds.find((f) => f.startLine === line);
+          if (fold !== undefined) {
+            const mutableFold = { ...fold, isCollapsed: !fold.isCollapsed };
+            const newFolds = folds.map((f) => (f === fold ? mutableFold : f));
+            foldingStates.set(session.handle, newFolds);
+            renderer.setFolding(newFolds);
+            renderer.start();
+            return; // não processa como clique de texto
+          }
+        }
+      }
+    }
     const y = event.clientY - rect.top;
     const line = Math.floor((y + viewport.scrollOffsetPx() - TEXT_STYLE.sizePx * 0.7) / lineHeight);
     if (line < 0 || line >= session.source.lineCount()) return;
@@ -2764,6 +2944,23 @@ function attachInputListeners(
       return;
     }
 
+    // Ctrl+Shift+I — Formatar documento
+    if ((event.ctrlKey || event.metaKey) && event.shiftKey && (event.key === "i" || event.key === "I")) {
+      event.preventDefault();
+      const session = controller?.current;
+      if (session === undefined || bridge?.formatting === undefined) return;
+      void (async () => {
+        try {
+          const edits = await bridge.formatting!(session.handle);
+          if (edits.length === 0) return;
+          applyFormattingEdits(edits, session, controller);
+        } catch {
+          // Silencia
+        }
+      })();
+      return;
+    }
+
     // `(` dispara signature help (quando o LSP suportar)
     if (event.key === "(" && !event.ctrlKey && !event.metaKey && !event.altKey) {
       const session = controller?.current;
@@ -2885,6 +3082,7 @@ function attachInputListeners(
       renderer.setSelections(session.selections);
       updateCaretStatus(session.source, offset);
       viewport.scrollTo(targetLine);
+      scheduleInlayHintRefresh();
       setDocStatus(`linha ${lineNum}`);
       renderer.start();
       return;
@@ -3019,7 +3217,7 @@ function attachInputListeners(
       if (session === undefined) {
         // Sem sessão: scroll
         const delta = event.key === "ArrowDown" ? 1 : event.key === "ArrowUp" ? -1 : 0;
-        if (delta !== 0) viewport.scrollTo(currentLine() + delta);
+        if (delta !== 0) { viewport.scrollTo(currentLine() + delta); scheduleInlayHintRefresh(); }
         return;
       }
       const source = session.source;
@@ -3067,10 +3265,10 @@ function attachInputListeners(
       return;
     }
 
-    if (event.key === "PageDown") viewport.scrollTo(currentLine() + page, { animate: true });
-    else if (event.key === "PageUp") viewport.scrollTo(currentLine() - page, { animate: true });
-    else if (event.key === "Home") viewport.scrollTo(0, { animate: true });
-    else if (event.key === "End") viewport.scrollTo(line.first + 1_000_000, { animate: true });
+    if (event.key === "PageDown") { viewport.scrollTo(currentLine() + page, { animate: true }); scheduleInlayHintRefresh(); }
+    else if (event.key === "PageUp") { viewport.scrollTo(currentLine() - page, { animate: true }); scheduleInlayHintRefresh(); }
+    else if (event.key === "Home") { viewport.scrollTo(0, { animate: true }); scheduleInlayHintRefresh(); }
+    else if (event.key === "End") { viewport.scrollTo(line.first + 1_000_000, { animate: true }); scheduleInlayHintRefresh(); }
     else if (controller !== undefined && controller.current !== undefined && isPrintable(event)) {
       event.preventDefault();
       const session = controller.current;
@@ -3172,6 +3370,29 @@ function applyRenameEdits(
     } else {
       console.info(`Scribe: rename cross-file para "${uri}" ainda não é suportado no renderer`);
     }
+  }
+}
+
+/**
+ * Aplica uma lista de TextEdits LSP no documento, do fim para o começo
+ * (para evitar deslocamento de offsets). Cada edit substitui o range por newText.
+ */
+function applyFormattingEdits(
+  edits: readonly LspTextEdit[],
+  session: DocumentSession,
+  controller: DocumentController | undefined,
+): void {
+  if (controller === undefined) return;
+  // Ordena do fim para o começo para preservar offsets
+  const sorted = [...edits].sort((a, b) => {
+    if (a.range.start.line !== b.range.start.line) return b.range.start.line - a.range.start.line;
+    return b.range.start.character - a.range.start.character;
+  });
+  for (const edit of sorted) {
+    const startOffset = session.source.offsetOf(edit.range.start.line, edit.range.start.character);
+    const endOffset = session.source.offsetOf(edit.range.end.line, edit.range.end.character);
+    const removeLen = endOffset - startOffset;
+    controller.replaceText(startOffset, removeLen, edit.newText);
   }
 }
 

@@ -1,10 +1,10 @@
 # HANDOFF — sublime-rea
 
 > **Documento de handoff entre sessões** (leia antes de retomar). Atualizado em **2026-10-18**.
-> Status: **🔬 Análise via Rizin concluída ✅**<br>
+> Status: **🧩 LSP Formatting + Folding + Inlay Hints implementados ✅**<br>
 > (13.312 funções catalogadas, 76.042 strings extraídas, shaders GLSL reais confirmados,
 > 17 evidências RZ-E1–E17 consolidadas em `docs/analysis/rizin-analysis.md`).
-> Próximo: tokenização em worker (dívida P2.4b) ou novo feature.
+> Próximo: Push da tag v0.4.0 ou Multi-root workspace.
 
 ---
 
@@ -36,7 +36,9 @@ no minimap — "lupa" estilo VS Code ✅** ·
 **🎯 Minimap Avançado — syntax colorida no canvas + marcadores de busca + diagnóstico ✅** ·
 **🔧 P3.5 — Rizin provisionado ✅ · 🔬 Análise via Rizin concluída ✅** ·
 **⚡ P2.4b — Tokenização em worker com deadline (TaskKind syntax, SerializedGrammar, SYNC_SYNTAX_THRESHOLD=50) ✅** ·
-**🧩 P5 — Code Actions (Ctrl+.) ✅ · P5 — Find References (Ctrl+Shift+F12) ✅ · P5 — Rename Symbol (F2) ✅**
+**🧩 P5 — Code Actions (Ctrl+.) ✅ · P5 — Find References (Ctrl+Shift+F12) ✅ · P5 — Rename Symbol (F2) ✅**<br>
+**🧩 P4#24 — LSP Formatting (Ctrl+Shift+I) ✅ · P4#25 — Folding ✅ · P4#26 — Inlay Hints ✅**<br>
+**🧩 P4#24 — LSP Formatting (Ctrl+Shift+I) ✅ · P4#25 — Folding ✅ · P4#26 — Inlay Hints ✅**
 
 **✅ Passo operacional resolvido (2026-10-16).** O `setup.py` foi rodado e o MCP `rea` foi relançado
 **já com `REA_GHIDRA_STARTUP_TIMEOUT_MS=900000`** (confirmado em `/proc/*/environ`) — **não** é mais
@@ -52,15 +54,17 @@ Sem o deadline maior, `open_binary`/`analyze` **via MCP** volta a estourar os 33
 
 **Próximas tarefas:**
 
-> Esta sessão cortou a **release v0.4.0** (AppImage gerado, tag criada) — todas as melhorias
-> acumuladas desde 0.3.1 (LSP, minimap, tokenização em worker, performance, design).
+> Esta sessão implementou **LSP Formatting, Folding e Inlay Hints** — expandindo o LSP Client
+> com suporte a formatação de código (Ctrl+Shift+I), dobramento de blocos (indicadores no gutter,
+> toggle por clique) e dicas inline de tipo/parâmetro.
 
-1. **🧩 Formatting / Folding / Inlay Hints** — expandir o LSP Client com `textDocument/formatting`,
-   folding ranges e inlay hints.
-2. **🔬 Analisar `plugin_host` com Rizin** — usar o Rizin (já provisionado) para analisar o binário
-   do host de plugins (Track A complementar).
-3. **📦 Push da tag v0.4.0** — fazer `git push origin v0.4.0` para acionar o CI Release no GitHub
+1. **📦 Push da tag v0.4.0** — fazer `git push origin v0.4.0` para acionar o CI Release no GitHub
    (build automático Windows + Linux).
+2. **🧩 Multi-root workspace / abas de projeto** — explorar e implementar suporte a múltiplas
+   pastas raiz (workspace folders) para melhor resolução de servidores LSP.
+3. **🔬 Analisar `plugin_host` com Rizin** — usar o Rizin (já provisionado) para analisar o binário
+   do host de plugins (Track A complementar).
+4. **🧩 Debug Adapter Protocol (DAP)** — integrar debuggers (Python, Node) via DAP no Scribe.
 
 > ✅ **Pegadinha resolvida (2026-10-16, P3.9):** o `setup.py` agora **detecta** um JDK ≥ 21
 > compatível (`JAVA_HOME`, PATH, sdkman, `/usr/lib/jvm`) e escreve um **`export JAVA_HOME=…` ativo**

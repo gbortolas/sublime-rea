@@ -28,6 +28,9 @@ import type {
   LspLocation,
   LspRenameResult,
   LspSignatureHelp,
+  LspTextEdit,
+  LspFoldingRange,
+  LspInlayHint,
   MainThreadBusy,
   ReplaceAllResult,
   SearchDocumentResult,
@@ -111,6 +114,12 @@ export interface ScribePreloadApi {
   references(handle: DocumentHandle, line: number, col: number): Promise<LspLocation[]>;
   /** Code actions LSP (Ctrl+.). */
   codeActions(handle: DocumentHandle, line: number, col: number): Promise<readonly LspCodeAction[]>;
+  /** Formata documento via LSP (Ctrl+Shift+I). */
+  formatting(handle: DocumentHandle, tabSize?: number, insertSpaces?: boolean): Promise<LspTextEdit[]>;
+  /** Folding ranges via LSP. */
+  foldingRange(handle: DocumentHandle): Promise<LspFoldingRange[]>;
+  /** Inlay hints via LSP (range opcional). */
+  inlayHints(handle: DocumentHandle, startLine?: number, endLine?: number): Promise<LspInlayHint[]>;
 }
 
 // Duplicado de propósito: o preload não importa `src/shared` em runtime (sandbox).
@@ -291,6 +300,12 @@ const api: ScribePreloadApi = {
     call<LspLocation[]>("lsp.references", [handle, line, col]),
   codeActions: (handle: DocumentHandle, line: number, col: number): Promise<readonly LspCodeAction[]> =>
     call<readonly LspCodeAction[]>("lsp.codeActions", [handle, line, col]),
+  formatting: (handle: DocumentHandle, tabSize?: number, insertSpaces?: boolean): Promise<LspTextEdit[]> =>
+    call<LspTextEdit[]>("lsp.formatting", [handle, tabSize, insertSpaces]),
+  foldingRange: (handle: DocumentHandle): Promise<LspFoldingRange[]> =>
+    call<LspFoldingRange[]>("lsp.foldingRange", [handle]),
+  inlayHints: (handle: DocumentHandle, startLine?: number, endLine?: number): Promise<LspInlayHint[]> =>
+    call<LspInlayHint[]>("lsp.inlayHints", [handle, startLine, endLine]),
 };
 
 contextBridge.exposeInMainWorld("scribe", api);

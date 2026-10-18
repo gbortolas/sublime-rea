@@ -360,6 +360,74 @@ export interface ReferenceParams {
   readonly context: { readonly includeDeclaration: boolean };
 }
 
+// ── Formatting ──────────────────────────────────────────────────────────────────────────────
+
+export interface FormattingOptions {
+  readonly tabSize: number;
+  readonly insertSpaces: boolean;
+  readonly trimTrailingWhitespace?: boolean;
+  readonly insertFinalNewline?: boolean;
+  readonly trimFinalNewlines?: boolean;
+}
+
+export interface DocumentFormattingParams {
+  readonly textDocument: TextDocumentIdentifier;
+  readonly options: {
+    readonly tabSize: number;
+    readonly insertSpaces: boolean;
+    readonly trimTrailingWhitespace?: boolean;
+    readonly insertFinalNewline?: boolean;
+    readonly trimFinalNewlines?: boolean;
+  };
+}
+
+// ── Folding ─────────────────────────────────────────────────────────────────────────────────
+
+export enum FoldingRangeKind {
+  Comment = "comment",
+  Imports = "imports",
+  Region = "region",
+}
+
+export interface FoldingRangeParams {
+  readonly textDocument: TextDocumentIdentifier;
+}
+
+export interface FoldingRange {
+  readonly startLine: number;
+  readonly endLine: number;
+  readonly kind?: string;
+  readonly collapsedText?: string;
+}
+
+// ── Inlay Hints ─────────────────────────────────────────────────────────────────────────────
+
+export enum InlayHintKind {
+  Type = 1,
+  Parameter = 2,
+}
+
+export interface InlayHintLabelPart {
+  readonly value: string;
+  readonly tooltip?: string | { readonly kind: "markdown"; readonly value: string };
+  readonly location?: Location;
+}
+
+export interface InlayHintParams {
+  readonly textDocument: TextDocumentIdentifier;
+  readonly range?: Range;
+}
+
+export interface InlayHint {
+  readonly position: Position;
+  readonly label: string | readonly InlayHintLabelPart[];
+  readonly kind?: InlayHintKind;
+  readonly textEdits?: readonly TextEdit[];
+  readonly tooltip?: string | { readonly kind: "markdown"; readonly value: string };
+  readonly paddingLeft?: boolean;
+  readonly paddingRight?: boolean;
+}
+
 // ── Server capabilities ─────────────────────────────────────────────────────────────────────
 
 export interface ServerCapabilities {
@@ -380,6 +448,9 @@ export interface ServerCapabilities {
     readonly interFileDependencies?: boolean;
     readonly workspaceDiagnostics?: boolean;
   };
+  readonly documentFormattingProvider?: boolean | { readonly dynamicRegistration?: boolean };
+  readonly foldingRangeProvider?: boolean | { readonly dynamicRegistration?: boolean };
+  readonly inlayHintProvider?: boolean | { readonly dynamicRegistration?: boolean };
 }
 
 // ── Initialize ──────────────────────────────────────────────────────────────────────────────

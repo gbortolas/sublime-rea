@@ -416,6 +416,23 @@ async function dispatchIpc(
       const col = requireNumber(request.args[2], "lsp.codeActions", "col");
       return core.requestCodeActions(handle, line, col);
     }
+    case "lsp.formatting": {
+      const handle = requireHandle(request.args[0], "lsp.formatting");
+      const tabSize = request.args[1] as number | undefined;
+      const insertSpaces = request.args[2] as boolean | undefined;
+      const formattingOpts = (tabSize !== undefined)
+        ? { tabSize, ...(insertSpaces !== undefined ? { insertSpaces } : {}) }
+        : undefined;
+      return core.requestFormatting(handle, formattingOpts);
+    }
+    case "lsp.foldingRange":
+      return core.requestFoldingRange(requireHandle(request.args[0], "lsp.foldingRange"));
+    case "lsp.inlayHints": {
+      const handle = requireHandle(request.args[0], "lsp.inlayHints");
+      const startLine = request.args[1] as number | undefined;
+      const endLine = request.args[2] as number | undefined;
+      return core.requestInlayHints(handle, startLine, endLine);
+    }
     default:
       // Inalcançável: `parseIpcRequest` já validou o método; guarda contra regressão.
       throw new IpcProtocolError("unknown-method", "método desconhecido");

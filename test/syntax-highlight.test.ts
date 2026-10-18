@@ -149,7 +149,7 @@ describe("realce de sintaxe de ponta a ponta (PackageResolver → gramática →
       expect(rev1.revision).toBeGreaterThan(rev0);
 
       // 3) Pede destaque de novo — linhas 0 e 1 agora visíveis (2 linhas).
-      cached: {
+      {
         const partial = await core.highlightDocument(handle, 0, 2);
         expect(partial.revision).toBe(rev1.revision);
 
