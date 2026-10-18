@@ -8,6 +8,7 @@ target/
 build/
 !build/icon.*
 dist/
+release/
 *.o
 *.so
 *.class
