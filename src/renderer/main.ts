@@ -494,6 +494,8 @@ interface ScribeBridge {
   foldingRange?(handle: number): Promise<readonly LspFoldingRange[]>;
   /** Inlay hints via LSP. */
   inlayHints?(handle: number, startLine?: number, endLine?: number): Promise<readonly LspInlayHint[]>;
+  /** Git blame da linha (autor · há X dias). */
+  blame?(handle: number, line: number): Promise<{ commitHash: string; author: string; timeAgo: string } | null>;
 }
 
 function readBridge(): ScribeBridge | undefined {
@@ -1042,6 +1044,7 @@ class DocumentController {
     this.renderer.setSelection(session.selection);
     this.renderer.setSelections(session.selections);
     updateCaretStatus(source, 0);
+    updateBlame(session, this.bridge, 0);
     setDocStatus(label);
     setBreadcrumbs(path);
     setDirtyStatus(false);
@@ -1081,6 +1084,7 @@ class DocumentController {
     this.renderer.setSelection(session.selection);
     this.renderer.setSelections(session.selections);
     updateCaretStatus(session.source, session.caret);
+    updateBlame(session, this.bridge, session.source.positionAt(session.caret).line);
     setDocStatus(session.label);
     setBreadcrumbs(session.path);
     setDirtyStatus(session.dirty ?? false);
@@ -1884,6 +1888,22 @@ function updateCaretStatus(source: DocumentLineSource, offset: number): void {
   if (status) status.textContent = `${position.line + 1}:${position.column + 1}`;
   const breadcrumb = document.getElementById("bc-position");
   if (breadcrumb) breadcrumb.textContent = `Ln ${position.line + 1}, Col ${position.column + 1}`;
+}
+
+function updateBlame(session: DocumentSession | undefined, bridge: ScribeBridge | undefined, line: number): void {
+  const el = document.getElementById("status-blame");
+  if (!el || bridge?.blame === undefined || session === undefined) {
+    if (el) el.textContent = "";
+    return;
+  }
+  void (async () => {
+    try {
+      const result = await bridge.blame!(session.handle, line);
+      el.textContent = result ? `${result.author} · ${result.timeAgo}` : "";
+    } catch {
+      el.textContent = "";
+    }
+  })();
 }
 
 /**
@@ -2726,6 +2746,7 @@ function attachInputListeners(
     renderer.setSelections(session.selections);
     updateCaretStatus(session.source, offset);
     renderer.start();
+    updateBlame(session, bridge, line);
   });
 
   surface.addEventListener("mousemove", (event: MouseEvent) => {
@@ -3262,6 +3283,7 @@ function attachInputListeners(
         viewport.scrollTo(caretLine);
       }
       renderer.start();
+      updateBlame(session, bridge, caretLine);
       return;
     }
 

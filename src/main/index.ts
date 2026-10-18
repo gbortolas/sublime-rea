@@ -11,6 +11,7 @@
  * **dinâmico**, dentro de `startMainProcess()`, que só roda quando o processo é o Electron
  * (`process.versions.electron`) — por isso este módulo é importável em `node`/vitest.
  */
+import { execSync } from "node:child_process";
 import { statSync } from "node:fs";
 import { join, resolve } from "node:path";
 import type { BrowserWindow as ElectronBrowserWindow } from "electron";
@@ -433,6 +434,36 @@ async function dispatchIpc(
       const endLine = request.args[2] as number | undefined;
       return core.requestInlayHints(handle, startLine, endLine);
     }
+    case "git.blame": {
+      const blameHandle = requireHandle(request.args[0], "git.blame");
+      const blameLine = requireNumber(request.args[1], "git.blame", "line");
+      const state = core.registry.get(blameHandle);
+      if (state === undefined) return null;
+      const path = state.uri;
+      try {
+        const result = execSync(
+          `git blame -L ${blameLine + 1},${blameLine + 1} --porcelain "${path}" 2>/dev/null`,
+          { timeout: 5000, encoding: "utf-8", maxBuffer: 1024 },
+        );
+        if (!result) return null;
+        const lines = (result as string).split("\n");
+        const firstLine = lines[0];
+        if (!firstLine) return null;
+        const parts = firstLine.split(" ");
+        const commitHash = parts[0] ?? "";
+        let author = "unknown";
+        let authorTime = "";
+        for (const line of lines) {
+          if (line.startsWith("author ")) author = line.slice(7);
+          if (line.startsWith("author-time ")) authorTime = line.slice(12);
+        }
+        const date = authorTime ? new Date(parseInt(authorTime, 10) * 1000) : null;
+        const timeAgo = date ? timeAgoStr(date) : "";
+        return { commitHash: commitHash.slice(0, 8), author, timeAgo };
+      } catch {
+        return null;
+      }
+    }
     default:
       // Inalcançável: `parseIpcRequest` já validou o método; guarda contra regressão.
       throw new IpcProtocolError("unknown-method", "método desconhecido");
@@ -459,6 +490,22 @@ function errorCode(error: unknown, fallback: string): string {
 function messageOf(error: unknown): string {
   if (error instanceof Error) return error.message;
   return typeof error === "string" ? error : "erro desconhecido";
+}
+
+function timeAgoStr(date: Date): string {
+  const diff = Date.now() - date.getTime();
+  const sec = Math.floor(diff / 1000);
+  if (sec < 60) return "agora";
+  const min = Math.floor(sec / 60);
+  if (min < 60) return `há ${min} min`;
+  const hours = Math.floor(min / 60);
+  if (hours < 24) return `há ${hours} h`;
+  const days = Math.floor(hours / 24);
+  if (days < 30) return `há ${days} dias`;
+  const months = Math.floor(days / 30);
+  if (months < 12) return `há ${months} mes${months > 1 ? "es" : ""}`;
+  const years = Math.floor(months / 12);
+  return `há ${years} ano${years > 1 ? "s" : ""}`;
 }
 
 function requireString(value: unknown, method: string, name: string): string {

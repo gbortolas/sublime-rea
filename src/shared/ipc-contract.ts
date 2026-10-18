@@ -146,6 +146,7 @@ export interface IpcMethods {
   "lsp.formatting"(handle: DocumentHandle, tabSize?: number, insertSpaces?: boolean): readonly LspTextEdit[];
   "lsp.foldingRange"(handle: DocumentHandle): readonly LspFoldingRange[];
   "lsp.inlayHints"(handle: DocumentHandle, startLine?: number, endLine?: number): readonly LspInlayHint[];
+  "git.blame"(handle: DocumentHandle, line: number): { commitHash: string; author: string; timeAgo: string } | null;
 }
 
 export type IpcMethodName = keyof IpcMethods & string;
@@ -194,6 +195,7 @@ export const IPC_METHODS = [
   "lsp.formatting",
   "lsp.foldingRange",
   "lsp.inlayHints",
+  "git.blame",
 ] as const satisfies readonly IpcMethodName[];
 
 export const IPC_EVENT_NAMES = ["document.changed", "lsp.diagnostics"] as const satisfies readonly IpcEventName[];

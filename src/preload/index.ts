@@ -120,6 +120,8 @@ export interface ScribePreloadApi {
   foldingRange(handle: DocumentHandle): Promise<LspFoldingRange[]>;
   /** Inlay hints via LSP (range opcional). */
   inlayHints(handle: DocumentHandle, startLine?: number, endLine?: number): Promise<LspInlayHint[]>;
+  /** Git blame da linha (autor · há X dias). */
+  blame(handle: DocumentHandle, line: number): Promise<{ commitHash: string; author: string; timeAgo: string } | null>;
 }
 
 // Duplicado de propósito: o preload não importa `src/shared` em runtime (sandbox).
@@ -306,6 +308,8 @@ const api: ScribePreloadApi = {
     call<LspFoldingRange[]>("lsp.foldingRange", [handle]),
   inlayHints: (handle: DocumentHandle, startLine?: number, endLine?: number): Promise<LspInlayHint[]> =>
     call<LspInlayHint[]>("lsp.inlayHints", [handle, startLine, endLine]),
+  blame: (handle: DocumentHandle, line: number): Promise<{ commitHash: string; author: string; timeAgo: string } | null> =>
+    call<{ commitHash: string; author: string; timeAgo: string } | null>("git.blame", [handle, line]),
 };
 
 contextBridge.exposeInMainWorld("scribe", api);
