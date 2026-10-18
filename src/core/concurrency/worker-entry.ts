@@ -19,16 +19,142 @@ import { join } from "node:path";
 import { parentPort, workerData } from "node:worker_threads";
 import type {
   DocumentHandle,
+  DocumentHighlight,
+  HighlightLine,
+  HighlightSpan,
   IndexResult,
   LineScanResult,
+  SerializedGrammar,
+  Task,
   TaskResultMap,
   TaskKind,
   WorkerRequest,
   WorkerResponse,
 } from "../../shared";
 import { normalizeSearchQuery, scanText } from "../../shared/search-contract";
+import { tokenizeCompiledLine } from "../syntax/tokenizer";
+import type { CompiledGrammar, CompiledPattern, CompiledCapture } from "../syntax/tokenizer";
 
-/** Registro de texto por documento — a "cópia" que substitui o buffer compartilhado do alvo. */
+// ── SerializedGrammar → CompiledGrammar (deserialização no worker) ───────────────────────────
+
+function deserializePattern(p: import("../../shared").SerializedPattern): CompiledPattern {
+  const matcher = p.match !== undefined && p.matchFlags !== undefined
+    ? new RegExp(p.match, p.matchFlags)
+    : null;
+  const scope = p.scope ?? null;
+  const captures = deserializeCaptures(p.captures);
+  const include = p.include ?? null;
+  const push = p.push !== undefined && p.push.length > 0 ? p.push[0]! : null;
+  const set = p.set ?? null;
+  const pop = p.pop ?? false;
+  return { matcher, scope, captures, include, push, set, pop };
+}
+
+function deserializeCaptures(
+  captures: Record<string, { readonly scope?: string }> | undefined,
+): CompiledCapture[] {
+  if (captures === undefined) return [];
+  const result: CompiledCapture[] = [];
+  for (const [key, { scope }] of Object.entries(captures)) {
+    if (scope === undefined) continue;
+    if (/^\d+$/.test(key)) {
+      result.push({ group: Number.parseInt(key, 10), name: null, scope });
+    } else {
+      result.push({ group: -1, name: key, scope });
+    }
+  }
+  return result;
+}
+
+function deserializeGrammar(serialized: SerializedGrammar): CompiledGrammar {
+  const contexts = new Map<string, readonly CompiledPattern[]>();
+  for (const [name, ctx] of Object.entries(serialized.contexts)) {
+    contexts.set(name, ctx.patterns.map(deserializePattern));
+  }
+  const contextScopes = new Map(Object.entries(serialized.contextScopes));
+  return {
+    logicalName: serialized.logicalName,
+    name: serialized.logicalName,
+    scope: serialized.scope,
+    fileExtensions: [...serialized.extensions],
+    contexts,
+    contextScopes,
+  };
+}
+
+// ── Tokenização de sintaxe no worker ─────────────────────────────────────────────────────────
+
+/**
+ * Tokeniza `count` linhas a partir de `first` no worker. Aplica deadline a cada 50 linhas:
+ * checa o contador compartilhado; se > 0, retorna com `truncated: true` (o chamador retenta
+ * no próximo frame).
+ */
+function tokenizeSyntaxTask(
+  payload: Task<"syntaxTokens">,
+  texts: Map<DocumentHandle, RegisteredText>,
+  counters: Int32Array | undefined,
+): DocumentHighlight {
+  // Valida a geração do texto registrado (defesa em profundidade — DEC-CON-8).
+  lookupText(payload.doc, payload.generation, texts);
+  const grammar = deserializeGrammar(payload.grammar);
+  const { first, count, lineStarts, text } = payload;
+
+  const lines: HighlightLine[] = [];
+  const resultStates: (string | null)[] = [];
+  const deadlineIndex = 0; // POOL_COUNTERS.tasksExecuted — ver `counters.ts`.
+
+  // Estado inicial: se `first > 0`, o estado da linha anterior veio serializado.
+  let previousState: unknown;
+  if (first > 0) {
+    const prevIdx = first - 1;
+    const serialized = prevIdx < payload.states.length ? payload.states[prevIdx] : null;
+    previousState = serialized !== null ? { stack: serialized.split(",") } : undefined;
+  }
+
+  for (let i = 0; i < count; i++) {
+    const lineIndex = first + i;
+    const start = lineStarts[lineIndex];
+    const end = lineIndex + 1 < lineStarts.length ? lineStarts[lineIndex + 1] - 1 : text.length;
+    const lineText = text.slice(start, end);
+
+    const tokenized = tokenizeCompiledLine(grammar, lineText, previousState);
+
+    const spans: HighlightSpan[] = tokenized.spans.map((s) => ({
+      start: s.start,
+      end: s.end,
+      scope: s.scope,
+    }));
+    lines.push({ line: lineIndex, spans });
+
+    const stateObj = tokenized.state as { stack: string[] } | undefined;
+    const serializedState = stateObj !== undefined ? stateObj.stack.join(",") : null;
+    resultStates.push(serializedState);
+
+    // Atualiza previousState para a próxima linha
+    previousState = tokenized.state;
+
+    // Deadline: a cada 50 linhas, checa se o contador foi incrementado (sinal de cancelamento).
+    if ((i + 1) % 50 === 0 && counters !== undefined) {
+      if (Atomics.load(counters, deadlineIndex) > 0) {
+        return {
+          revision: payload.generation,
+          first: payload.first,
+          lines,
+          truncated: true,
+          states: resultStates,
+        };
+      }
+    }
+  }
+
+  return {
+    revision: payload.generation,
+    first: payload.first,
+    lines,
+    truncated: false,
+    states: resultStates,
+  };
+}
 export interface TextRegisterMessage {
   readonly kind: "text.register";
   readonly doc: DocumentHandle;
@@ -179,6 +305,8 @@ async function executeTask(
       const text = lookupText(payload.doc, payload.generation, texts);
       return scanText(text, normalizeSearchQuery(payload.query));
     }
+    case "syntaxTokens":
+      return tokenizeSyntaxTask(payload, texts, request.counters);
   }
 }
 

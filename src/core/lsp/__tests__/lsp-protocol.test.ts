@@ -9,7 +9,7 @@ import {
   isNotificationMessage,
   isJsonRpcError,
 } from "../lsp-protocol";
-import type { JsonRpcMessage } from "../lsp-protocol";
+import type { JsonRpcMessage, ReferenceParams } from "../lsp-protocol";
 
 describe("isRequestMessage", () => {
   it("identifica um RequestMessage válido", () => {
@@ -93,6 +93,28 @@ describe("isJsonRpcError", () => {
   });
 });
 
+describe("ReferenceParams", () => {
+  it("pode ser construído com includeDeclaration", () => {
+    const params: ReferenceParams = {
+      textDocument: { uri: "file:///test.ts" },
+      position: { line: 0, character: 5 },
+      context: { includeDeclaration: true },
+    };
+    expect(params.textDocument.uri).toBe("file:///test.ts");
+    expect(params.position).toEqual({ line: 0, character: 5 });
+    expect(params.context.includeDeclaration).toBe(true);
+  });
+
+  it("pode ser construído com includeDeclaration false", () => {
+    const params: ReferenceParams = {
+      textDocument: { uri: "file:///test.ts" },
+      position: { line: 10, character: 3 },
+      context: { includeDeclaration: false },
+    };
+    expect(params.context.includeDeclaration).toBe(false);
+  });
+});
+
 describe("RenameParams", () => {
   it("satisfaz a estrutura esperada", () => {
     const params: import("../lsp-protocol").RenameParams = {
@@ -116,5 +138,102 @@ describe("PrepareRenameParams", () => {
     expect(params.textDocument.uri).toBe("file:///test.ts");
     expect(params.position.line).toBe(1);
     expect(params.position.character).toBe(10);
+  });
+});
+
+describe("CodeActionParams", () => {
+  it("satisfaz a estrutura esperada", () => {
+    const params: import("../lsp-protocol").CodeActionParams = {
+      textDocument: { uri: "file:///test.ts" },
+      range: { start: { line: 0, character: 0 }, end: { line: 0, character: 0 } },
+      context: {
+        diagnostics: [
+          {
+            range: { start: { line: 0, character: 0 }, end: { line: 0, character: 5 } },
+            message: "test error",
+            severity: 1,
+          },
+        ],
+      },
+    };
+    expect(params.textDocument.uri).toBe("file:///test.ts");
+    expect(params.context.diagnostics).toHaveLength(1);
+    expect(params.context.diagnostics[0]!.message).toBe("test error");
+  });
+
+  it("aceita campos opcionais only e triggerKind", () => {
+    const params: import("../lsp-protocol").CodeActionParams = {
+      textDocument: { uri: "file:///test.ts" },
+      range: { start: { line: 0, character: 0 }, end: { line: 0, character: 0 } },
+      context: {
+        diagnostics: [],
+        only: ["quickfix", "refactor"],
+        triggerKind: 2,
+      },
+    };
+    expect(params.context.only).toEqual(["quickfix", "refactor"]);
+    expect(params.context.triggerKind).toBe(2);
+  });
+});
+
+describe("CodeAction", () => {
+  it("satisfaz a estrutura mínima", () => {
+    const action: import("../lsp-protocol").CodeAction = {
+      title: "Fix typo",
+    };
+    expect(action.title).toBe("Fix typo");
+  });
+
+  it("satisfaz a estrutura completa com edit e command", () => {
+    const action: import("../lsp-protocol").CodeAction = {
+      title: "Extract function",
+      kind: "refactor.extract.function",
+      isPreferred: true,
+      diagnostics: [
+        {
+          range: { start: { line: 0, character: 0 }, end: { line: 0, character: 5 } },
+          message: "test",
+        },
+      ],
+      edit: {
+        changes: {
+          "file:///test.ts": [
+            { range: { start: { line: 0, character: 0 }, end: { line: 0, character: 3 } }, newText: "bar" },
+          ],
+        },
+      },
+      command: {
+        title: "Apply Refactor",
+        command: "editor.action.refactor",
+        arguments: ["arg1"],
+      },
+    };
+    expect(action.title).toBe("Extract function");
+    expect(action.kind).toBe("refactor.extract.function");
+    expect(action.edit!.changes!["file:///test.ts"]).toHaveLength(1);
+    expect(action.command!.command).toBe("editor.action.refactor");
+  });
+});
+
+describe("WorkspaceEdit", () => {
+  it("satisfaz a estrutura com mudanças em múltiplos arquivos", () => {
+    const edit: import("../lsp-protocol").WorkspaceEdit = {
+      changes: {
+        "file:///test.ts": [
+          { range: { start: { line: 0, character: 0 }, end: { line: 0, character: 3 } }, newText: "foo" },
+        ],
+        "file:///other.ts": [
+          { range: { start: { line: 1, character: 0 }, end: { line: 1, character: 5 } }, newText: "bar" },
+        ],
+      },
+    };
+    expect(Object.keys(edit.changes!)).toHaveLength(2);
+    expect(edit.changes!["file:///test.ts"]![0]!.newText).toBe("foo");
+    expect(edit.changes!["file:///other.ts"]![0]!.newText).toBe("bar");
+  });
+
+  it("aceita changes opcional", () => {
+    const edit: import("../lsp-protocol").WorkspaceEdit = {};
+    expect(edit.changes).toBeUndefined();
   });
 });

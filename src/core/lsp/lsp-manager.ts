@@ -12,7 +12,7 @@ import type { LspServerConfig } from "../../shared/lsp-contract";
 import { LspClient } from "./lsp-client";
 import { LspStdioTransport } from "./lsp-transport";
 import { LspError } from "./lsp-protocol";
-import type { CompletionItem, Hover, Diagnostic, InitializeParams, Location, SignatureHelp, DocumentSymbol, RenameParams, PrepareRenameParams, WorkspaceEdit, Range } from "./lsp-protocol";
+import type { CompletionItem, Hover, Diagnostic, InitializeParams, Location, ReferenceParams, SignatureHelp, DocumentSymbol, RenameParams, PrepareRenameParams, WorkspaceEdit, Range, CodeAction, CodeActionParams } from "./lsp-protocol";
 
 export class LspManager implements Disposable {
   private readonly clients = new Map<string, LspClient>();
@@ -281,6 +281,50 @@ export class LspManager implements Disposable {
       position: { line, character: col },
     } satisfies PrepareRenameParams);
     return (result as Range | { range: Range; placeholder: string } | null) ?? null;
+  }
+
+  /**
+   * Solicita referências (find references) ao servidor adequado para o documento.
+   * Retorna array vazio se não houver servidor para a extensão.
+   */
+  async requestReferences(
+    uri: string,
+    line: number,
+    col: number,
+    includeDeclaration = true,
+  ): Promise<readonly Location[]> {
+    const ext = this.extensionFromUri(uri);
+    const client = this.getClient(ext);
+    if (!client) return [];
+
+    const result = await client.sendRequest("textDocument/references", {
+      textDocument: { uri },
+      position: { line, character: col },
+      context: { includeDeclaration },
+    } satisfies ReferenceParams);
+    return (result as Location[]) ?? [];
+  }
+
+  /**
+   * Solicita code actions ao servidor adequado para a posição do documento.
+   * Retorna array vazio se não houver servidor para a extensão.
+   */
+  async requestCodeActions(
+    uri: string,
+    line: number,
+    col: number,
+    diagnostics: readonly Diagnostic[],
+  ): Promise<readonly CodeAction[]> {
+    const ext = this.extensionFromUri(uri);
+    const client = this.getClient(ext);
+    if (!client) return [];
+
+    const result = await client.sendRequest("textDocument/codeAction", {
+      textDocument: { uri },
+      range: { start: { line, character: col }, end: { line, character: col } },
+      context: { diagnostics },
+    } satisfies CodeActionParams);
+    return (result as CodeAction[]) ?? [];
   }
 
   /** Desconecta todos os servidores LSP. */

@@ -20,6 +20,7 @@ import type {
   DocumentHighlight,
   DocumentInsertResult,
   DocumentUndoState,
+  LspCodeAction,
   LspCompletionItem,
   LspDiagnostic,
   LspDocumentSymbol,
@@ -106,6 +107,10 @@ export interface ScribePreloadApi {
   documentSymbols(handle: DocumentHandle): Promise<LspDocumentSymbol[]>;
   /** Renomeia um símbolo via LSP (F2). */
   rename(handle: DocumentHandle, line: number, col: number, newName: string): Promise<LspRenameResult | null>;
+  /** Find references LSP (Ctrl+Shift+F12). */
+  references(handle: DocumentHandle, line: number, col: number): Promise<LspLocation[]>;
+  /** Code actions LSP (Ctrl+.). */
+  codeActions(handle: DocumentHandle, line: number, col: number): Promise<readonly LspCodeAction[]>;
 }
 
 // Duplicado de propósito: o preload não importa `src/shared` em runtime (sandbox).
@@ -282,6 +287,10 @@ const api: ScribePreloadApi = {
     call<LspDocumentSymbol[]>("lsp.documentSymbols", [handle]),
   rename: (handle: DocumentHandle, line: number, col: number, newName: string): Promise<LspRenameResult | null> =>
     call<LspRenameResult | null>("lsp.rename", [handle, line, col, newName]),
+  references: (handle: DocumentHandle, line: number, col: number): Promise<LspLocation[]> =>
+    call<LspLocation[]>("lsp.references", [handle, line, col]),
+  codeActions: (handle: DocumentHandle, line: number, col: number): Promise<readonly LspCodeAction[]> =>
+    call<readonly LspCodeAction[]>("lsp.codeActions", [handle, line, col]),
 };
 
 contextBridge.exposeInMainWorld("scribe", api);

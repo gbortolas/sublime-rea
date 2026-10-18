@@ -16,6 +16,7 @@
 import type { DocumentHandle } from "./handles";
 import type { IndexResult, LineScanResult } from "./buffer-contract";
 import type { SearchQuery, SearchResult } from "./search-contract";
+import type { DocumentHighlight, HighlightSpan } from "./syntax-contract";
 
 /** Lanes de trabalho (DEC-CON-5): `io` = N fixo, `fileRead` ≤ 2 on-demand, `index` = cold-start. */
 export type PoolLane = "io" | "index" | "fileRead";
@@ -33,6 +34,7 @@ export interface TaskResultMap {
   scanLines: LineScanResult;
   index: IndexResult;
   search: SearchResult;
+  syntaxTokens: DocumentHighlight;
 }
 
 export type TaskKind = keyof TaskResultMap;
@@ -43,6 +45,17 @@ interface TaskSpecByKind {
   scanLines: { readonly kind: "scanLines"; readonly doc: DocumentHandle; readonly generation: number; readonly upto: number };
   index: { readonly kind: "index"; readonly doc: DocumentHandle; readonly generation: number };
   search: { readonly kind: "search"; readonly doc: DocumentHandle; readonly generation: number; readonly query: SearchQuery };
+  syntaxTokens: {
+    readonly kind: "syntaxTokens";
+    readonly doc: DocumentHandle;
+    readonly generation: number;
+    readonly first: number;
+    readonly count: number;
+    readonly text: string;
+    readonly lineStarts: readonly number[];
+    readonly states: readonly (string | null)[];  // estado serializado (string[] flattened)
+    readonly grammar: SerializedGrammar;
+  };
 }
 
 /** Task imutável, serializável e cancelável (DEC-CON-4). */
@@ -125,4 +138,36 @@ export class TaskError extends Error {
     this.name = name ?? "TaskError";
     this.code = code;
   }
+}
+
+// ── Forma serializável de uma gramática compilada (DEC-PKG-8) ─────────────────────────────────
+
+/**
+ * Pattern serializável: `RegExp` vira `match` (source) + `matchFlags` (flags).
+ * `captures` mapeia chave numérica (grupo) ou nome → escopo.
+ */
+export interface SerializedPattern {
+  readonly match?: string;      // regex source
+  readonly matchFlags?: string; // regex flags
+  readonly scope?: string;
+  readonly captures?: Record<string, { readonly scope?: string }>;
+  readonly push?: readonly string[];
+  readonly pop?: boolean;
+  readonly set?: string;
+  readonly include?: string;
+}
+
+/** Contexto serializável: patterns ordenados + escopo-base (opcional). */
+export interface SerializedContext {
+  readonly patterns: readonly SerializedPattern[];
+  readonly metaScope?: string;
+}
+
+/** Gramática na forma plana que cruza o IPC para o worker. */
+export interface SerializedGrammar {
+  readonly contexts: Record<string, SerializedContext>;
+  readonly contextScopes: Record<string, string>;
+  readonly scope: string;
+  readonly logicalName: string;
+  readonly extensions: readonly string[];
 }

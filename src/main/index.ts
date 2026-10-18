@@ -404,6 +404,18 @@ async function dispatchIpc(
       const newName = requireString(request.args[3], "lsp.rename", "newName");
       return core.requestRename(handle, line, col, newName);
     }
+    case "lsp.references": {
+      const handle = requireHandle(request.args[0], "lsp.references");
+      const line = requireNumber(request.args[1], "lsp.references", "line");
+      const col = requireNumber(request.args[2], "lsp.references", "col");
+      return core.requestReferences(handle, line, col);
+    }
+    case "lsp.codeActions": {
+      const handle = requireHandle(request.args[0], "lsp.codeActions");
+      const line = requireNumber(request.args[1], "lsp.codeActions", "line");
+      const col = requireNumber(request.args[2], "lsp.codeActions", "col");
+      return core.requestCodeActions(handle, line, col);
+    }
     default:
       // Inalcançável: `parseIpcRequest` já validou o método; guarda contra regressão.
       throw new IpcProtocolError("unknown-method", "método desconhecido");

@@ -91,22 +91,33 @@ export function compileGrammar(
   definition: GrammarDefinition,
   resolver: GrammarDefinitionResolver,
 ): SyntaxGrammar {
+  const compiled = compileGrammarInner(definition, resolver);
+  return {
+    logicalName: compiled.logicalName,
+    name: compiled.name,
+    scope: compiled.scope,
+    fileExtensions: compiled.fileExtensions,
+    tokenizeLine: (line: string, state: unknown) => tokenizeCompiledLine(compiled, line, state),
+  };
+}
+
+/**
+ * Compila e devolve a forma interna (`CompiledGrammar`), usada pelo `GrammarRegistry` para
+ * serialização e cache da estrutura compilada.
+ */
+export function compileGrammarInner(
+  definition: GrammarDefinition,
+  resolver: GrammarDefinitionResolver,
+): CompiledGrammar {
   const collected = new DefinitionCollector(definition, resolver).collect();
   const compiledContexts = compileContexts(definition, collected);
-  const compiled: CompiledGrammar = {
+  return {
     logicalName: definition.logicalName,
     name: definition.name,
     scope: definition.scope,
     fileExtensions: definition.fileExtensions,
     contexts: compiledContexts,
     contextScopes: collected.contextScopes,
-  };
-  return {
-    logicalName: definition.logicalName,
-    name: definition.name,
-    scope: definition.scope,
-    fileExtensions: definition.fileExtensions,
-    tokenizeLine: (line: string, state: unknown) => tokenizeCompiledLine(compiled, line, state),
   };
 }
 

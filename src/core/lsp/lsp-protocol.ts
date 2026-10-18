@@ -321,6 +321,37 @@ export interface PublishDiagnosticsParams {
   readonly diagnostics: readonly Diagnostic[];
 }
 
+// ── Code Action ──────────────────────────────────────────────────────────────────────────────────
+
+export interface Command {
+  readonly title: string;
+  readonly command: string;
+  readonly arguments?: readonly unknown[];
+}
+
+export interface WorkspaceEdit {
+  readonly changes?: Record<string, readonly TextEdit[]>;
+}
+
+export interface CodeAction {
+  readonly title: string;
+  readonly kind?: string;
+  readonly diagnostics?: readonly Diagnostic[];
+  readonly isPreferred?: boolean;
+  readonly edit?: WorkspaceEdit;
+  readonly command?: Command;
+}
+
+export interface CodeActionParams {
+  readonly textDocument: TextDocumentIdentifier;
+  readonly range: Range;
+  readonly context: {
+    readonly diagnostics: readonly Diagnostic[];
+    readonly only?: readonly string[];
+    readonly triggerKind?: number;
+  };
+}
+
 // ── Find References ────────────────────────────────────────────────────────────
 
 export interface ReferenceParams {
@@ -343,6 +374,7 @@ export interface ServerCapabilities {
   readonly documentSymbolProvider?: boolean | { readonly dynamicRegistration?: boolean };
   readonly referencesProvider?: boolean | { readonly dynamicRegistration?: boolean };
   readonly renameProvider?: boolean | { readonly prepareProvider?: boolean };
+  readonly codeActionProvider?: boolean | { readonly codeActionKinds?: readonly string[] };
   readonly diagnosticProvider?: {
     readonly identifier?: string;
     readonly interFileDependencies?: boolean;

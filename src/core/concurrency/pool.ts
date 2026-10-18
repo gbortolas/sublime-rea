@@ -138,6 +138,9 @@ function defaultLane(kind: TaskKind): PoolLane {
     case "search":
       // CPU em memória (varredura linear sobre o texto já registrado): lane `index` (DEC-CON-6).
       return "index";
+    case "syntaxTokens":
+      // Tokenização de sintaxe: CPU-bound, varredura de texto em worker → lane `index` (DEC-CON-6).
+      return "index";
   }
 }
 

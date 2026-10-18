@@ -260,6 +260,95 @@ describe("LspManager", () => {
     });
   });
 
+  describe("requestReferences", () => {
+    it("retorna referências do servidor correto", async () => {
+      await manager.startServer(TS_CONFIG);
+      const mockRefs = [
+        { uri: "file:///test.ts", range: { start: { line: 0, character: 0 }, end: { line: 0, character: 3 } } },
+        { uri: "file:///test.ts", range: { start: { line: 2, character: 4 }, end: { line: 2, character: 7 } } },
+      ];
+      mockLspClient.sendRequest.mockResolvedValue(mockRefs);
+
+      const refs = await manager.requestReferences("file:///test.ts", 0, 0);
+      expect(refs).toHaveLength(2);
+      expect(refs[0]?.uri).toBe("file:///test.ts");
+      expect(mockLspClient.sendRequest).toHaveBeenCalledWith(
+        "textDocument/references",
+        expect.objectContaining({
+          textDocument: { uri: "file:///test.ts" },
+          position: { line: 0, character: 0 },
+          context: { includeDeclaration: true },
+        }),
+      );
+    });
+
+    it("retorna array vazio sem servidor para extensão", async () => {
+      const refs = await manager.requestReferences("file:///f.xyz", 0, 0);
+      expect(refs).toEqual([]);
+    });
+
+    it("passa includeDeclaration false quando solicitado", async () => {
+      await manager.startServer(TS_CONFIG);
+      mockLspClient.sendRequest.mockResolvedValue([]);
+
+      await manager.requestReferences("file:///test.ts", 0, 0, false);
+      expect(mockLspClient.sendRequest).toHaveBeenCalledWith(
+        "textDocument/references",
+        expect.objectContaining({
+          context: { includeDeclaration: false },
+        }),
+      );
+    });
+  });
+
+  describe("requestCodeActions", () => {
+    it("retorna code actions do servidor correto", async () => {
+      await manager.startServer(TS_CONFIG);
+      const mockActions = [
+        { title: "Fix error", kind: "quickfix", diagnostics: [] },
+        { title: "Refactor", kind: "refactor.extract" },
+      ];
+      mockLspClient.sendRequest.mockResolvedValue(mockActions);
+
+      const result = await manager.requestCodeActions("file:///test.ts", 0, 5, []);
+      expect(result).toHaveLength(2);
+      expect(result[0]!.title).toBe("Fix error");
+      expect(result[1]!.title).toBe("Refactor");
+      expect(mockLspClient.sendRequest).toHaveBeenCalledWith(
+        "textDocument/codeAction",
+        expect.objectContaining({
+          textDocument: { uri: "file:///test.ts" },
+          range: { start: { line: 0, character: 5 }, end: { line: 0, character: 5 } },
+        }),
+      );
+    });
+
+    it("passa diagnostics para o servidor", async () => {
+      await manager.startServer(TS_CONFIG);
+      const diags = [
+        {
+          range: { start: { line: 0, character: 0 }, end: { line: 0, character: 5 } },
+          message: "test error",
+          severity: 1,
+        },
+      ];
+      mockLspClient.sendRequest.mockResolvedValue([]);
+
+      await manager.requestCodeActions("file:///test.ts", 0, 5, diags);
+      expect(mockLspClient.sendRequest).toHaveBeenCalledWith(
+        "textDocument/codeAction",
+        expect.objectContaining({
+          context: { diagnostics: diags },
+        }),
+      );
+    });
+
+    it("retorna array vazio sem servidor para extensão", async () => {
+      const result = await manager.requestCodeActions("file:///f.xyz", 0, 0, []);
+      expect(result).toEqual([]);
+    });
+  });
+
   describe("disconnectAll", () => {
     it("desconecta todos os servidores", async () => {
       await manager.startServer(TS_CONFIG);

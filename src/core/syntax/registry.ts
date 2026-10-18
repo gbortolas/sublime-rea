@@ -15,9 +15,10 @@
  */
 import { GrammarIncludeError, GrammarParseError } from "../../shared";
 import type { GrammarDefinition, GrammarRegistry, SyntaxGrammar } from "../../shared";
-import { compileGrammar, normalizeGrammarDocument } from "./grammar";
-import type { GrammarDefinitionResolver } from "./grammar";
+import { compileGrammarInner, normalizeGrammarDocument, type GrammarDefinitionResolver } from "./grammar";
 import { parseYamlSubset } from "./yaml";
+import type { CompiledGrammar } from "./tokenizer";
+import { tokenizeCompiledLine } from "./tokenizer";
 
 /** Normaliza uma extensão para a chave do índice: sem ponto, minúscula. */
 export function normalizeExtension(extension: string): string {
@@ -29,6 +30,8 @@ export class GrammarRegistryImpl implements GrammarRegistry {
   private readonly definitions = new Map<string, GrammarDefinition>();
   private readonly byExtension = new Map<string, string>();
   private readonly compiled = new Map<string, SyntaxGrammar>();
+  /** Cache da forma interna compilada (usado para serialização da gramática ao worker). */
+  private readonly compiledData = new Map<string, CompiledGrammar>();
   private disposed = false;
 
   register(logicalName: string, source: string): GrammarDefinition {
@@ -38,6 +41,7 @@ export class GrammarRegistryImpl implements GrammarRegistry {
     const definition = normalizeGrammarDocument(parseYamlSubset(source, logicalName), logicalName);
     this.definitions.set(logicalName, definition);
     this.compiled.delete(logicalName);
+    this.compiledData.delete(logicalName);
     // Recomputa os claims do zero, na **ordem de registro** (`definitions` preserva a ordem de
     // inserção — re-registrar mantém a posição original). Assim "a primeira vence" continua valendo
     // entre nomes distintos **e** a extensão solta pelo re-registro volta a casar quem a declarava
@@ -60,11 +64,20 @@ export class GrammarRegistryImpl implements GrammarRegistry {
     return this.compile(logicalName);
   }
 
+  /**
+   * Devolve a forma interna compilada de uma gramática (para serialização ao worker).
+   * Pode devolver `undefined` se a gramática nunca foi compilada ou foi descartada.
+   */
+  getCompiledGrammar(logicalName: string): CompiledGrammar | undefined {
+    return this.compiledData.get(logicalName);
+  }
+
   dispose(): void {
     this.disposed = true;
     this.definitions.clear();
     this.byExtension.clear();
     this.compiled.clear();
+    this.compiledData.clear();
   }
 
   /** Resolvedor de `include`/`extends` sobre as definições já registradas. */
@@ -80,7 +93,15 @@ export class GrammarRegistryImpl implements GrammarRegistry {
     if (definition === undefined) {
       throw new GrammarIncludeError(logicalName, logicalName, "gramática não registrada");
     }
-    const grammar = compileGrammar(definition, this.resolver);
+    const compiled = compileGrammarInner(definition, this.resolver);
+    this.compiledData.set(logicalName, compiled);
+    const grammar: SyntaxGrammar = {
+      logicalName: compiled.logicalName,
+      name: compiled.name,
+      scope: compiled.scope,
+      fileExtensions: compiled.fileExtensions,
+      tokenizeLine: (line: string, state: unknown) => tokenizeCompiledLine(compiled, line, state),
+    };
     this.compiled.set(logicalName, grammar);
     return grammar;
   }

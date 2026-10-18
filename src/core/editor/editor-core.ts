@@ -35,6 +35,7 @@ import type {
   HighlightLine,
   HighlightSpan,
   MainThreadBusy,
+  PoolLane,
   PropertyDefinition,
   PropertySystem,
   ResourceEntry,
@@ -46,6 +47,7 @@ import type {
   SearchResult,
   Selection,
   SelectionSet,
+  SerializedGrammar,
   SyntaxGrammar,
   TaskPool,
 } from "../../shared";
@@ -73,6 +75,7 @@ import { PackageResolverImpl } from "../packages";
 import type { ResourceScanner } from "../packages";
 import { PropertySystemImpl } from "../properties";
 import { GrammarRegistryImpl } from "../syntax";
+import type { CompiledPattern } from "../syntax";
 import {
   ExtensionHostImpl,
   createMethodHandlers,
@@ -80,7 +83,7 @@ import {
   type MethodHandlers,
 } from "../extension";
 import type { ExtensionHost } from "../../shared";
-import type { LspDiagnostic, LspCompletionItem, LspHoverResult, LspLocation, LspSignatureHelp, LspDocumentSymbol, LspRenameResult } from "../../shared";
+import type { LspDiagnostic, LspCompletionItem, LspHoverResult, LspLocation, LspSignatureHelp, LspDocumentSymbol, LspRenameResult, LspCodeAction } from "../../shared";
 import { LspManager } from "../lsp";
 import type { Diagnostic, CompletionItem, Hover, Location, SignatureHelp, DocumentSymbol } from "../lsp";
 
@@ -88,6 +91,14 @@ import type { Diagnostic, CompletionItem, Hover, Location, SignatureHelp, Docume
 export const PROPERTY_INDEX_WORKERS = "index.indexWorkers";
 /** Teto global de workers de fundo (DEC-CON-9). */
 export const PROPERTY_MAX_BACKGROUND_THREADS = "concurrency.maxBackgroundThreads";
+
+/**
+ * Teto de linhas tokenizadas **síncronas** no main thread.
+ * Abaixo deste limiar, a tokenização roda inline (evita overhead de IPC no worker).
+ * Acima, a task `syntaxTokens` é delegada ao TaskPool com deadline (P2.4b).
+ * Valor de 50 = ~50 linhas de código comum, baratas de tokenizar.
+ */
+const SYNC_SYNTAX_THRESHOLD = 50;
 
 /** `CommandId` canônico da inserção de texto (contrato de keymap/palette). */
 export const INSERT_COMMAND_ID = "buffer.insert";
@@ -196,7 +207,7 @@ export interface EditorCore {
   /** Gramática resolvida para a extensão do documento; `undefined` se não houver (DEC-PKG-8). */
   grammarForDocument(handle: DocumentHandle): SyntaxGrammar | undefined;
   /** Destaque por linha do range pedido (o renderer consome isto pelo IPC `syntax.highlight`). */
-  highlightDocument(handle: DocumentHandle, first: number, count: number): DocumentHighlight;
+  highlightDocument(handle: DocumentHandle, first: number, count: number): Promise<DocumentHighlight>;
   /**
    * Busca no documento numa lane de **fundo**: registra o texto no `TaskPool` e executa
    * `TaskPool.run({kind:"search"})` dentro da lane `background` do `Scheduler` (a UI não bloqueia).
@@ -288,6 +299,24 @@ export interface EditorCore {
     newName: string,
   ): Promise<LspRenameResult | null>;
   /**
+   * Solicita referências (find references) via LSP para a posição do documento.
+   * Retorna array vazio se não houver servidor para a extensão.
+   */
+  requestReferences(
+    handle: DocumentHandle,
+    line: number,
+    col: number,
+  ): Promise<readonly LspLocation[]>;
+  /**
+   * Solicita code actions (Ctrl+.) via LSP para a posição do documento.
+   * Retorna array vazio se não houver servidor para a extensão.
+   */
+  requestCodeActions(
+    handle: DocumentHandle,
+    line: number,
+    col: number,
+  ): Promise<readonly LspCodeAction[]>;
+  /**
    * Diagnósticos LSP atuais do documento (do último `publishDiagnostics`).
    * Vazio se não houver servidor ou nenhum diagnóstico.
    */
@@ -322,6 +351,8 @@ interface HighlightCacheEntry {
    */
   grammar: SyntaxGrammar | undefined;
   lines: string[];
+  /** Offset de início de cada linha no texto completo (para extrair `text.slice()` no worker). */
+  lineStarts: number[];
   states: unknown[];
   spans: (readonly HighlightSpan[])[];
 }
@@ -741,6 +772,15 @@ export function createEditorCore(options: EditorCoreOptions = {}): EditorCore {
     return grammars.forExtension(extension);
   }
 
+  /** Computa offsets de início de cada linha a partir do array `lines` (texto sem `\n`). */
+  function computeLineStarts(lines: string[]): number[] {
+    const starts: number[] = [0];
+    for (let i = 0; i < lines.length - 1; i++) {
+      starts.push(starts[i]! + lines[i]!.length + 1);
+    }
+    return starts;
+  }
+
   /**
    * Cache de destaque do documento. O estado de entrada de cada linha depende de **todas** as linhas
    * anteriores, então tokenizamos do começo até o fim do range pedido e guardamos por revisão; um
@@ -767,10 +807,12 @@ export function createEditorCore(options: EditorCoreOptions = {}): EditorCore {
 
     // Gramática mudou → não dá pra reaproveitar nada (os spans anteriores são de outro esquema).
     if (existing !== undefined && existing.grammar !== grammar) {
+      const lines = text.split("\n");
       const entry: HighlightCacheEntry = {
         revision,
         grammar,
-        lines: text.split("\n"),
+        lines,
+        lineStarts: computeLineStarts(lines),
         states: [],
         spans: [],
       };
@@ -806,14 +848,17 @@ export function createEditorCore(options: EditorCoreOptions = {}): EditorCore {
 
       existing.revision = revision;
       existing.lines = newLines;
+      existing.lineStarts = computeLineStarts(newLines);
       return existing;
     }
 
     // Primeira vez que este handle é visto.
+    const lines = text.split("\n");
     const entry: HighlightCacheEntry = {
       revision,
       grammar,
-      lines: text.split("\n"),
+      lines,
+      lineStarts: computeLineStarts(lines),
       states: [],
       spans: [],
     };
@@ -821,6 +866,10 @@ export function createEditorCore(options: EditorCoreOptions = {}): EditorCore {
     return entry;
   }
 
+  /**
+   * Tokenização síncrona de linhas no main thread (apenas quando abaixo do limiar
+   * `SYNC_SYNTAX_THRESHOLD` ou quando não há gramática).
+   */
   function extendHighlightCache(
     entry: HighlightCacheEntry,
     end: number,
@@ -841,6 +890,123 @@ export function createEditorCore(options: EditorCoreOptions = {}): EditorCore {
       // (o prefixo cortado não propaga estado parcial — ver `tokenizer.ts`).
       entry.states.push(tokenized.state);
     }
+  }
+
+  // ── Serialização de gramática para o worker ─────────────────────────────────────────────────
+
+  /**
+   * Converte um `CompiledPattern` na forma serializável que cruza o IPC.
+   * `RegExp` vira `{match, matchFlags}`; captures são aplainadas.
+   */
+  function serializePattern(p: CompiledPattern): import("../../shared").SerializedPattern {
+    const captures: Record<string, { readonly scope: string }> = {};
+    if (p.captures.length > 0) {
+      for (const cap of p.captures) {
+        const key = cap.name ?? String(cap.group);
+        captures[key] = { scope: cap.scope };
+      }
+    }
+    return {
+      ...(p.matcher !== null ? { match: p.matcher.source, matchFlags: p.matcher.flags } : {}),
+      ...(p.scope !== null ? { scope: p.scope } : {}),
+      ...(p.captures.length > 0 ? { captures } : {}),
+      ...(p.push !== null ? { push: [p.push] } : {}),
+      ...(p.set !== null ? { set: p.set } : {}),
+      ...(p.pop ? { pop: true } : {}),
+      ...(p.include !== null ? { include: p.include } : {}),
+    };
+  }
+
+  /**
+   * Serializa a gramática compilada para a forma plana que atravessa o IPC
+   * (o worker a reconstrói com `deserializeGrammar`).
+   */
+  function serializeGrammar(grammar: SyntaxGrammar): SerializedGrammar {
+    const compiled = (grammars as GrammarRegistryImpl).getCompiledGrammar(grammar.logicalName);
+    if (compiled === undefined) {
+      throw new Error(`serializeGrammar: gramática "${grammar.logicalName}" não compilada`);
+    }
+    const contexts: Record<string, import("../../shared").SerializedContext> = {};
+    for (const [name, patterns] of compiled.contexts) {
+      contexts[name] = {
+        patterns: patterns.map(serializePattern),
+        metaScope: compiled.contextScopes.get(name),
+      };
+    }
+    const contextScopes: Record<string, string> = {};
+    for (const [name, scope] of compiled.contextScopes) {
+      contextScopes[name] = scope;
+    }
+    return {
+      contexts,
+      contextScopes,
+      scope: compiled.scope,
+      logicalName: compiled.logicalName,
+      extensions: [...compiled.fileExtensions],
+    };
+  }
+
+  /**
+   * Tokenização assistida pelo worker para grandes blocos de linhas.
+   * Se `needLines <= SYNC_SYNTAX_THRESHOLD` ou não há gramática, cai no path síncrono
+   * (evita overhead de IPC). Senão, delega ao `TaskPool` com deadline.
+   * Devolve `true` se o resultado foi truncado (cache parcial — retentar no próximo frame).
+   */
+  async function extendHighlightCacheSmart(
+    entry: HighlightCacheEntry,
+    end: number,
+    grammar: SyntaxGrammar | undefined,
+    handle: DocumentHandle,
+    revision: number,
+    bufferText: string,
+    signal: AbortSignal | undefined,
+  ): Promise<boolean> {
+    const needLines = end - entry.states.length;
+    if (needLines <= 0) return false;
+
+    // Sem gramática ou carga pequena → sync (não paga IPC para poucas linhas).
+    if (grammar === undefined || needLines <= SYNC_SYNTAX_THRESHOLD) {
+      extendHighlightCache(entry, end, grammar);
+      return false;
+    }
+
+    // Serializa estados para o worker.
+    const states: (string | null)[] = entry.states.map((s) => {
+      if (s === undefined || s === null) return null;
+      return (s as { stack: string[] }).stack.join(",");
+    });
+
+    const serialized = serializeGrammar(grammar);
+    const result = await pool.run(
+      {
+        kind: "syntaxTokens",
+        doc: handle,
+        generation: revision,
+        first: entry.states.length,
+        count: needLines,
+        text: bufferText,
+        lineStarts: entry.lineStarts,
+        states,
+        grammar: serialized,
+      },
+      signal !== undefined ? { lane: "index" as PoolLane, signal } : { lane: "index" as PoolLane },
+    ).done;
+
+    // Aplica spans no cache.
+    for (const hlLine of result.lines) {
+      const spans: readonly HighlightSpan[] = hlLine.spans;
+      entry.spans[hlLine.line] = spans;
+    }
+
+    // Desserializa estados.
+    if (result.states) {
+      for (let i = 0; i < result.states.length; i++) {
+        const serial = result.states[i];
+        entry.states.push(serial !== null ? { stack: serial.split(",") } : undefined);
+      }
+    }
+
+    return result.truncated ?? false;
   }
 
   /** Fila de escrita única: garante que o alvo do bus aponte ao documento certo. */
@@ -1252,7 +1418,11 @@ export function createEditorCore(options: EditorCoreOptions = {}): EditorCore {
       return grammarForDocumentOf(handle);
     },
 
-    highlightDocument(handle: DocumentHandle, first: number, count: number): DocumentHighlight {
+    async highlightDocument(
+      handle: DocumentHandle,
+      first: number,
+      count: number,
+    ): Promise<DocumentHighlight> {
       const buffer = resolveBuffer(handle);
       const start = Math.max(0, Math.trunc(first));
       const take = Math.max(0, Math.trunc(count));
@@ -1266,12 +1436,21 @@ export function createEditorCore(options: EditorCoreOptions = {}): EditorCore {
       // O teto do tokenizer é **por linha** (MAX_TOKENIZE_LINE_LENGTH), não por documento —
       // e o diff é barato por ser comparação de strings planas, não tokenização.
       const end = Math.min(entry.lines.length, start + take);
-      extendHighlightCache(entry, end, grammar);
+      // P2.4b: se houver muitas linhas a tokenizar, delega ao worker com deadline.
+      const truncated = await extendHighlightCacheSmart(
+        entry,
+        end,
+        grammar,
+        handle,
+        revision,
+        buffer.text(),
+        undefined, // signal — o highlight síncrono não usa AbortSignal
+      );
       const lines: HighlightLine[] = [];
       for (let line = start; line < end; line++) {
         lines.push({ line, spans: entry.spans[line] ?? [] });
       }
-      return { revision, first: start, lines };
+      return { revision, first: start, lines, truncated: truncated || undefined };
     },
 
     async searchDocument(
@@ -1597,6 +1776,58 @@ export function createEditorCore(options: EditorCoreOptions = {}): EditorCore {
           ]),
         ),
       } satisfies LspRenameResult;
+    },
+
+    async requestReferences(
+      handle: DocumentHandle,
+      line: number,
+      col: number,
+    ): Promise<readonly LspLocation[]> {
+      if (lspManager === null) return [];
+      const path = registry.get(handle)?.uri;
+      if (path === undefined) return [];
+      const uri = toFileUri(path);
+      const result = await lspManager.requestReferences(uri, line, col);
+      return (result ?? []).map(convertLocation);
+    },
+
+    async requestCodeActions(
+      handle: DocumentHandle,
+      line: number,
+      col: number,
+    ): Promise<readonly LspCodeAction[]> {
+      if (lspManager === null) return [];
+      const path = registry.get(handle)?.uri;
+      if (path === undefined) return [];
+      const uri = toFileUri(path);
+      const diags = diagnosticsCache.get(uri) ?? [];
+      const result = await lspManager.requestCodeActions(uri, line, col, diags);
+      return (result ?? []).map((ca): LspCodeAction => {
+        const item: Record<string, unknown> = { title: ca.title };
+        if (ca.kind !== undefined) item.kind = ca.kind;
+        if (ca.diagnostics !== undefined) item.diagnostics = ca.diagnostics;
+        if (ca.edit !== undefined) {
+          item.edit = {
+            changes: Object.fromEntries(
+              Object.entries(ca.edit.changes ?? {}).map(([editUri, edits]) => [
+                editUri,
+                edits.map((e) => ({
+                  range: {
+                    start: { line: e.range.start.line, character: e.range.start.character },
+                    end: { line: e.range.end.line, character: e.range.end.character },
+                  },
+                  newText: e.newText,
+                })),
+              ]),
+            ),
+          };
+        }
+        if (ca.command !== undefined) {
+          item.command = { command: ca.command.command };
+          if (ca.command.arguments !== undefined) item.command.arguments = ca.command.arguments;
+        }
+        return item as unknown as LspCodeAction;
+      });
     },
 
     documentDiagnostics(handle: DocumentHandle): readonly LspDiagnostic[] {

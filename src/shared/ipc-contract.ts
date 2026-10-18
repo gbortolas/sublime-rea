@@ -26,7 +26,7 @@ import type { MainThreadBusy } from "./concurrency-contract";
 import type { CommandListResult } from "./command-contract";
 import type { ReplaceAllResult, SearchDocumentResult, SearchQuery } from "./search-contract";
 import type { Selection, SelectionSet } from "./selection-contract";
-import type { LspCompletionItem, LspDiagnostic, LspHoverResult, LspLocation, LspRenameResult, LspSignatureHelp, LspDocumentSymbol } from "./lsp-contract";
+import type { LspCompletionItem, LspDiagnostic, LspHoverResult, LspLocation, LspRenameResult, LspSignatureHelp, LspDocumentSymbol, LspCodeAction } from "./lsp-contract";
 
 /** Versão do contrato do canal — `"<major>.<minor>"` (DEC-IPC-11: handshake negocia). */
 export type IpcVersion = `${number}.${number}`;
@@ -142,6 +142,7 @@ export interface IpcMethods {
   "lsp.documentSymbols"(handle: DocumentHandle): LspDocumentSymbol[];
   "lsp.rename"(handle: DocumentHandle, line: number, col: number, newName: string): Promise<LspRenameResult | null>;
   "lsp.references"(handle: DocumentHandle, line: number, col: number): readonly LspLocation[];
+  "lsp.codeActions"(handle: DocumentHandle, line: number, col: number): readonly LspCodeAction[];
 }
 
 export type IpcMethodName = keyof IpcMethods & string;
@@ -186,6 +187,7 @@ export const IPC_METHODS = [
   "lsp.documentSymbols",
   "lsp.rename",
   "lsp.references",
+  "lsp.codeActions",
 ] as const satisfies readonly IpcMethodName[];
 
 export const IPC_EVENT_NAMES = ["document.changed", "lsp.diagnostics"] as const satisfies readonly IpcEventName[];

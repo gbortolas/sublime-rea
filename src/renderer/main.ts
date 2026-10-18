@@ -29,6 +29,7 @@ import type {
   DocumentInsertResult,
   EditorTheme,
   HighlightSpan,
+  LspCodeAction,
   LspCompletionItem,
   LspDiagnostic,
   LspDocumentSymbol,
@@ -63,6 +64,8 @@ import { createSignatureHelp } from "./signature-help";
 import type { SignatureHelpBinding } from "./signature-help";
 import { createDocumentSymbolsPopup } from "./document-symbols";
 import type { DocumentSymbolsBinding } from "./document-symbols";
+import { createReferencesPopup } from "./references-popup";
+import type { ReferencesPopupBinding } from "./references-popup";
 import { attachMinimap } from "./minimap";
 import type { MinimapBinding } from "./minimap";
 import { findSnippet, parseSnippet } from "./snippets";
@@ -473,6 +476,10 @@ interface ScribeBridge {
   documentSymbols?(handle: number): Promise<LspDocumentSymbol[]>;
   /** Renomear símbolo via LSP (opcional). */
   rename?(handle: number, line: number, col: number, newName: string): Promise<LspRenameResult | null>;
+  /** Find references LSP (opcional). */
+  references?(handle: number, line: number, col: number): Promise<LspLocation[]>;
+  /** Code actions LSP (opcional). */
+  codeActions?(handle: number, line: number, col: number): Promise<readonly LspCodeAction[]>;
 }
 
 function readBridge(): ScribeBridge | undefined {
@@ -2083,20 +2090,23 @@ export async function bootRenderer(): Promise<boolean> {
   let hoverTooltip: HoverTooltipBinding;
   let signatureHelpPopup: SignatureHelpBinding;
   let documentSymbolsPopup: DocumentSymbolsBinding;
+  let referencesPopup: ReferencesPopupBinding;
   try {
     completion = createCompletionPopup();
     hoverTooltip = createHoverTooltip();
     signatureHelpPopup = createSignatureHelp();
     documentSymbolsPopup = createDocumentSymbolsPopup();
+    referencesPopup = createReferencesPopup();
   } catch (error) {
     console.warn("Scribe: widgets LSP indisponíveis (DOM ausente)", error);
     completion = createNullCompletionPopup();
     hoverTooltip = createNullHoverTooltip();
     signatureHelpPopup = { isOpen: false, show: () => {}, close: () => {}, dispose: () => {} };
     documentSymbolsPopup = { isOpen: false, open: () => {}, close: () => {}, dispose: () => {} };
+    referencesPopup = { isOpen: false, open: () => {}, close: () => {}, dispose: () => {} };
   }
 
-  attachInputListeners(surface, viewport, renderer, controller, findBar, palette, bridge, completion, hoverTooltip, signatureHelpPopup, documentSymbolsPopup);
+  attachInputListeners(surface, viewport, renderer, controller, findBar, palette, bridge, completion, hoverTooltip, signatureHelpPopup, documentSymbolsPopup, referencesPopup);
 
   // Minimap (P2#9): as cores vêm do tema ativo — sem isso a faixa fica preta no tema claro.
   const minimap = attachMinimap({
@@ -2449,6 +2459,7 @@ function attachInputListeners(
   hoverTooltip: HoverTooltipBinding,
   signatureHelpPopup: SignatureHelpBinding,
   documentSymbolsPopup: DocumentSymbolsBinding,
+  referencesPopup: ReferencesPopupBinding,
 ): void {
   const lineHeight = Math.ceil(TEXT_STYLE.sizePx * 1.4);
   const currentLine = (): number => Math.floor(viewport.scrollOffsetPx() / lineHeight);
@@ -2721,6 +2732,38 @@ function attachInputListeners(
       return;
     }
 
+    // Ctrl+Shift+F12 — Find References
+    if ((event.ctrlKey || event.metaKey) && event.shiftKey && (event.key === "F12")) {
+      event.preventDefault();
+      const session = controller?.current;
+      if (session === undefined || bridge?.references === undefined) return;
+      const pos = session.source.positionAt(session.caret);
+      void (async () => {
+        try {
+          const refs = await bridge.references!(session.handle, pos.line, pos.column);
+          if (refs.length === 0) return;
+          referencesPopup.open(refs, (loc) => {
+            // Se for no mesmo arquivo, navega o caret
+            const targetLine = loc.range.startLine;
+            const targetCol = loc.range.startCol;
+            if (targetLine < session.source.lineCount()) {
+              const targetOffset = session.source.offsetOf(targetLine, targetCol);
+              session.caret = targetOffset;
+              session.selection = { anchor: targetOffset, active: targetOffset };
+              session.selections = [session.selection] as SelectionSet;
+              viewport.scrollTo(Math.max(0, targetLine - 5));
+              renderer.setSelection(session.selection);
+              renderer.setSelections(session.selections);
+              renderer.start();
+            }
+          });
+        } catch {
+          // Silencia
+        }
+      })();
+      return;
+    }
+
     // `(` dispara signature help (quando o LSP suportar)
     if (event.key === "(" && !event.ctrlKey && !event.metaKey && !event.altKey) {
       const session = controller?.current;
@@ -2769,6 +2812,24 @@ function attachInputListeners(
           });
         } catch {
           // Silencia
+        }
+      })();
+      return;
+    }
+
+    // Ctrl+. — Code Actions LSP
+    if (primary && !event.shiftKey && !event.altKey && event.key === ".") {
+      event.preventDefault();
+      const session = controller?.current;
+      if (session === undefined || bridge?.codeActions === undefined) return;
+      const pos = session.source.positionAt(session.caret);
+      void (async () => {
+        try {
+          const actions = await bridge.codeActions!(session.handle, pos.line, pos.column);
+          if (actions.length === 0) return;
+          showCodeActionsPopup(actions, session, viewport, controller, bridge);
+        } catch (error) {
+          console.warn("Scribe: falha ao buscar code actions", error);
         }
       })();
       return;
@@ -3110,6 +3171,158 @@ function applyRenameEdits(
       }
     } else {
       console.info(`Scribe: rename cross-file para "${uri}" ainda não é suportado no renderer`);
+    }
+  }
+}
+
+// ── Code Actions Popup ──────────────────────────────────────────────────────────────────────────
+
+/**
+ * Mostra um popup DOM simples listando as code actions disponíveis.
+ * Ao clicar em uma action, se tiver `edit`, aplica as TextEdits no documento.
+ * Se tiver `command`, executa via menu handler.
+ */
+function showCodeActionsPopup(
+  actions: readonly LspCodeAction[],
+  session: DocumentSession,
+  viewport: ViewportImpl,
+  controller: DocumentController | undefined,
+  bridge: ScribeBridge | undefined,
+): void {
+  // Remove popup anterior se existir
+  const existing = document.getElementById("code-actions-popup");
+  if (existing !== null) existing.remove();
+
+  const popup = document.createElement("div");
+  popup.id = "code-actions-popup";
+  popup.style.cssText = `
+    position: fixed;
+    background: var(--bg, #1e1e1e);
+    border: 1px solid var(--border, #3c3c3c);
+    border-radius: 6px;
+    padding: 4px 0;
+    min-width: 200px;
+    max-width: 400px;
+    max-height: 300px;
+    overflow-y: auto;
+    z-index: 1000;
+    box-shadow: 0 4px 12px rgba(0,0,0,0.4);
+    font-family: var(--font, "Cascadia Code", "JetBrains Mono", "Fira Code", monospace);
+    font-size: 13px;
+    color: var(--fg, #d4d4d4);
+  `;
+
+  const rect = (document.getElementById("editor-surface") as HTMLElement | null);
+  if (rect !== null) {
+    const r = rect.getBoundingClientRect();
+    // Posiciona ao lado do cursor aproximado
+    const pos = session.source.positionAt(session.caret);
+    const lineHeight = Math.ceil(TEXT_STYLE.sizePx * 1.4);
+    const charW = TEXT_STYLE.sizePx * 0.6;
+    const x = r.left + 12 + pos.column * charW;
+    const y = r.top + (pos.line * lineHeight - viewport.scrollOffsetPx() + lineHeight) + 8;
+    popup.style.left = `${Math.min(x, window.innerWidth - 220)}px`;
+    popup.style.top = `${Math.min(y, window.innerHeight - 200)}px`;
+  } else {
+    popup.style.left = "100px";
+    popup.style.top = "100px";
+  }
+
+  for (const action of actions) {
+    const item = document.createElement("div");
+    item.style.cssText = `
+      padding: 6px 12px;
+      cursor: pointer;
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    `;
+    item.addEventListener("mouseenter", () => {
+      item.style.background = "var(--hover-bg, #2a2d2e)";
+    });
+    item.addEventListener("mouseleave", () => {
+      item.style.background = "transparent";
+    });
+
+    // Título
+    const titleSpan = document.createElement("span");
+    titleSpan.textContent = action.title;
+    item.appendChild(titleSpan);
+
+    // Kind tag
+    if (action.kind !== undefined && action.kind.length > 0) {
+      const kindSpan = document.createElement("span");
+      kindSpan.style.cssText = `
+        font-size: 11px;
+        opacity: 0.6;
+        margin-left: auto;
+      `;
+      kindSpan.textContent = action.kind;
+      item.appendChild(kindSpan);
+    }
+
+    item.addEventListener("mousedown", (e: MouseEvent) => {
+      e.preventDefault();
+      e.stopPropagation();
+      popup.remove();
+      void applyCodeAction(action, session, controller, bridge);
+    });
+
+    popup.appendChild(item);
+  }
+
+  // Fechar ao clicar fora
+  const closeHandler = (e: MouseEvent): void => {
+    const target = e.target as Node | null;
+    if (target !== null && !popup.contains(target)) {
+      popup.remove();
+      document.removeEventListener("mousedown", closeHandler);
+    }
+  };
+  // Delay para não fechar imediatamente pelo clique que abriu
+  setTimeout(() => {
+    document.addEventListener("mousedown", closeHandler);
+  }, 0);
+
+  document.body.appendChild(popup);
+}
+
+/**
+ * Aplica uma code action: se tiver edit, aplica as TextEdits no documento.
+ * Se tiver command, executa via menu handler.
+ */
+async function applyCodeAction(
+  action: LspCodeAction,
+  session: DocumentSession,
+  controller: DocumentController | undefined,
+  bridge: ScribeBridge | undefined,
+): Promise<void> {
+  if (action.edit?.changes !== undefined) {
+    // Aplica edições em ordem reversa (preserva offsets)
+    for (const [uri, edits] of Object.entries(action.edit.changes)) {
+      if (uri !== undefined) {
+        // Edita no documento ativo
+        const sorted = [...edits].sort(
+          (a, b) =>
+            (b.range.start.line - a.range.start.line) ||
+            (b.range.start.character - a.range.start.character),
+        );
+        for (const edit of sorted) {
+          const startOffset = session.source.offsetOf(edit.range.start.line, edit.range.start.character);
+          const endOffset = session.source.offsetOf(edit.range.end.line, edit.range.end.character);
+          await controller?.replaceText(startOffset, endOffset - startOffset, edit.newText);
+        }
+      }
+    }
+  } else if (action.command !== undefined && bridge !== undefined) {
+    // Comando LSP — executa via bridge
+    try {
+      await bridge.executeCommand(action.command.command);
+    } catch {
+      console.warn("Scribe: falha ao executar comando de code action", action.command.command);
     }
   }
 }

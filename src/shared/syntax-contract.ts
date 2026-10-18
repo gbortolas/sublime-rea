@@ -114,11 +114,19 @@ export interface HighlightLine {
 /**
  * Payload **serializável** do destaque de um range de linhas de um documento — atravessa o IPC
  * `syntax.highlight` (main → renderer). O renderer resolve escopo → cor com o seu `ThemeResolver`.
+ *
+ * Campos opcionais:
+ * - `truncated` — `true` quando o tokenizador parou antes de processar todas as linhas (deadline
+ *   expirado no worker). O chamador deve marcar o cache como parcial e retentar no próximo frame.
+ * - `states` — estados de entrada serializados para cada linha tokenizada (usado internamente
+ *   pelo cache de destaque; **não** é consumido pelo renderer).
  */
 export interface DocumentHighlight {
   readonly revision: number;
   readonly first: number;
   readonly lines: readonly HighlightLine[];
+  readonly truncated?: boolean;
+  readonly states?: readonly (string | null)[];
 }
 
 /** Estilo visual associado a um escopo (cor + traços). */
