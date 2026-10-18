@@ -68,6 +68,12 @@ export interface LineLayout {
   readonly selectionColor: RGBA;
   /** Cor do highlight do bracket correspondente (P3#14). */
   readonly bracketMatchColor: RGBA;
+  /**
+   * Largura máxima de texto em px antes de quebrar (soft wrap).
+   * `0` = sem quebra (comportamento atual).
+   * Normalmente: `viewport.w - gutterWidth - scrollbarWidth - paddingLeft`.
+   */
+  readonly wrapWidth: number;
 }
 
 /** Cursor opcional desenhado como `RectInstance`. */
@@ -145,6 +151,8 @@ export function buildInstances(
   extraSelections?: readonly Selection[],
   /** Par de brackets a destacar (P3#14). */
   bracketMatch?: readonly [BracketPos, BracketPos] | undefined,
+  /** `wrapWidth > 0` ativa soft wrap (P3#15) — injeta o `measureWidth` do atlas. */
+  measureWidth?: (text: string) => number,
 ): SceneInstances {
   const rects: RectInstance[] = [
     { rect: layout.viewport, color: layout.background },
@@ -222,13 +230,41 @@ export function buildInstances(
     });
   }
 
-  for (let index = first; index < end; index++) {
-    const text = source.line(index);
-    const y = layout.paddingTop + index * layout.lineHeight - layout.scrollOffsetPx;
+  // ── Soft wrap: resolve linhas visuais ───────────────────────────────────────────────────────
+  const mw = measureWidth;
+  const wrap = layout.wrapWidth > 0 && mw !== undefined;
+  interface VisualLine {
+    readonly docLine: number;
+    readonly segIdx: number;       // índice do segmento nesta linha (0 = primeiro)
+    readonly segmentOffset: number;  // offset do segmento no texto original (code units)
+    readonly segmentText: string;    // texto do segmento (substring)
+  }
+  const visualLines: VisualLine[] = [];
+  if (wrap) {
+    for (let di = first; di < end; di++) {
+      const segs = splitLineIntoWraps(source.line(di), layout.wrapWidth, mw);
+      for (let si = 0; si < segs.length; si++) {
+        visualLines.push({ docLine: di, segIdx: si, segmentOffset: segs[si]!.start, segmentText: segs[si]!.text });
+      }
+    }
+  } else {
+    for (let di = first; di < end; di++) {
+      visualLines.push({ docLine: di, segIdx: 0, segmentOffset: 0, segmentText: source.line(di) });
+    }
+  }
+  const visualEnd = visualLines.length;
+
+  for (let vi = 0; vi < visualEnd; vi++) {
+    const vl = visualLines[vi]!;
+    const index = vl.docLine;
+    const text = vl.segmentText;
+    // Y = linha de documento base + segmento extra
+    const y = layout.paddingTop + index * layout.lineHeight + vl.segIdx * layout.lineHeight - layout.scrollOffsetPx;
     const spans = highlight?.spansFor(index);
 
     // Gutter: número da linha (1-based), direita-alinhado no gutter.
-    if (layout.gutterWidth > 0) {
+    // Só aparece no primeiro segmento visual de cada linha de documento.
+    if (layout.gutterWidth > 0 && vl.segmentOffset === 0) {
       const lineNumber = String(index + 1);
       // Mede a largura total do número para posicionar à direita.
       let numWidth = 0;
@@ -277,7 +313,7 @@ export function buildInstances(
           atlasH: placed.region.h,
           x,
           y,
-          color: glyphColor(spans, highlight?.theme, offset) ?? layout.defaultColor,
+          color: glyphColor(spans, highlight?.theme, offset + vl.segmentOffset) ?? layout.defaultColor,
         });
       }
       x += placed.advance;
@@ -583,6 +619,47 @@ function leadingSpaces(s: string): number {
   let i = 0;
   while (i < s.length && s[i] === " ") i++;
   return i;
+}
+
+/**
+ * Divide uma linha em segmentos visuais que cabem em `wrapWidth` px.
+ * Usado pelo `buildInstances` quando `measureWidth` é fornecido.
+ * Retorna a linha inteira como um segmento se `wrapWidth <= 0` ou texto vazio.
+ */
+function splitLineIntoWraps(text: string, wrapWidth: number, measure: (text: string) => number): readonly { readonly start: number; readonly text: string }[] {
+  if (wrapWidth <= 0 || text.length === 0) {
+    return [{ start: 0, text }];
+  }
+  const segments: { start: number; text: string }[] = [];
+  let start = 0;
+  while (start < text.length) {
+    let lo = 1;
+    let hi = text.length - start;
+    let fit = 0;
+    while (lo <= hi) {
+      const mid = (lo + hi) >>> 1;
+      if (measure(text.slice(start, start + mid)) <= wrapWidth) {
+        fit = mid;
+        lo = mid + 1;
+      } else {
+        hi = mid - 1;
+      }
+    }
+    if (fit <= 0) fit = 1;
+    let breakAt = fit;
+    // Tenta quebrar em espaço (oportunista)
+    const lastSpace = text.lastIndexOf(" ", start + fit - 1);
+    if (lastSpace > start) {
+      const spaceWidth = fit - (lastSpace - start);
+      if (spaceWidth <= 20) breakAt = lastSpace - start;
+    }
+    if (breakAt <= 0) breakAt = 1;
+    segments.push({ start, text: text.slice(start, start + breakAt) });
+    start += breakAt;
+    // Pula espaços no início do próximo segmento (exceto se for o único)
+    while (start < text.length && text[start] === " ") start += 1;
+  }
+  return segments;
 }
 
 /**

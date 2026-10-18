@@ -10,3 +10,4 @@ export * from "./canvas2d-backend";
 export * from "./webgpu-backend";
 export * from "./viewport";
 export * from "./scene";
+export * from "./soft-wrap";

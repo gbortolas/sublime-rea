@@ -31,6 +31,12 @@ export interface ViewportMetrics {
   readonly viewportWidth: number;
   /** Linhas extras acima/abaixo (default 0 — mantém a virtualização estrita nos testes). */
   readonly overscan?: number;
+  /**
+   * Total de linhas visuais (com soft wrap) para o cálculo de scroll.
+   * Default: `lineCount` (sem wrap). Quando > `lineCount`, o scroll height
+   * passa a considerar wraps.
+   */
+  readonly visualLineCount?: number;
 }
 
 export interface ViewportOptions extends ViewportMetrics {
@@ -42,7 +48,7 @@ export interface ViewportOptions extends ViewportMetrics {
   readonly scrollDurationMs?: number;
 }
 
-type ResolvedMetrics = Required<ViewportMetrics>;
+type ResolvedMetrics = Required<Omit<ViewportMetrics, "visualLineCount">> & { visualLineCount?: number };
 
 interface AnimationState {
   readonly from: number;
@@ -80,6 +86,7 @@ export class ViewportImpl implements Viewport {
       viewportHeight: options.viewportHeight,
       viewportWidth: options.viewportWidth,
       overscan: options.overscan ?? 0,
+      ...(options.visualLineCount !== undefined ? { visualLineCount: options.visualLineCount } : {}),
     };
     this.nowFn = options.now;
     this.requestFrameFn = options.requestFrame;
@@ -166,6 +173,7 @@ export class ViewportImpl implements Viewport {
       viewportHeight: next.viewportHeight ?? this.metrics.viewportHeight,
       viewportWidth: next.viewportWidth ?? this.metrics.viewportWidth,
       overscan: next.overscan ?? this.metrics.overscan,
+      ...(next.visualLineCount !== undefined ? { visualLineCount: next.visualLineCount } : this.metrics.visualLineCount !== undefined ? { visualLineCount: this.metrics.visualLineCount } : {}),
     };
     const clamped = clamp(this.offsetPx, 0, this.maxScrollPx());
     if (clamped !== this.offsetPx) this.applyOffset(clamped);
@@ -180,7 +188,8 @@ export class ViewportImpl implements Viewport {
   }
 
   private maxScrollPx(): number {
-    return Math.max(0, this.metrics.lineCount * this.metrics.lineHeight - this.metrics.viewportHeight);
+    const totalLines = this.metrics.visualLineCount ?? this.metrics.lineCount;
+    return Math.max(0, totalLines * this.metrics.lineHeight - this.metrics.viewportHeight);
   }
 
   private cancelAnimation(): void {

@@ -1242,8 +1242,6 @@ class ScribeRenderer {
   }
 
   resize(cssWidth: number, cssHeight: number): void {
-    // cssWidth/cssHeight vêm do clientWidth/clientHeight do canvas, que já é
-    // calc(100% - 32px) no CSS — não precisa subtrair tab bar aqui.
     this.viewportWidth = Math.max(1, Math.floor(cssWidth));
     this.viewportHeight = Math.max(1, Math.floor(cssHeight));
     this.canvas.width = Math.floor(this.viewportWidth * this.dpr);
@@ -1251,7 +1249,34 @@ class ScribeRenderer {
     if (this.pipeline instanceof Canvas2DBackend) {
       this.pipeline.setTransform(this.dpr, 0, 0, this.dpr, 0, 0);
     }
-    this.viewport.setMetrics({ viewportWidth: this.viewportWidth, viewportHeight: this.viewportHeight });
+
+    // Atualiza viewport com visualLineCount (soft wrap)
+    const lineCount = this.source.lineCount();
+    const gutterDigits = Math.max(1, Math.floor(Math.log10(Math.max(1, lineCount))) + 1);
+    const gutterWidth = gutterDigits * 9 + 16;
+    const wrapWidth = Math.max(0, this.viewportWidth - 10 - (gutterWidth + 8));
+    let vizCount = lineCount;
+    if (wrapWidth > 0) {
+      vizCount = 0;
+      for (let i = 0; i < lineCount; i++) {
+        const text = this.source.line(i);
+        if (text.length === 0) { vizCount += 1; continue; }
+        // Mede caractere a caractere
+        let w = 0;
+        let segs = 1;
+        for (let ci = 0; ci < text.length; ci++) {
+          const advance = this.atlas.resolveGlyph(text[ci] ?? " ", this.style).advance;
+          if (w + advance > wrapWidth) { segs++; w = 0; }
+          if (text[ci] !== " ") w += advance;
+        }
+        vizCount += segs;
+      }
+    }
+    this.viewport.setMetrics({
+      viewportWidth: this.viewportWidth,
+      viewportHeight: this.viewportHeight,
+      visualLineCount: vizCount,
+    });
   }
 
   start(): void {
@@ -1299,6 +1324,8 @@ class ScribeRenderer {
       searchCurrentColor: colors.searchCurrent,
       selectionColor: colors.selection,
       bracketMatchColor: colors.caret,
+      // Soft wrap (P3#15): largura disponível para o texto = viewport - gutter - scrollbar - padding
+      wrapWidth: Math.max(0, viewportRect.w - 10 - (gutterWidth + 8)),
     };
 
     // Computa carets e seleções extras para multi-cursor (P2#5)
@@ -1359,6 +1386,12 @@ class ScribeRenderer {
       extraCarets,
       extraSelections,
       bracketMatch,
+      // measureWidth para soft wrap (P3#15): mede texto usando o atlas
+      (text: string): number => {
+        let w = 0;
+        for (let i = 0; i < text.length; i++) w += this.atlas.resolveGlyph(text[i] ?? " ", this.style).advance;
+        return w;
+      },
     );
     this.requestHighlight?.(range.first, range.count);
 
