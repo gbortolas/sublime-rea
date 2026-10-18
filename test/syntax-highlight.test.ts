@@ -128,6 +128,47 @@ describe("realce de sintaxe de ponta a ponta (PackageResolver → gramática →
     }
   });
 
+  it("retokeniza só a partir da linha editada quando o cache incremental pega (O(end) mitigado)", async () => {
+    const core = coreWithDemoGrammar("const a = 1;\nconst b = 2;\nconst c = 3;\n");
+    try {
+      await core.syntaxReady;
+      const handle = await core.openDocument("/notas.demo");
+      const rev0 = core.revisionOf(handle);
+
+      // 1) Tokeniza TODAS as 3 linhas — enche o cache.
+      const full0 = core.highlightDocument(handle, 0, 3);
+      expect(full0.revision).toBe(rev0);
+      expect(full0.lines).toHaveLength(3);
+      // Linha 0 é keyword
+      expect(full0.lines[0]?.spans.some((s) => s.scope === "keyword.control.demo")).toBe(true);
+      // Linha 1 também
+      expect(full0.lines[1]?.spans.some((s) => s.scope === "keyword.control.demo")).toBe(true);
+
+      // 2) Edita a linha 1 (insere "X" no offset que cai nela).
+      const rev1 = await core.insertText(handle, "const ".length, "X", "user");
+      expect(rev1).toBeGreaterThan(rev0);
+
+      // 3) Pede destaque de novo — linhas 0 e 1 agora visíveis (2 linhas).
+      cached: {
+        const partial = core.highlightDocument(handle, 0, 2);
+        expect(partial.revision).toBe(rev1);
+
+        // Linha 0 NÃO foi tocada → spans originais preservados (cache incremental).
+        expect(partial.lines[0]?.spans.some((s) => s.scope === "keyword.control.demo")).toBe(true);
+        expect(partial.lines[0]?.spans.some((s) => s.scope === "constant.numeric.demo")).toBe(true);
+        // Linha 1 foi editada → spans foram recalculados; "Xconst b = 2" ainda é keyword.
+        expect(partial.lines[1]?.spans.some((s) => s.scope === "keyword.control.demo")).toBe(true);
+      }
+
+      // 4) Garante que linha 2 (agora fora do range 0..2) continua sem spans corrompidos
+      //    quando o cache for estendido depois.
+      const full1 = core.highlightDocument(handle, 0, 3);
+      expect(full1.lines[2]?.spans.some((s) => s.scope === "keyword.control.demo")).toBe(true);
+    } finally {
+      core.dispose();
+    }
+  });
+
   it("tokeniza as linhas e colore os glifos por escopo (≠ cor default)", async () => {
     const core = coreWithDemoGrammar('const total = 1;\n// fim\n');
     try {

@@ -734,9 +734,57 @@ export function createEditorCore(options: EditorCoreOptions = {}): EditorCore {
     grammar: SyntaxGrammar | undefined,
   ): HighlightCacheEntry {
     const existing = highlightCache.get(handle);
+
+    // Mesma revisão e mesma gramática → cache atual serve.
     if (existing !== undefined && existing.revision === revision && existing.grammar === grammar) {
       return existing;
     }
+
+    // Gramática mudou → não dá pra reaproveitar nada (os spans anteriores são de outro esquema).
+    if (existing !== undefined && existing.grammar !== grammar) {
+      const entry: HighlightCacheEntry = {
+        revision,
+        grammar,
+        lines: text.split("\n"),
+        states: [],
+        spans: [],
+      };
+      highlightCache.set(handle, entry);
+      return entry;
+    }
+
+    if (existing !== undefined) {
+      // Revisão mudou (gramática igual) → diff incremental: descobre a primeira linha diferente
+      // e joga fora só o que mudou dali pra frente. O resto do cache é reutilizado.
+      const newLines = text.split("\n");
+      const oldLines = existing.lines;
+      const minLen = Math.min(oldLines.length, newLines.length);
+      let firstDiff = -1;
+
+      for (let i = 0; i < minLen; i++) {
+        if (oldLines[i] !== newLines[i]) {
+          firstDiff = i;
+          break;
+        }
+      }
+      if (firstDiff < 0 && oldLines.length !== newLines.length) {
+        firstDiff = minLen;
+      }
+
+      if (firstDiff >= 0) {
+        // Só descarta o que ficou obsoleto — linhas não tocadas mantêm estado + spans.
+        existing.states.length = firstDiff;
+        existing.spans.length = firstDiff;
+      }
+      // Se firstDiff < 0, o texto é exatamente o mesmo (ex.: undo que reverteu a mudança
+      // exata). Mantém tudo, sem invalidar nada. Milagre? Não, bug do undo linear. 😎
+
+      existing.revision = revision;
+      existing.lines = newLines;
+      return existing;
+    }
+
+    // Primeira vez que este handle é visto.
     const entry: HighlightCacheEntry = {
       revision,
       grammar,
@@ -1118,9 +1166,12 @@ export function createEditorCore(options: EditorCoreOptions = {}): EditorCore {
       const revision = buffer.revision;
       const grammar = grammarForDocumentOf(handle);
       const entry = ensureHighlightCache(handle, revision, buffer.text(), grammar);
-      // Custo O(`end`): tokenizamos de `states.length = 0` até a linha visível **absoluta** `end` (o
-      // estado de cada linha depende de todas as anteriores). O teto do tokenizer é **por linha**,
-      // não por documento — o vetor residual está em `docs/BACKLOG.md` §P2.4b.
+      // Custo O(`end - firstInvalidated`): antes, toda revisão tokenizava da linha 0 (`states`
+      // era sempre vazio). Agora o cache é **incremental**: `ensureHighlightCache` descobre a
+      // primeira linha que mudou (diff) e só descarta estados dali pra frente. Se a edição foi
+      // na linha 30 e o range visível é 0..50, só 20 linhas são re-tokenizadas em vez de 51.
+      // O teto do tokenizer é **por linha** (MAX_TOKENIZE_LINE_LENGTH), não por documento —
+      // e o diff é barato por ser comparação de strings planas, não tokenização.
       const end = Math.min(entry.lines.length, start + take);
       extendHighlightCache(entry, end, grammar);
       const lines: HighlightLine[] = [];
