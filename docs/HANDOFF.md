@@ -1,7 +1,9 @@
 # HANDOFF — sublime-rea
 
 > **Documento de handoff entre sessões** (leia antes de retomar). Atualizado em **2026-10-18**.
-> Status: **P3.5 Rizin provisionado ✅ — Rizin v0.9.1 instalado como provider nativo do REA**
+> Status: **P3.5 Rizin provisionado ✅ + Minimap Avançado ✅**<br>
+> (Rizin v0.9.1 + setup.py 7/12 + env.sh/MCP; minimap: syntax colorida no canvas,
+> marcadores de busca e diagnóstico). Próximo: análise via Rizin.
 > (static binary, SHA-256 pinado, `setup.py` etapa 7/12, `env.sh` + MCP propagados,
 > `execute-rizin-command` verificado). Próximo: escolha do usuário.
 
@@ -32,6 +34,7 @@ P2.4b/c ✅ · P2.5 (salvar) ✅ · P3.10/11/12 (dívidas) ✅ · P1#1 (seleçã
 lote no próximo rAF — transação única, 1 revisão, 1 `document.changed` ✅** ·
 **🔍 Minimap Hover Preview: tooltip com código real e syntax highlighting ao passar o mouse
 no minimap — "lupa" estilo VS Code ✅** ·
+**🎯 Minimap Avançado — syntax colorida no canvas + marcadores de busca + diagnóstico ✅** ·
 **🔧 P3.5 — Rizin provisionado ✅ (v0.9.1 estático, `setup.py` etapa 7/12, `REA_RIZIN_COMMAND` no env.sh + MCP, `execute-rizin-command` verificado)**
 
 **✅ Passo operacional resolvido (2026-10-16).** O `setup.py` foi rodado e o MCP `rea` foi relançado
@@ -49,17 +52,13 @@ Sem o deadline maior, `open_binary`/`analyze` **via MCP** volta a estourar os 33
 **Próximas tarefas (escolha do usuário na próxima sessão):**
 
 > Esta sessão instalou e integrou **Rizin v0.9.1** como provider de análise nativa do REA
-> (alternativa mais leve ao Ghidra). Agora os dois providers estão disponíveis:
-> - **Ghidra** — análise profunda (descompilação, RTTI, auto-análise completa)
-> - **Rizin** — análise rápida (disassembly, strings, layout, comandos arbitrários)
->
-> A próxima fronteira fica a critério do usuário:
+> e implementou **Minimap Avançado** (syntax colorida no canvas, marcadores de busca
+> e diagnóstico). O usuário indicou **análise via Rizin** como próximo passo.
 
-1. **📦 Release** — cortar um release do Scribe com as melhorias acumuladas.
-2. **🎯 Minimap avançado** — syntax colorida no canvas do minimap, highlight de busca,
-   indicadores de diagnóstico.
-3. **🔬 Análise via Rizin** — usar o Rizin para análise complementar do binário
-   (ex.: explorar funções com `afl`, disassemblar trechos com `pD`).
+1. **🔬 Análise via Rizin** — usar o Rizin para análise complementar do binário
+   (explorar funções com `afl`, disassemblar trechos com `pD`,
+   comparar resultados com o Ghidra).
+2. **📦 Release** — cortar um release do Scribe com as melhorias acumuladas.
 
 > ✅ **Pegadinha resolvida (2026-10-16, P3.9):** o `setup.py` agora **detecta** um JDK ≥ 21
 > compatível (`JAVA_HOME`, PATH, sdkman, `/usr/lib/jvm`) e escreve um **`export JAVA_HOME=…` ativo**

@@ -1297,6 +1297,12 @@ class ScribeRenderer {
   private currentSelections: SelectionSet | undefined; // P2#5
   /** Minimap binding ativo (opcional). */
   private minimapBinding: MinimapBinding | undefined;
+  /** Dados do minimap: matches de busca para marcadores. */
+  minimapSearchMatches: readonly SearchMatch[] | undefined = undefined;
+  /** Índice do match atual no array de busca para o minimap. */
+  minimapSearchCurrentIndex: number | undefined = undefined;
+  /** Dados do minimap: diagnósticos para marcadores (linha + severidade). */
+  minimapDiagnostics: readonly { line: number; severity: string }[] | undefined = undefined;
   /** Diagnósticos LSP por handle do documento. */
   private diagnosticsByHandle: Map<number, readonly LspDiagnostic[]> = new Map();
   /** Handle do documento ativo para desenhar diagnósticos. */
@@ -1923,6 +1929,11 @@ export async function bootRenderer(): Promise<boolean> {
     void bridge.onDiagnostics((event) => {
       renderer.setDiagnostics(event.handle, event.diagnostics);
       if (controller?.current?.handle === event.handle) {
+        // Atualiza dados do minimap para marcadores de diagnóstico
+        renderer.minimapDiagnostics = event.diagnostics.map((d) => ({
+          line: d.range.startLine,
+          severity: d.severity,
+        }));
         renderer.start();
       }
     });
@@ -2100,8 +2111,19 @@ export async function bootRenderer(): Promise<boolean> {
         line: rgbToCss(c.foreground),
         viewport: rgbaToCss(c.foreground, 0.08),
         viewportBorder: rgbaToCss(c.foreground, 0.25),
+        searchMatch: rgbaToCss(c.foreground, 0.35),
+        searchCurrent: rgbaToCss(0xffcc00ff, 0.8),
+        diagnosticError: "#e06c75",
+        diagnosticWarning: "#d19a66",
+        diagnosticInfo: "#61afef",
       };
     },
+    // NOVOS CAMPOS (P3.x): realce de sintaxe, busca e diagnóstico no minimap
+    spansFor: (line: number) => highlightStore.spansFor(activeDocumentKey(), line),
+    get syntaxTheme() { return syntaxTheme; },
+    searchMatches: () => renderer.minimapSearchMatches,
+    searchCurrentIndex: () => renderer.minimapSearchCurrentIndex,
+    diagnostics: () => renderer.minimapDiagnostics,
   });
   renderer.attachMinimap(minimap);
 
@@ -2290,8 +2312,13 @@ export function attachFindBar(deps: FindBarDeps): FindBarBinding | undefined {
         matches: model.allMatches,
         currentIndex: model.currentMatchIndex,
       });
+      // Atualiza dados do minimap para marcadores de busca
+      deps.renderer.minimapSearchMatches = model.allMatches;
+      deps.renderer.minimapSearchCurrentIndex = model.currentMatchIndex;
     } else {
       deps.renderer.setSearchMatches(undefined);
+      deps.renderer.minimapSearchMatches = undefined;
+      deps.renderer.minimapSearchCurrentIndex = undefined;
     }
     // Dispara um novo frame pra pintar os destaques.
     deps.renderer.start();

@@ -9,7 +9,7 @@
  * ao passar o mouse sobre o minimap — tipo "lupa" do VS Code.
  */
 
-import type { Viewport, DocumentHighlight, HighlightSpan, ThemeResolver, RGBA } from "../shared";
+import type { Viewport, DocumentHighlight, HighlightSpan, ThemeResolver, RGBA, SearchMatch } from "../shared";
 
 const MINIMAP_WIDTH = 72;
 const BAR_MIN_HEIGHT = 1;
@@ -21,6 +21,18 @@ const HOVER_DEBOUNCE_MS = 100;
 // ---------------------------------------------------------------------------
 // Minimap base (pintura do canvas)
 // ---------------------------------------------------------------------------
+
+/**
+ * Converte o RGBA empacotado (0xRRGGBBAA) para string CSS. Se `alpha` for
+ * fornecido, sobrepõe o alpha do próprio RGBA.
+ */
+function rgbaToCss(rgba: RGBA, alpha?: number): string {
+  const r = (rgba >>> 24) & 0xff;
+  const g = (rgba >>> 16) & 0xff;
+  const b = (rgba >>> 8) & 0xff;
+  const a = alpha ?? ((rgba & 0xff) / 255);
+  return a === 1 ? `rgb(${r},${g},${b})` : `rgba(${r},${g},${b},${a})`;
+}
 
 /**
  * Paleta do minimap, resolvida a cada `paint()`. O minimap desenha o seu próprio canvas, então
@@ -35,6 +47,16 @@ export interface MinimapColors {
   readonly viewport: string;
   /** Borda do realce da viewport. */
   readonly viewportBorder: string;
+  /** Cor dos marcadores de busca. */
+  readonly searchMatch: string;
+  /** Cor do match atual da busca. */
+  readonly searchCurrent: string;
+  /** Cor do marcador de diagnóstico do tipo error. */
+  readonly diagnosticError: string;
+  /** Cor do marcador de diagnóstico do tipo warning. */
+  readonly diagnosticWarning: string;
+  /** Cor do marcador de diagnóstico do tipo info. */
+  readonly diagnosticInfo: string;
 }
 
 export interface MinimapSource {
@@ -52,6 +74,16 @@ export interface MinimapDeps {
   getViewportHeight: () => number;
   /** Paleta corrente (consultada a cada desenho, então acompanha a troca de tema). */
   colors: () => MinimapColors;
+  /** OPCIONAL: devolve os HighlightSpan de uma linha (do HighlightStore). */
+  spansFor?: (line: number) => readonly HighlightSpan[] | undefined;
+  /** OPCIONAL: resolvedor de escopo → cor (para resolver spans). */
+  syntaxTheme?: ThemeResolver;
+  /** OPCIONAL: matches de busca para desenhar marcadores (getter lazy). */
+  searchMatches?: () => readonly SearchMatch[] | undefined;
+  /** OPCIONAL: índice do match atual (getter lazy). */
+  searchCurrentIndex?: () => number | undefined;
+  /** OPCIONAL: diagnósticos LSP para desenhar marcadores (getter lazy). */
+  diagnostics?: () => readonly { line: number; severity: string }[] | undefined;
 }
 
 /** Resultado do `attachMinimap`: para desligar. */
@@ -101,13 +133,76 @@ export function attachMinimap(deps: MinimapDeps): MinimapBinding {
 
     // Desenha cada linha como uma barra horizontal
     const barW = Math.max(2, w - 4);
+    const { spansFor, syntaxTheme } = deps;
     for (let i = 0; i < lineCount; i++) {
       const y = i * lineH;
       const text = source.line(i);
-      ctx.globalAlpha = text.trim().length > 0 ? LINE_CONTENT_ALPHA : LINE_EMPTY_ALPHA;
-      ctx.fillStyle = colors.line;
-      ctx.fillRect(2, y, barW, Math.max(1, Math.ceil(lineH)));
+      const hasContent = text.trim().length > 0;
+
+      // ── Syntax colorida (se disponível) ────────────────────────────────
+      const spans = spansFor?.(i);
+      if (spans !== undefined && spans.length > 0 && hasContent) {
+        let x = 2;
+        for (const span of spans) {
+          const segLen = span.end - span.start;
+          const ratio = segLen / text.length;
+          const segW = Math.max(1, barW * ratio);
+          const style = syntaxTheme?.styleFor(span.scope);
+          const color = style?.color;
+          ctx.globalAlpha = LINE_CONTENT_ALPHA;
+          ctx.fillStyle = color !== undefined ? rgbaToCss(color) : colors.line;
+          ctx.fillRect(x, y, segW, Math.max(1, Math.ceil(lineH)));
+          x += segW;
+        }
+      } else {
+        // Linha sem spans ou vazia: cor default (como antes)
+        ctx.globalAlpha = hasContent ? LINE_CONTENT_ALPHA : LINE_EMPTY_ALPHA;
+        ctx.fillStyle = colors.line;
+        ctx.fillRect(2, y, barW, Math.max(1, Math.ceil(lineH)));
+      }
     }
+    ctx.globalAlpha = 1;
+
+    // ── Marcadores de diagnóstico (P3.x) ──────────────────────────────────
+    // Desenha finos marcadores na borda direita (à esquerda dos de busca)
+    const diagnostics = deps.diagnostics?.();
+    if (diagnostics !== undefined && diagnostics.length > 0) {
+      for (const diag of diagnostics) {
+        const y = diag.line * lineH;
+        let color: string;
+        switch (diag.severity) {
+          case "error":
+            color = colors.diagnosticError;
+            break;
+          case "warning":
+            color = colors.diagnosticWarning;
+            break;
+          case "info":
+          default:
+            color = colors.diagnosticInfo;
+            break;
+        }
+        ctx.globalAlpha = LINE_CONTENT_ALPHA;
+        ctx.fillStyle = color;
+        ctx.fillRect(w - 16, y, 7, Math.max(1, Math.ceil(lineH)));
+      }
+    }
+
+    // ── Marcadores de busca (P3.x) ───────────────────────────────────────
+    // Desenha finos marcadores na borda direita (à direita dos de diagnóstico)
+    const searchMatches = deps.searchMatches?.();
+    const searchCurrentIndex = deps.searchCurrentIndex?.();
+    if (searchMatches !== undefined && searchMatches.length > 0) {
+      for (let m = 0; m < searchMatches.length; m++) {
+        const match = searchMatches[m]!;
+        const y = match.line * lineH;
+        ctx.globalAlpha = 1;
+        ctx.fillStyle = m === searchCurrentIndex ? colors.searchCurrent : colors.searchMatch;
+        ctx.fillRect(w - 8, y, 6, Math.max(1, Math.ceil(lineH)));
+      }
+    }
+
+    // ── Fim dos marcadores ───────────────────────────────────────────────
     ctx.globalAlpha = 1;
 
     // Viewport highlight

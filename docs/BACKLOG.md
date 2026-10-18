@@ -425,6 +425,16 @@ Problemas identificados ao testar o AppImage pela primeira vez:
       - **Verificado:** `rea execute-rizin-command` → `exit_code: 0`, `completion_status: complete`,
         provider `rizin` analisando o binário alvo (`iI` revela arch, bits, bintype, relro, nx, pie)
       - **Setup roda em 12 etapas** (sem quebras; dry-run e execução real validados)
+- [x] **🎯 Minimap Avançado** ✅ **fechado** (2026-10-18). Três melhorias no minimap:
+      - **Syntax colorida no canvas**: cada linha do minimap agora exibe barras com as cores
+        reais de syntax highlighting, dividindo a barra horizontal em segmentos proporcionais
+        aos spans de cada escopo (`minimap.ts` paint() + HighlightStore.spansFor)
+      - **Search match markers**: marcadores na borda direita do minimap indicando a posição
+        dos resultados de busca (match atual em amarelo, demais em semi-transparente)
+      - **Diagnostic markers**: marcadores na borda direita (à esquerda dos de busca) com
+        cores por severidade (error=vermelho, warning=laranja, info=azul)
+      - Todos os novos campos são **opcionais** (retrocompatível)
+      - Gates: `typecheck`/`test`/`build` exit 0 · **520 testes / 50 arquivos** (mesmo baseline)
 - [x] **P3.6 — Snapshot de análise do REA** ✅ **fechado** (2026-10-18). Snapshot gerado com o REA
       (provider ghidra) após análise `binary_overview` + `inspect_binary_layout` + `list_strings` +
       `list_procedures`. O snapshot contém:
