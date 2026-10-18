@@ -1,8 +1,9 @@
 # HANDOFF — sublime-rea
 
 > **Documento de handoff entre sessões** (leia antes de retomar). Atualizado em **2026-10-18**.
-> Status: 🎨 **Repaginação do design (VS Code-like) ✅** + **3 bugs de render/realce corrigidos ✅** +
-> **P4#16 — LSP Client (completo) ✅** — próxima: P3.6 snapshot de análise, ou revisão geral.
+> Status: **Revisão geral ✅ + LSP TypeScript corrigido ✅ + Plugin host UnhandledRejection ✅** +
+> **Cache incremental de tokenização ✅ + Performance profiling completo** —
+> próxima: input latency (batching IPC) ou Rizin (P3.5).
 
 ---
 
@@ -20,7 +21,11 @@ P2.4b/c ✅ · P2.5 (salvar) ✅ · P3.10/11/12 (dívidas) ✅ · P1#1 (seleçã
 **P2#7 (drag & drop) ✅ · Infra (GitHub repo + CI/Release) ✅ · P2#6 (abas) ✅ · P2#8 (temas) ✅** ·
 **P3#12 (go to line) ✅ · P3#13 (auto-pair) ✅ · P3#14 (bracket matching) ✅ · PyCharm ✅** ·
 **🐛 UX: welcome screen ✅ · menu bar ✅ · branding/ícone ✅ · dica abrir arquivo ✅** ·
-**P3#11 Command Palette ✅** · **P2#9 Minimap ✅** · **P3#15 Indentation Guides ✅** · **cursor line highlight ✅** · **smooth mouse wheel ✅** · **P4#18 Snippets ✅** · **🎨 repaginação do design (casca VS Code-like + tema como fonte única + sintaxe clara) ✅** · **🐛 3 bugs de render/realce (tint do `canvas2d`, revisão do realce, raiz de pacote) ✅** · **🐛 P1 — Performance dos menus (Cut/Copy/Paste implementados, menu simplificado) ✅** · **P3#10 — Plugin host (entry point + wiring + bridging) ✅** · **P3#15 — Soft wrap (wrap de linha visual, quebra oportunista) ✅** · **P4#16 — LSP Client (servidores builtin: TypeScript, Python; diagnóstico, completação, hover) ✅** · **P3.6 — Snapshot de análise REA (8.87 MB, 3 evidências) ✅** · **P4#17 — Diagnósticos no gutter (ícones de severidade na faixa de linha) ✅** · **P4#18 — Go-to-definition (F12/Ctrl+click) ✅** · **P4#19 — Signature help (popup ao digitar `(`) ✅** · **P4#20 — Document symbols (Ctrl+Shift+O, popup com filtro) ✅**
+**P3#11 Command Palette ✅** · **P2#9 Minimap ✅** · **P3#15 Indentation Guides ✅** · **cursor line highlight ✅** · **smooth mouse wheel ✅** · **P4#18 Snippets ✅** · **🎨 repaginação do design (casca VS Code-like + tema como fonte única + sintaxe clara) ✅** · **🐛 3 bugs de render/realce (tint do `canvas2d`, revisão do realce, raiz de pacote) ✅** · **🐛 P1 — Performance dos menus (Cut/Copy/Paste implementados, menu simplificado) ✅** · **P3#10 — Plugin host (entry point + wiring + bridging) ✅** · **P3#15 — Soft wrap (wrap de linha visual, quebra oportunista) ✅** · **P4#16 — LSP Client (servidores builtin: TypeScript, Python; diagnóstico, completação, hover) ✅** · **P3.6 — Snapshot de análise REA (8.87 MB, 3 evidências) ✅** · **P4#17 — Diagnósticos no gutter (ícones de severidade na faixa de linha) ✅** · **P4#18 — Go-to-definition (F12/Ctrl+click) ✅** · **P4#19 — Signature help (popup ao digitar `(`) ✅** · **P4#20 — Document symbols (Ctrl+Shift+O, popup com filtro) ✅** ·
+**🐛 LSP TypeScript: initializationOptions.tsserver.path injetado no boot ✅** ·
+**🐛 Plugin host UnhandledPromiseRejection: try/catch no postMessage + .catch() órfão ✅** ·
+**⚡ Tokenização: cache incremental (diff de linhas, trunca só da 1ª alterada) ✅** ·
+**📊 Performance profiling: startup 203ms, render 280 FPS, memória 15.4 MB, zero leaks ✅**
 
 **✅ Passo operacional resolvido (2026-10-16).** O `setup.py` foi rodado e o MCP `rea` foi relançado
 **já com `REA_GHIDRA_STARTUP_TIMEOUT_MS=900000`** (confirmado em `/proc/*/environ`) — **não** é mais
@@ -36,15 +41,16 @@ Sem o deadline maior, `open_binary`/`analyze` **via MCP** volta a estourar os 33
 
 **Próximas tarefas (escolha do usuário na próxima sessão):**
 
-> O P4 inteiro (LSP features) foi fechado nesta sessão. O roadmap de features de linguagem
-> baseadas em LSP está completo. Três caminhos possíveis:
+> Esta sessão fechou a **revisão geral** (validação com LSP reais, CDP screenshots) + **correções**
+> (TypeScript LSP, UnhandledRejection do plugin host) + **performance profiling** (startup, render,
+> memória, gargalos) + **cache incremental de tokenização**. O backlog de features de linguagem
+> (P4) está completo. A próxima fronteira é:
 
-1. **Revisão geral** — testar o app com servidores LSP reais (pyright, typescript-language-server),
-   validar Ctrl+Space, F12, Ctrl+Shift+O, gutter icons, diagnósticos. Verificar se nada quebrou.
-2. **Performance** — profiling de render, gargalos no pipeline, uso de memória, tempo de startup.
-   O Scribe já tem feature suficiente pra merecer uma otimizada.
-3. **P3.5 — Provisionar Rizin** — instalar Rizin (alternativa open-source ao Ghidra) como segundo
-   provider de análise pro REA. O REA faz `spawn("rizin")` e não há nenhum instalado.
+1. **⌨️ Input latency (batching IPC)** — cada tecla faz um round-trip renderer↔main (16.5 ms/key,
+   no limite dos 60 FPS). Batching no renderer + navegação local resolveriam.
+2. **🔧 P3.5 — Provisionar Rizin** — instalar Rizin (alternativa open-source ao Ghidra) como
+   segundo provider de análise pro REA. O REA faz `spawn("rizin")` e não há nenhum instalado.
+3. **📦 Release** — cortar um release do Scribe com as melhorias acumuladas.
 
 > ✅ **Pegadinha resolvida (2026-10-16, P3.9):** o `setup.py` agora **detecta** um JDK ≥ 21
 > compatível (`JAVA_HOME`, PATH, sdkman, `/usr/lib/jvm`) e escreve um **`export JAVA_HOME=…` ativo**
