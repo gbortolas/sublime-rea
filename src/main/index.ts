@@ -638,6 +638,16 @@ export async function startMainProcess(): Promise<void> {
     console.error("Scribe: falha ao indexar pacotes", error);
   });
 
+  // P3#10: plugin host — inicia o processo de extensão em background.
+  // O entry bundleado vive em `dist/core/extension/plugin-host-entry.js`.
+  void activeCore.startPluginHost(join(__dirname, "../core/extension/plugin-host-entry.js"), {
+    name: "scribe-plugin-host",
+  }).then((session) => {
+    console.info(`Scribe: plugin host ready (handle=${session.handle}, pid=${String((session as { bridge?: { port?: unknown } }).bridge?.port)}`);
+  }).catch((error: unknown) => {
+    console.warn("Scribe: plugin host não disponível (modo headless ou Electron ausente?)", error);
+  });
+
   metricsTimer = setInterval(() => {
     const busy: MainThreadBusy = activeCore.snapshot();
     console.info(`Scribe: MainThreadBusy ${JSON.stringify(busy)}`);

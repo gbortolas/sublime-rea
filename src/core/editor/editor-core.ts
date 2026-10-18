@@ -72,6 +72,13 @@ import { PackageResolverImpl } from "../packages";
 import type { ResourceScanner } from "../packages";
 import { PropertySystemImpl } from "../properties";
 import { GrammarRegistryImpl } from "../syntax";
+import {
+  ExtensionHostImpl,
+  createMethodHandlers,
+  type HostSession,
+  type MethodHandlers,
+} from "../extension";
+import type { ExtensionHost } from "../../shared";
 
 /** Lane `index` (cold-start) — teto por propriedade (DEC-CON-6/9). */
 export const PROPERTY_INDEX_WORKERS = "index.indexWorkers";
@@ -150,6 +157,8 @@ export interface EditorCore {
   readonly packagesReady: Promise<void>;
   /** Resolve depois de `packagesReady`, quando as gramáticas `.sublime-syntax` forem registradas. */
   readonly syntaxReady: Promise<void>;
+  /** Host de extensões (criado sob demanda por `startPluginHost`). */
+  readonly extensionHost: ExtensionHost | undefined;
 
   openDocument(path: string, signal?: AbortSignal): Promise<DocumentHandle>;
   documentText(handle: DocumentHandle): string;
@@ -205,6 +214,11 @@ export interface EditorCore {
   /** Executa um comando pelo id (lança se desconhecido). */
   executeCommand(id: string): Promise<void>;
   dispose(): void;
+  /** Inicia o processo de host de plugins (`utilityProcess.fork`). Cria o `ExtensionHost` sob demanda. */
+  startPluginHost(
+    entry: string,
+    opts?: { readonly name?: string; readonly env?: Record<string, string> },
+  ): Promise<HostSession>;
 }
 
 interface CoreState {
@@ -375,6 +389,31 @@ export function createEditorCore(options: EditorCoreOptions = {}): EditorCore {
   const highlightCache = new Map<DocumentHandle, HighlightCacheEntry>();
   const syntaxReady: Promise<void> = packagesReady.then(() => loadGrammars(packages, grammars));
 
+  // ── Host de extensões (P3#10) ─────────────────────────────────────────────────────────────
+  // ── Host de extensões (P3#10) ─────────────────────────────────────────────────────────────
+  let extensionHost: ExtensionHost | undefined;
+  /** Sessões ativas do host de plugins (para broadcast de eventos). */
+  const hostSessions = new Set<HostSession>();
+
+  /**
+   * Notifica todos os hosts de plugin sobre uma mudança de documento.
+   * Falha de um host não quebra a main (DEC-TR-5).
+   */
+  function forwardChangedToHosts(event: DocumentChangedEvent): void {
+    for (const session of hostSessions) {
+      if (session.state !== "ready") continue;
+      try {
+        session.bridge.port?.postMessage({
+          kind: "emit",
+          event: "changed",
+          payload: { handle: event.handle, delta: { revision: event.revision } },
+        });
+      } catch {
+        // Ignora falha de notificação para um host — não pode quebrar a main.
+      }
+    }
+  }
+
   const state: CoreState = { activeHandle: undefined, pendingHandle: undefined, caret: 0, selection: SelectionOps.collapsed(0), selections: SelectionSetOps.singular(0) };
   const emitter = new Emitter<DocumentChangedEvent>();
   const opened = new Set<DocumentHandle>();
@@ -459,6 +498,7 @@ export function createEditorCore(options: EditorCoreOptions = {}): EditorCore {
         return;
       }
       emitter.fire({ handle, revision: event.revision });
+      forwardChangedToHosts({ handle, revision: event.revision });
     });
     subscriptions.set(handle, subscription);
   }
@@ -568,6 +608,7 @@ export function createEditorCore(options: EditorCoreOptions = {}): EditorCore {
         // commitado, então a falha de notificação é reportada e engolida aqui.
         try {
           emitter.fire({ handle, revision: buffer.revision });
+          forwardChangedToHosts({ handle, revision: buffer.revision });
         } catch (error) {
           console.warn("[editor-core] listener de document.changed falhou:", error);
         }
@@ -973,6 +1014,33 @@ export function createEditorCore(options: EditorCoreOptions = {}): EditorCore {
       };
     },
 
+    get extensionHost(): ExtensionHost | undefined {
+      return extensionHost;
+    },
+
+    async startPluginHost(
+      entry: string,
+      opts?: { readonly name?: string; readonly env?: Record<string, string> },
+    ): Promise<HostSession> {
+      if (extensionHost === undefined) {
+        const handlers = createMethodHandlers({ commands, documents: registry, packages });
+        extensionHost = new ExtensionHostImpl({
+          handlers: handlers as Partial<MethodHandlers<unknown>>,
+        });
+      }
+      const session = await extensionHost.spawn({
+        name: opts?.name ?? "plugin",
+        entry,
+        ...(opts?.env !== undefined ? { env: opts.env } : {}),
+      });
+      hostSessions.add(session);
+      // Quando o host sair, remove da lista de broadcasts
+      session.exited
+        .then(() => hostSessions.delete(session))
+        .catch(() => hostSessions.delete(session));
+      return session;
+    },
+
     listCommands(): readonly Command[] {
       return [
         { id: "file.open",      label: "Abrir arquivo",      category: "File", accelerator: "Ctrl+O" },
@@ -1016,6 +1084,7 @@ export function createEditorCore(options: EditorCoreOptions = {}): EditorCore {
     dispose(): void {
       if (disposed) return;
       disposed = true;
+      void extensionHost?.shutdown().catch(() => {});
       for (const subscription of subscriptions.values()) subscription.dispose();
       subscriptions.clear();
       for (const handle of opened) registry.dispose(handle);

@@ -49,3 +49,5 @@ export type {
   HostSpawner,
   PortPair,
 } from "./host";
+
+export type { HostSession } from "../../shared";
