@@ -9,7 +9,7 @@
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
 import type { DocumentHandle } from "../../shared";
-import { EXTENSION_BRIDGE_VERSION, SelectionOps, SelectionSetOps } from "../../shared";
+import { EXTENSION_BRIDGE_VERSION } from "../../shared";
 
 import { createEditorCore } from "../editor";
 import { OPS_HASH } from "./ops";
