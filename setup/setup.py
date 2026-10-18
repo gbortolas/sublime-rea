@@ -48,7 +48,7 @@ from pathlib import Path
 # ---------------------------------------------------------------------------
 # Constantes base
 # ---------------------------------------------------------------------------
-TOTAL_STEPS = 11
+TOTAL_STEPS = 12
 PROJECT_NAME = "sublime-rea"
 RICH_VERSION_FALLBACK = "13.9.4"
 BOOTSTRAP_ENV = "SUBLIME_REA_RICH_BOOTSTRAPPED"
@@ -690,6 +690,15 @@ class Ctx:
         self.ghidra_install_dir = self.rea_tools_dir / self.ghidra_extracted_dirname
         self.pwntools_venv_dir = self.rea_tools_dir / self.pwntools_venv_dirname
         self.pwntools_python = self.pwntools_venv_dir / "bin" / "python"
+        self.rizin_version = v("RIZIN_VERSION")
+        self.rizin_url = v("RIZIN_STATIC_URL")
+        self.rizin_sha256 = v("RIZIN_STATIC_SHA256")
+        self.rizin_static_size = v("RIZIN_STATIC_SIZE_BYTES")
+        self.rizin_static_filename = v("RIZIN_STATIC_FILENAME")
+        self.rizin_extracted_dirname = v("RIZIN_EXTRACTED_DIRNAME")
+        self.rizin_tarball_path = self.rea_tools_dir / self.rizin_static_filename
+        self.rizin_install_dir = self.rea_tools_dir / self.rizin_extracted_dirname
+        self.rizin_bin = self.rizin_install_dir / "bin" / "rizin"
         self.tarball = REPO_ROOT / self.sublime_tarball
         self.target_bin = REPO_ROOT / self.sublime_target_bin
         self.target_dir = REPO_ROOT / "target"
@@ -702,6 +711,7 @@ class Ctx:
         return [
             ("REA", f"{self.rea_package} {self.rea_version}"),
             ("Ghidra", f"{self.ghidra_version} (JDK >= {self.ghidra_jdk_min})"),
+            ("Rizin", f"{self.rizin_version} (estático, Linux x86_64)"),
             ("pwntools", f"{self.pwntools_version} + pyelftools {self.pyelftools_version}"
                          f" + unicorn {self.unicorn_version}"),
             ("Node", f">= {self.node_min}"),
@@ -1455,14 +1465,150 @@ def step_pwntools(ctx: Ctx, ui: UI) -> None:
 
 
 # ---------------------------------------------------------------------------
-# Etapa 7 — Symlink ~/sr-tools → REA_TOOLS_DIR (Ghidra recusa "." no path)
+# Etapa 7 — Rizin (provider de análise nativa mais leve que Ghidra)
+#   Download do tarball estático (xz) → SHA-256 → extração → REA_RIZIN_COMMAND
+#   O REA faz spawn("rizin") do PATH, ou usa REA_RIZIN_COMMAND quando setado.
+# ---------------------------------------------------------------------------
+def step_rizin(ctx: Ctx, ui: UI) -> None:
+    ui.step(7, f"Rizin {ctx.rizin_version} (provider de análise nativa)")
+    rizin_bin = ctx.rizin_bin
+
+    # Já instalado?
+    if rizin_bin.is_file():
+        ui.ok(f"Rizin já extraído: {rizin_bin}")
+        ui.mark(7, "ok", "já extraído")
+        return
+
+    if ui.dry_run:
+        _rizin_plan(ctx, ui)
+        ui.mark(7, "dry", "plano impresso")
+        return
+
+    # Tarball ausente ou SHA-256 divergente → baixar .part
+    if not _rizin_tarball_ok(ctx, ui):
+        if ctx.rizin_tarball_path.is_file():
+            ui.warn("tarball presente mas SHA-256 diverge; baixando novamente")
+            ctx.rizin_tarball_path.unlink()
+
+        size_mib = _mib(ctx.rizin_static_size)
+        ui.info(
+            f"baixando Rizin {ctx.rizin_version} "
+            f"(~{ctx.rizin_static_size} bytes / ~{size_mib} MiB)..."
+        )
+        ui.info(f"URL: {ctx.rizin_url}")
+        ensure_dir(ui, ctx.rea_tools_dir)
+        part = ctx.rizin_tarball_path.with_name(ctx.rizin_tarball_path.name + ".part")
+        part.unlink(missing_ok=True)
+        download(
+            ctx.rizin_url,
+            part,
+            ui,
+            expected_size=_int_or_zero(ctx.rizin_static_size),
+            exit_code=EXIT_GHIDRA,  # reusa o código genérico de download
+            label=f"Rizin {ctx.rizin_version}",
+        )
+        # Valida SHA-256 ANTES de promover
+        got = sha256_of(part, ui)
+        if got != ctx.rizin_sha256:
+            raise SetupFailure(
+                EXIT_GHIDRA,
+                "SHA-256 do Rizin não confere com o pin",
+                [
+                    f"esperado: {ctx.rizin_sha256}",
+                    f"obtido:   {got}",
+                    "abortando SEM extrair.",
+                ],
+            )
+        os.replace(part, ctx.rizin_tarball_path)
+        ui.ok("SHA-256 OK")
+    else:
+        ui.ok("tarball já presente e SHA-256 confere")
+
+    # Extrair para o diretório de instalação
+    ui.info(f"extraindo em {ctx.rizin_install_dir} ...")
+    ensure_dir(ui, ctx.rea_tools_dir)
+    extract_tmp = Path(tempfile.mkdtemp(prefix=".extract.", dir=str(ctx.rea_tools_dir)))
+    try:
+        with ui.status("extraindo o xz do Rizin"):
+            run(ui, ["tar", "-xJf", ctx.rizin_tarball_path, "-C", extract_tmp])
+
+        src_dir = extract_tmp / ctx.rizin_extracted_dirname
+        if not (src_dir / "bin" / "rizin").is_file():
+            candidates = sorted(p for p in extract_tmp.iterdir() if p.is_dir())
+            if candidates:
+                src_dir = candidates[0]
+            else:
+                raise SetupFailure(
+                    EXIT_GHIDRA,
+                    "diretório extraído do Rizin não encontrado",
+                    [f"nada em {extract_tmp}"],
+                )
+
+        _swap_dir(ctx.rizin_install_dir, src_dir)
+
+        if not rizin_bin.is_file():
+            raise SetupFailure(
+                EXIT_GHIDRA,
+                "instalação do Rizin inválida",
+                [f"{rizin_bin} ausente após a extração."],
+            )
+
+        # Garante permissão de execução
+        for binary in ctx.rizin_install_dir.rglob("bin/*"):
+            if binary.is_file():
+                try:
+                    binary.chmod(binary.stat().st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
+                except OSError:
+                    pass
+
+        ui.ok(f"Rizin instalado em {ctx.rizin_install_dir}")
+        ui.mark(7, "ok", f"instalado em {ctx.rizin_install_dir}")
+    finally:
+        shutil.rmtree(extract_tmp, ignore_errors=True)
+        ctx.rizin_tarball_path.with_name(ctx.rizin_tarball_path.name + ".part").unlink(missing_ok=True)
+
+
+def _rizin_tarball_ok(ctx: Ctx, ui: UI) -> bool:
+    """True se o tarball estático existe e SHA-256 bate com o pin."""
+    if not ctx.rizin_tarball_path.is_file():
+        return False
+    return sha256_of(ctx.rizin_tarball_path, ui) == ctx.rizin_sha256
+
+
+def _rizin_plan(ctx: Ctx, ui: UI) -> None:
+    """Imprime o plano do Rizin em dry-run."""
+    part = ctx.rizin_tarball_path.with_name(ctx.rizin_tarball_path.name + ".part")
+    ensure_dir(ui, ctx.rea_tools_dir)
+    if not _rizin_tarball_ok(ctx, ui):
+        if ctx.rizin_tarball_path.is_file():
+            ui.show(f"rm -f {ctx.rizin_tarball_path}  # SHA-256 diverge")
+        size_mib = _mib(ctx.rizin_static_size)
+        ui.info(
+            f"baixando Rizin {ctx.rizin_version} "
+            f"(~{ctx.rizin_static_size} bytes / ~{size_mib} MiB)..."
+        )
+        ui.info(f"URL: {ctx.rizin_url}")
+        ui.dry("download (urllib, .part, retry/backoff, valida tamanho e SHA-256)")
+        ui.dry(f"mv -f {part} {ctx.rizin_tarball_path}")
+        ui.dry(f"verificar SHA-256 == {ctx.rizin_sha256}")
+    else:
+        ui.ok("tarball já presente e SHA-256 confere")
+    ui.info(f"extraindo em {ctx.rea_tools_dir} (via dir temporário, mv atômico)...")
+    ui.dry(f"mkdir <tmpdir>/ && tar -xJf {ctx.rizin_tarball_path} -C <tmpdir>/")
+    ui.dry(f"mv {ctx.rizin_install_dir} {ctx.rizin_install_dir}.old.<pid>  # backup")
+    ui.dry(f"mv <tmpdir>/{ctx.rizin_extracted_dirname} {ctx.rizin_install_dir}")
+    ui.dry(f"rm -rf {ctx.rizin_install_dir}.old.<pid>")
+
+
+# ---------------------------------------------------------------------------
+# Etapa 8 — Symlink ~/sr-tools → REA_TOOLS_DIR (Ghidra recusa "." no path)
 # ---------------------------------------------------------------------------
 def step_symlink(ctx: Ctx, ui: UI) -> None:
-    ui.step(7, f"Symlink {ctx.rea_tools_alias} → {ctx.rea_tools_dir}")
+    ui.step(8, f"Symlink {ctx.rea_tools_alias} → {ctx.rea_tools_dir}")
     if ui.dry_run:
         ui.show(f"mkdir -p {ctx.rea_tools_alias.parent}")
         ui.show(f"ln -sfn {ctx.rea_tools_dir} {ctx.rea_tools_alias}")
-        ui.mark(7, "dry", "plano impresso")
+        ui.mark(8, "dry", "plano impresso")
         return
 
     alias = ctx.rea_tools_alias
@@ -1473,7 +1619,7 @@ def step_symlink(ctx: Ctx, ui: UI) -> None:
         alias.unlink()
         alias.symlink_to(target)
         ui.ok(f"symlink atualizado: {alias} → {target}")
-        ui.mark(7, "ok", "atualizado")
+        ui.mark(8, "ok", "atualizado")
     elif alias.exists():
         # `symlink_to` num diretório REAL existente criaria o link DENTRO dele
         # e o projeto Ghidra iria para o lugar errado.
@@ -1491,7 +1637,7 @@ def step_symlink(ctx: Ctx, ui: UI) -> None:
         alias.parent.mkdir(parents=True, exist_ok=True)
         alias.symlink_to(target)
         ui.ok(f"symlink criado: {alias} → {target}")
-        ui.mark(7, "ok", "criado")
+        ui.mark(8, "ok", "criado")
 
 
 # ---------------------------------------------------------------------------
@@ -1502,9 +1648,9 @@ RC_MARKER = "sublime-rea setup"
 
 def step_env(ctx: Ctx, ui: UI, write_rc: bool) -> None:
     ui.step(
-        8,
+        9,
         f"Variáveis de ambiente (GHIDRA_INSTALL_DIR, {OPENCODE_PWNTOOLS_KEY}, "
-        f"{GHIDRA_STARTUP_TIMEOUT_KEY})",
+        f"{GHIDRA_STARTUP_TIMEOUT_KEY}, REA_RIZIN_COMMAND)",
     )
     # O env do usuário tem precedência sobre os defaults (ver _ghidra_startup_timeout_ms).
     startup_timeout_ms = _ghidra_startup_timeout_ms(ui)
@@ -1522,6 +1668,7 @@ def step_env(ctx: Ctx, ui: UI, write_rc: bool) -> None:
     ui.info(f"REA_TOOLS_ALIAS={ctx.rea_tools_alias}")
     ui.info(f"{OPENCODE_PWNTOOLS_KEY}={ctx.pwntools_python}")
     ui.info(f"{GHIDRA_STARTUP_TIMEOUT_KEY}={startup_timeout_ms} (deadline do provider Ghidra)")
+    ui.info(f"REA_RIZIN_COMMAND={ctx.rizin_bin} (provider nativo Rizin)")
     if ctx.java_home:
         ui.info(f"JAVA_HOME={ctx.java_home} (detectado na etapa 3; exportado no env.sh)")
 
@@ -1554,6 +1701,8 @@ def step_env(ctx: Ctx, ui: UI, write_rc: bool) -> None:
             f'export {OPENCODE_PWNTOOLS_KEY}="{ctx.pwntools_python}"\n'
             f'export {GHIDRA_STARTUP_TIMEOUT_KEY}="{startup_timeout_ms}"  '
             f"# deadline (ms) do provider Ghidra; aumente p/ alvos com auto-análise longa\n"
+            f'export REA_RIZIN_COMMAND="{ctx.rizin_bin}"  '
+            f"# provider de análise nativa Rizin (estático)\n"
             + java_line,
         )
         ui.ok(f"escrito {ENV_FILE}")
@@ -1577,24 +1726,24 @@ def step_env(ctx: Ctx, ui: UI, write_rc: bool) -> None:
     else:
         ui.info("rc não alterado (use --write-rc para persistir no ~/.bashrc)")
 
-    ui.mark(8, "ok", "env.sh escrito" if not ui.dry_run else "dry-run")
+    ui.mark(9, "ok", "env.sh escrito" if not ui.dry_run else "dry-run")
 
 
 # ---------------------------------------------------------------------------
 # Etapa 8 — extrair o alvo (Sublime Text) em target/
 # ---------------------------------------------------------------------------
 def step_target(ctx: Ctx, ui: UI) -> None:
-    ui.step(9, f"Extraindo alvo (Sublime Text build {ctx.sublime_build})")
+    ui.step(10, f"Extraindo alvo (Sublime Text build {ctx.sublime_build})")
     if _target_bin_valid(ctx.target_bin):
         ui.ok(f"alvo já extraído: {ctx.target_bin}")
-        ui.mark(9, "ok", "já extraído")
+        ui.mark(10, "ok", "já extraído")
         return
 
     rel_bin = ctx.target_bin.relative_to(ctx.target_dir)
 
     if ui.dry_run:
         _target_plan(ctx, ui)
-        ui.mark(9, "dry", "plano impresso")
+        ui.mark(10, "dry", "plano impresso")
         return
 
     # O tarball não é mais versionado: garante presença + SHA-256 (baixa sob
@@ -1639,7 +1788,7 @@ def step_target(ctx: Ctx, ui: UI) -> None:
             EXIT_TARGET, "extração do alvo falhou", [f"{ctx.target_bin} inválido após o tar."]
         )
     ui.ok(f"extraído: {ctx.target_bin}")
-    ui.mark(9, "ok", str(ctx.target_bin))
+    ui.mark(10, "ok", str(ctx.target_bin))
 
 
 def _tarball_sha_ok(ctx: Ctx, ui: UI) -> bool:
@@ -1741,7 +1890,7 @@ def _target_bin_valid(path: Path) -> bool:
 
 
 # ---------------------------------------------------------------------------
-# Etapa 9 — registrar MCP no opencode (rea setup) + propagar env do REA
+# Etapa 11 — registrar MCP no opencode (rea setup) + propagar env do REA
 # ---------------------------------------------------------------------------
 OPENCODE_PWNTOOLS_KEY = "REA_PWNTOOLS_PYTHON"
 # Deadline (ms) da auto-análise do provider Ghidra quando o REA sobe o target.
@@ -2071,6 +2220,7 @@ def _mcp_env_entries(ctx: Ctx, ui: UI | None = None) -> list[tuple[str, str]]:
     aqui (o valor que vai ao MCP é sempre o validado/default).
     """
     entries = [
+        ("REA_RIZIN_COMMAND", str(ctx.rizin_bin)),
         (OPENCODE_PWNTOOLS_KEY, str(ctx.pwntools_python)),
         (GHIDRA_STARTUP_TIMEOUT_KEY, _ghidra_startup_timeout_ms(ui)),
     ]
@@ -2080,14 +2230,14 @@ def _mcp_env_entries(ctx: Ctx, ui: UI | None = None) -> list[tuple[str, str]]:
 
 
 def step_mcp(ctx: Ctx, ui: UI, rea_cmd: list[str]) -> None:
-    ui.step(10, "Registrando MCP no opencode (rea setup --client opencode)")
+    ui.step(11, "Registrando MCP no opencode (rea setup --client opencode)")
     cmd = [*rea_cmd, "setup", "--client", "opencode", "--yes"]
     if ui.dry_run:
         # repassa --dry-run ao REA quando o próprio script está em dry-run
         ui.dry(" ".join([*cmd, "--dry-run"]))
         for key, value in _mcp_env_entries(ctx, ui):
             _ensure_opencode_env(ctx, ui, key, value)
-        ui.mark(10, "dry", "plano impresso")
+        ui.mark(11, "dry", "plano impresso")
         return
     # `REA_PWNTOOLS_PYTHON` já está em os.environ (etapa 6), herdado pelo subprocess.
     result = run(ui, cmd, check=False)
@@ -2106,7 +2256,7 @@ def step_mcp(ctx: Ctx, ui: UI, rea_cmd: list[str]) -> None:
             ui.ok(f"rea setup preservou {key} no registro")
         elif not _ensure_opencode_env(ctx, ui, key, value):
             ui.warn(f"{key} NÃO está no registro MCP; {_MCP_ENV_HINTS[key]}")
-    ui.mark(10, "ok", "registrado")
+    ui.mark(11, "ok", "registrado")
 
 
 # ---------------------------------------------------------------------------
@@ -2138,12 +2288,12 @@ def _parse_last_json_object(text: str) -> dict:
 
 
 def step_doctor(ctx: Ctx, ui: UI, rea_cmd: list[str]) -> None:
-    ui.step(11, "Verificação final (rea doctor)")
+    ui.step(12, "Verificação final (rea doctor)")
     cmd = [*rea_cmd, "doctor", "--client", "opencode", "--provider", "ghidra", "--format", "json"]
 
     if ui.dry_run:
         ui.dry(" ".join(cmd))
-        ui.mark(11, "dry", "plano impresso")
+        ui.mark(12, "dry", "plano impresso")
         return
 
     result = proc(cmd, timeout=600)
@@ -2182,7 +2332,7 @@ def step_doctor(ctx: Ctx, ui: UI, rea_cmd: list[str]) -> None:
                 detail = check.get("detail") or check.get("remediation") or ""
                 ui.warn(f"opcional (esperado): {name} [{cls}]: {detail}")
 
-        ui.mark(11, "ok", "healthy: true")
+        ui.mark(12, "ok", "healthy: true")
         return
 
     reasons = ["healthy: false"]
@@ -2238,6 +2388,7 @@ def run_all(ctx: Ctx, ui: UI, args: argparse.Namespace) -> int:
     rea_cmd = step_rea(ctx, ui)
     step_ghidra(ctx, ui)
     step_pwntools(ctx, ui)
+    step_rizin(ctx, ui)
     step_symlink(ctx, ui)
     step_env(ctx, ui, args.write_rc)
     step_target(ctx, ui)

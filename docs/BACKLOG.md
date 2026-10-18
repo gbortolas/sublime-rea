@@ -7,7 +7,7 @@ Legenda: **P0** = destrava a fase atual · **P1** = próximo · **P2** = depois 
 
 ---
 
-## ✅ P0 — Destravar a análise (CONCLUÍDO)
+## ✅ P0 — Destravar a análise (CONCLUÍDO) — Rizin também ✅
 
 O "bloqueio" era **falso**: o deadline do Ghidra **é configurável** (`REA_GHIDRA_STARTUP_TIMEOUT_MS`,
 máx 2^31−1). Fatos descobertos no `dist/` do `rea-agents@6.5.0` — detalhes e evidências em
@@ -411,8 +411,20 @@ Problemas identificados ao testar o AppImage pela primeira vez:
 - [x] **P3.4 — `main.py`** ✅ **resolvido** (2026-10-17): boilerplate do PyCharm **removido**
       (`git rm main.py`); grep confirmou **zero** referências em código/setup/scripts (só o texto desta
       linha do BACKLOG e um `.idea/workspace.xml` gitignored).
-- [ ] **P3.5 — Provisionar Rizin** (só se P0.4 voltar à mesa): o REA faz `spawn("rizin")` do PATH e
-      não há nenhum instalado.
+- [x] **P3.5 — Provisionar Rizin** ✅ **fechado** (2026-10-18). Rizin v0.9.1 instalado como
+      provider de análise nativa do REA:
+      - **Static binary** (~137 MB) baixado de `github.com/rizinorg/rizin/releases/tag/v0.9.1`,
+        SHA-256 pinado em `setup/versions.env`
+      - Extraído em `$REA_TOOLS_DIR/rizin-v0.9.1/`, `REA_RIZIN_COMMAND` aponta para
+        `bin/rizin` no diretório de instalação
+      - **`setup.py`** — nova **etapa 7/12** (`step_rizin`) com download atômico, validação SHA-256,
+        extração via `tar -xJf` e permissões de execução
+      - **`env.sh`** — exporta `REA_RIZIN_COMMAND` (provider nativo Rizin)
+      - **MCP** — `REA_RIZIN_COMMAND` propagado para `mcp.servers.rea.environment` no
+        `opencode.jsonc`
+      - **Verificado:** `rea execute-rizin-command` → `exit_code: 0`, `completion_status: complete`,
+        provider `rizin` analisando o binário alvo (`iI` revela arch, bits, bintype, relro, nx, pie)
+      - **Setup roda em 12 etapas** (sem quebras; dry-run e execução real validados)
 - [x] **P3.6 — Snapshot de análise do REA** ✅ **fechado** (2026-10-18). Snapshot gerado com o REA
       (provider ghidra) após análise `binary_overview` + `inspect_binary_layout` + `list_strings` +
       `list_procedures`. O snapshot contém:
