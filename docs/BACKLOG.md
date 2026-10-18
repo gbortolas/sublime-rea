@@ -616,3 +616,29 @@ Problemas identificados ao testar o AppImage pela primeira vez:
   - `fetchInlayHints()` — busca hints pro range visível, converte posições px
   - Refresh ao scroll (debounce 200ms), abrir/ativar/editar documento
   - Gates: typecheck/lint/test/build passam (543 testes, 50 arquivos)
+
+## 🌐 Multi-root workspace (2026-10-18)
+
+- [x] **Multi-root workspace** ✅ **fechado** (2026-10-18). Workspace folders para servidores LSP:
+  - `WorkspaceFolder` interface no protocolo LSP
+  - `LspManager.setWorkspaceFolders()` com notificação `didChangeWorkspaceFolders`
+  - Detecta workspace root a partir do CWD (`.git`, `package.json`, `pyproject.toml`)
+  - `rootUri` e `workspaceFolders` enviados no handshake `initialize`
+  - Gates: typecheck/lint/test/build passam (543 testes, 50 arquivos)
+
+## 🐙 Git integration (2026-10-18)
+
+- [x] **Git blame na status bar** ✅ **fechado** (2026-10-18). Mostra autor + tempo relativo ao clicar numa linha:
+  - `git blame -L` via `child_process.execSync` no main dispatch
+  - IPC `git.blame` + preload bridge + renderer bridge
+  - Elemento `#status-blame` na status bar
+  - `timeAgoStr()` formatando em português
+  - Atualizado ao mover caret (clique, setas, troca de documento)
+  - Gates: typecheck/lint/test/build passam (543 testes, 50 arquivos)
+
+- [x] **Git diff indicators no gutter** ✅ **fechado** (2026-10-18). Barras coloridas na borda do gutter:
+  - `GitDiffRange` type em `scene.ts`
+  - `git diff HEAD --unified=0` no main dispatch, parseia hunks `@@`
+  - Barras de 3px no gutter (verde=added, azul=modified, vermelho=deleted)
+  - Fetch automático ao abrir/ativar documento
+  - Gates: typecheck/lint/test/build passam (543 testes, 50 arquivos)

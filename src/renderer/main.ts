@@ -82,6 +82,7 @@ import {
   type BracketPos,
   type CaretPosition,
   type FoldRange,
+  type GitDiffRange,
   type GlyphBitmap,
   type GlyphRasterizer,
   type GlyphTinter,
@@ -496,6 +497,8 @@ interface ScribeBridge {
   inlayHints?(handle: number, startLine?: number, endLine?: number): Promise<readonly LspInlayHint[]>;
   /** Git blame da linha (autor · há X dias). */
   blame?(handle: number, line: number): Promise<{ commitHash: string; author: string; timeAgo: string } | null>;
+  /** Git diff do documento em relação ao HEAD (barras coloridas no gutter). */
+  gitDiff?(handle: number): Promise<readonly GitDiffRange[]>;
 }
 
 function readBridge(): ScribeBridge | undefined {
@@ -873,6 +876,24 @@ async function fetchFolding(
 }
 
 /**
+ * Busca git diff do documento em relação ao HEAD e atualiza o renderer.
+ */
+async function fetchGitDiff(
+  bridge: ScribeBridge | undefined,
+  renderer: ScribeRenderer,
+  handle: number,
+): Promise<void> {
+  if (bridge?.gitDiff === undefined) return;
+  try {
+    const diffs = await bridge.gitDiff(handle);
+    renderer.setGitDiffs(diffs);
+    renderer.start();
+  } catch {
+    /* silencia */
+  }
+}
+
+/**
  * Busca inlay hints via LSP para o range visível e atualiza o renderer.
  */
 async function fetchInlayHints(
@@ -1054,6 +1075,8 @@ class DocumentController {
     this.renderer.start();
     // Busca folding ranges iniciais (LSP)
     void fetchFolding(this.bridge, this.renderer, handle);
+    // Busca git diff iniciais
+    void fetchGitDiff(this.bridge, this.renderer, handle);
     // Busca inlay hints iniciais (LSP)
     {
       const s = this.current;
@@ -1097,6 +1120,8 @@ class DocumentController {
     }
     // Busca inlay hints para o range visível
     void fetchInlayHints(session, this.bridge, this.renderer, this.viewport);
+    // Busca git diff para o documento ativado
+    void fetchGitDiff(this.bridge, this.renderer, session.handle);
     this.renderer.start();
   }
 
@@ -1441,6 +1466,8 @@ class ScribeRenderer {
   private currentFolding: readonly FoldRange[] | undefined;
   /** Inlay hints ativos para o documento corrente. */
   private currentInlayHints: readonly RenderInlayHint[] | undefined;
+  /** Git diffs ativos para o documento corrente. */
+  private gitDiffs: readonly GitDiffRange[] = [];
 
   constructor(
     private readonly canvas: HTMLCanvasElement,
@@ -1472,6 +1499,11 @@ class ScribeRenderer {
   /** Define os inlay hints para o documento ativo. */
   setInlayHints(hints: readonly RenderInlayHint[]): void {
     this.currentInlayHints = hints;
+  }
+
+  /** Define os git diffs para o documento ativo. */
+  setGitDiffs(diffs: readonly GitDiffRange[]): void {
+    this.gitDiffs = diffs;
   }
 
   /** Largura atual do gutter em px. */
@@ -1653,6 +1685,7 @@ class ScribeRenderer {
       },
       this.currentFolding,
       this.currentInlayHints,
+      this.gitDiffs,
     );
     this.requestHighlight?.(range.first, range.count);
 

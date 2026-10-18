@@ -132,6 +132,13 @@ export interface RenderInlayHint {
   readonly paddingRight: boolean;
 }
 
+/** Faixa de linhas com tipo de diff (git). */
+export interface GitDiffRange {
+  readonly startLine: number;
+  readonly lineCount: number;
+  readonly kind: "added" | "modified" | "deleted";
+}
+
 /** @internal exported only for tests. */
 
 /** Instâncias de um frame — entradas diretas do `RenderPipeline`. */
@@ -180,6 +187,8 @@ export function buildInstances(
   folding?: FoldingState,
   /** Inlay hints renderizados com posições em px (P4#19). */
   inlayHints?: readonly RenderInlayHint[],
+  /** Git diff ranges para barras coloridas no gutter. */
+  gitDiffs?: readonly GitDiffRange[],
 ): SceneInstances {
   const rects: RectInstance[] = [
     { rect: layout.viewport, color: layout.background },
@@ -309,6 +318,24 @@ export function buildInstances(
     // Gutter: número da linha (1-based), direita-alinhado no gutter.
     // Só aparece no primeiro segmento visual de cada linha de documento.
     if (layout.gutterWidth > 0 && vl.segmentOffset === 0) {
+      // Git diff indicators (barras coloridas na borda esquerda do gutter)
+      if (gitDiffs !== undefined) {
+        for (const diff of gitDiffs) {
+          if (index >= diff.startLine && index < diff.startLine + diff.lineCount) {
+            const diffColor: RGBA = diff.kind === "added"
+              ? 0x2EA04399  // verde (r=46, g=160, b=67, a=0.6)
+              : diff.kind === "modified"
+                ? 0x3794FF99  // azul (r=55, g=148, b=255, a=0.6)
+                : 0xF0474799; // vermelho (r=240, g=71, b=71, a=0.6)
+            rects.push({
+              rect: { x: 0, y, w: 3, h: layout.lineHeight },
+              color: diffColor,
+            });
+            break;
+          }
+        }
+      }
+
       const lineNumber = String(index + 1);
       // Mede a largura total do número para posicionar à direita.
       let numWidth = 0;

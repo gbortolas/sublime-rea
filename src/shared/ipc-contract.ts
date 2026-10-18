@@ -147,6 +147,7 @@ export interface IpcMethods {
   "lsp.foldingRange"(handle: DocumentHandle): readonly LspFoldingRange[];
   "lsp.inlayHints"(handle: DocumentHandle, startLine?: number, endLine?: number): readonly LspInlayHint[];
   "git.blame"(handle: DocumentHandle, line: number): { commitHash: string; author: string; timeAgo: string } | null;
+  "git.diff"(handle: DocumentHandle): readonly { startLine: number; lineCount: number; kind: string }[];
 }
 
 export type IpcMethodName = keyof IpcMethods & string;
@@ -196,6 +197,7 @@ export const IPC_METHODS = [
   "lsp.foldingRange",
   "lsp.inlayHints",
   "git.blame",
+  "git.diff",
 ] as const satisfies readonly IpcMethodName[];
 
 export const IPC_EVENT_NAMES = ["document.changed", "lsp.diagnostics"] as const satisfies readonly IpcEventName[];

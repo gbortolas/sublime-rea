@@ -464,6 +464,32 @@ async function dispatchIpc(
         return null;
       }
     }
+    case "git.diff": {
+      const handle = requireHandle(request.args[0], "git.diff");
+      const path = core.registry.get(handle)?.uri;
+      if (path === undefined) return [];
+      try {
+        const dir = path.substring(0, path.lastIndexOf("/"));
+        const result = execSync(
+          `git diff HEAD --unified=0 -- "${path}" 2>/dev/null`,
+          { cwd: dir, timeout: 5000, encoding: "utf-8", maxBuffer: 65536 },
+        );
+        if (!result) return [];
+        // Parse unified diff: @@ -start,count +start,count @@
+        const ranges: { startLine: number; lineCount: number; kind: string }[] = [];
+        for (const line of (result as string).split("\n")) {
+          const match = line.match(/^@@ -\d+(?:,\d+)? \+(\d+)(?:,(\d+))? @@/);
+          if (match) {
+            const start = parseInt(match[1]!, 10) - 1;
+            const count = match[2] ? parseInt(match[2], 10) : 1;
+            ranges.push({ startLine: start, lineCount: count, kind: "modified" });
+          }
+        }
+        return ranges;
+      } catch {
+        return [];
+      }
+    }
     default:
       // Inalcançável: `parseIpcRequest` já validou o método; guarda contra regressão.
       throw new IpcProtocolError("unknown-method", "método desconhecido");

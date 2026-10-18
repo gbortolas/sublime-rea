@@ -122,6 +122,8 @@ export interface ScribePreloadApi {
   inlayHints(handle: DocumentHandle, startLine?: number, endLine?: number): Promise<LspInlayHint[]>;
   /** Git blame da linha (autor · há X dias). */
   blame(handle: DocumentHandle, line: number): Promise<{ commitHash: string; author: string; timeAgo: string } | null>;
+  /** Git diff do documento em relação ao HEAD (barras coloridas no gutter). */
+  gitDiff(handle: DocumentHandle): Promise<readonly { startLine: number; lineCount: number; kind: string }[]>;
 }
 
 // Duplicado de propósito: o preload não importa `src/shared` em runtime (sandbox).
@@ -310,6 +312,8 @@ const api: ScribePreloadApi = {
     call<LspInlayHint[]>("lsp.inlayHints", [handle, startLine, endLine]),
   blame: (handle: DocumentHandle, line: number): Promise<{ commitHash: string; author: string; timeAgo: string } | null> =>
     call<{ commitHash: string; author: string; timeAgo: string } | null>("git.blame", [handle, line]),
+  gitDiff: (handle: DocumentHandle): Promise<readonly { startLine: number; lineCount: number; kind: string }[]> =>
+    call<readonly { startLine: number; lineCount: number; kind: string }[]>("git.diff", [handle]),
 };
 
 contextBridge.exposeInMainWorld("scribe", api);
