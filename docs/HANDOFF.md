@@ -34,11 +34,17 @@ python3 setup/setup.py        # idempotente: reescreve setup/env.sh + environmen
 Sem o deadline maior, `open_binary`/`analyze` **via MCP** volta a estourar os 330 s (a análise leva
 ~355 s).
 
-**Próxima tarefa recomendada:** Todos os itens **P4#16 a P4#20** estão fechados. O roadmap
-de features de linguagem baseadas em LSP está completo. Próximos passos possíveis:
-- **Revisão geral** (testar o app com servidores LSP reais)
-- Voltar ao **P3.5 — Provisionar Rizin** (se quiser voltar ao RE analysis)
-- Iniciar **refinamentos de UX** ou **performance**
+**Próximas tarefas (escolha do usuário na próxima sessão):**
+
+> O P4 inteiro (LSP features) foi fechado nesta sessão. O roadmap de features de linguagem
+> baseadas em LSP está completo. Três caminhos possíveis:
+
+1. **Revisão geral** — testar o app com servidores LSP reais (pyright, typescript-language-server),
+   validar Ctrl+Space, F12, Ctrl+Shift+O, gutter icons, diagnósticos. Verificar se nada quebrou.
+2. **Performance** — profiling de render, gargalos no pipeline, uso de memória, tempo de startup.
+   O Scribe já tem feature suficiente pra merecer uma otimizada.
+3. **P3.5 — Provisionar Rizin** — instalar Rizin (alternativa open-source ao Ghidra) como segundo
+   provider de análise pro REA. O REA faz `spawn("rizin")` e não há nenhum instalado.
 
 > ✅ **Pegadinha resolvida (2026-10-16, P3.9):** o `setup.py` agora **detecta** um JDK ≥ 21
 > compatível (`JAVA_HOME`, PATH, sdkman, `/usr/lib/jvm`) e escreve um **`export JAVA_HOME=…` ativo**
