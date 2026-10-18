@@ -34,6 +34,7 @@ import type {
   LspDocumentSymbol,
   LspHoverResult,
   LspLocation,
+  LspRenameResult,
   LspSignatureHelp,
   RenderBackendKind,
   RGBA,
@@ -470,6 +471,8 @@ interface ScribeBridge {
   signatureHelp?(handle: number, line: number, col: number, triggerCharacter?: string): Promise<LspSignatureHelp | null>;
   /** Símbolos do documento LSP (opcional). */
   documentSymbols?(handle: number): Promise<LspDocumentSymbol[]>;
+  /** Renomear símbolo via LSP (opcional). */
+  rename?(handle: number, line: number, col: number, newName: string): Promise<LspRenameResult | null>;
 }
 
 function readBridge(): ScribeBridge | undefined {
@@ -2697,6 +2700,27 @@ function attachInputListeners(
       return;
     }
 
+    // F2 — Rename Symbol
+    if (event.key === "F2" && !event.ctrlKey && !event.metaKey && !event.shiftKey && !event.altKey) {
+      event.preventDefault();
+      const session = controller?.current;
+      if (session === undefined || bridge?.rename === undefined) return;
+      const pos = session.source.positionAt(session.caret);
+      const newName = showRenameInput();
+      if (newName === null) return;
+      void (async () => {
+        try {
+          const result = await bridge.rename!(session.handle, pos.line, pos.column, newName);
+          if (result && result.edits) {
+            applyRenameEdits(result, session, controller);
+          }
+        } catch {
+          // Silencia
+        }
+      })();
+      return;
+    }
+
     // `(` dispara signature help (quando o LSP suportar)
     if (event.key === "(" && !event.ctrlKey && !event.metaKey && !event.altKey) {
       const session = controller?.current;
@@ -3049,6 +3073,45 @@ function attachInputListeners(
 /** Tecla imprimível (um code point, sem modificadores) — a porta da digitação mínima. */
 function isPrintable(event: KeyboardEvent): boolean {
   return event.key.length === 1 && !event.ctrlKey && !event.metaKey && !event.altKey;
+}
+
+/**
+ * Mostra um prompt simples para o usuário digitar o novo nome do símbolo.
+ * Retorna `null` se o usuário cancelou.
+ */
+function showRenameInput(): string | null {
+  return window.prompt("Novo nome do símbolo:");
+}
+
+/**
+ * Aplica as TextEdits de um rename no documento.
+ * Para edições no arquivo ativo usa `controller.replaceText()`;
+ * para cross-file (outros URIs) loga que ainda não é suportado.
+ */
+function applyRenameEdits(
+  result: LspRenameResult,
+  session: TabSession,
+  controller: DocumentController | undefined,
+): void {
+  // Descobre a URI do documento ativo para comparar
+  const activeUri = `file://${session.path.startsWith("/") ? "" : "/"}${session.path}`;
+
+  for (const [uri, edits] of Object.entries(result.edits)) {
+    if (uri === activeUri) {
+      // Edições no documento ativo: aplica uma a uma, em ordem reversa para não quebrar offsets
+      const sorted = [...edits].sort(
+        (a, b) => (b.range.start.line - a.range.start.line) || (b.range.start.character - a.range.start.character),
+      );
+      // Aplica cada edição em lote via replaceText
+      for (const edit of sorted) {
+        const startOffset = session.source.offsetOf(edit.range.start.line, edit.range.start.character);
+        const endOffset = session.source.offsetOf(edit.range.end.line, edit.range.end.character);
+        void controller?.replaceText(startOffset, endOffset - startOffset, edit.newText);
+      }
+    } else {
+      console.info(`Scribe: rename cross-file para "${uri}" ainda não é suportado no renderer`);
+    }
+  }
 }
 
 // Autostart só no navegador: em `node`/vitest o módulo é apenas importável (sem DOM, sem throw).

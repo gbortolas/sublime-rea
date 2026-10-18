@@ -236,6 +236,30 @@ describe("LspManager", () => {
     });
   });
 
+  describe("requestRename", () => {
+    it("retorna WorkspaceEdit do servidor correto", async () => {
+      await manager.startServer(TS_CONFIG);
+      const mockEdit = {
+        changes: {
+          "file:///test.ts": [{ range: { start: { line: 0, character: 0 }, end: { line: 0, character: 5 } }, newText: "bar" }],
+        },
+      };
+      mockLspClient.sendRequest.mockResolvedValue(mockEdit);
+
+      const result = await manager.requestRename("file:///test.ts", 0, 0, "bar");
+      expect(result).toEqual(mockEdit);
+      expect(mockLspClient.sendRequest).toHaveBeenCalledWith(
+        "textDocument/rename",
+        expect.objectContaining({ newName: "bar" }),
+      );
+    });
+
+    it("retorna null sem servidor para extensão", async () => {
+      const result = await manager.requestRename("file:///f.xyz", 0, 0, "x");
+      expect(result).toBeNull();
+    });
+  });
+
   describe("disconnectAll", () => {
     it("desconecta todos os servidores", async () => {
       await manager.startServer(TS_CONFIG);

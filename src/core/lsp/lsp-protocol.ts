@@ -218,6 +218,23 @@ export interface HoverParams {
 
 export type DefinitionParams = HoverParams;
 
+// ── Rename ────────────────────────────────────────────────────────────────────────────────────
+
+export interface RenameParams {
+  readonly textDocument: TextDocumentIdentifier;
+  readonly position: Position;
+  readonly newName: string;
+}
+
+export interface PrepareRenameParams {
+  readonly textDocument: TextDocumentIdentifier;
+  readonly position: Position;
+}
+
+export interface WorkspaceEdit {
+  readonly changes?: Record<string, readonly TextEdit[]>;
+}
+
 // ── Signature Help ────────────────────────────────────────────────────────────────────────────
 
 export interface SignatureHelpParams {
@@ -304,6 +321,14 @@ export interface PublishDiagnosticsParams {
   readonly diagnostics: readonly Diagnostic[];
 }
 
+// ── Find References ────────────────────────────────────────────────────────────
+
+export interface ReferenceParams {
+  readonly textDocument: TextDocumentIdentifier;
+  readonly position: Position;
+  readonly context: { readonly includeDeclaration: boolean };
+}
+
 // ── Server capabilities ─────────────────────────────────────────────────────────────────────
 
 export interface ServerCapabilities {
@@ -316,6 +341,8 @@ export interface ServerCapabilities {
     readonly retriggerCharacters?: readonly string[];
   };
   readonly documentSymbolProvider?: boolean | { readonly dynamicRegistration?: boolean };
+  readonly referencesProvider?: boolean | { readonly dynamicRegistration?: boolean };
+  readonly renameProvider?: boolean | { readonly prepareProvider?: boolean };
   readonly diagnosticProvider?: {
     readonly identifier?: string;
     readonly interFileDependencies?: boolean;

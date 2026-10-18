@@ -80,7 +80,7 @@ import {
   type MethodHandlers,
 } from "../extension";
 import type { ExtensionHost } from "../../shared";
-import type { LspDiagnostic, LspCompletionItem, LspHoverResult, LspLocation, LspSignatureHelp, LspDocumentSymbol } from "../../shared";
+import type { LspDiagnostic, LspCompletionItem, LspHoverResult, LspLocation, LspSignatureHelp, LspDocumentSymbol, LspRenameResult } from "../../shared";
 import { LspManager } from "../lsp";
 import type { Diagnostic, CompletionItem, Hover, Location, SignatureHelp, DocumentSymbol } from "../lsp";
 
@@ -277,6 +277,16 @@ export interface EditorCore {
    * Retorna array vazio se não houver servidor.
    */
   requestDocumentSymbols(handle: DocumentHandle): Promise<readonly LspDocumentSymbol[]>;
+  /**
+   * Renomeia um símbolo via LSP (F2). Retorna null se não houver servidor ou
+   * se o símbolo não der suporte a rename.
+   */
+  requestRename(
+    handle: DocumentHandle,
+    line: number,
+    col: number,
+    newName: string,
+  ): Promise<LspRenameResult | null>;
   /**
    * Diagnósticos LSP atuais do documento (do último `publishDiagnostics`).
    * Vazio se não houver servidor ou nenhum diagnóstico.
@@ -1559,6 +1569,34 @@ export function createEditorCore(options: EditorCoreOptions = {}): EditorCore {
       const uri = toFileUri(path);
       const symbols = await lspManager.requestDocumentSymbols(uri);
       return flattenDocumentSymbols(symbols);
+    },
+
+    async requestRename(
+      handle: DocumentHandle,
+      line: number,
+      col: number,
+      newName: string,
+    ): Promise<LspRenameResult | null> {
+      if (lspManager === null) return null;
+      const path = registry.get(handle)?.uri;
+      if (path === undefined) return null;
+      const uri = toFileUri(path);
+      const result = await lspManager.requestRename(uri, line, col, newName);
+      if (!result || !result.changes) return null;
+      return {
+        edits: Object.fromEntries(
+          Object.entries(result.changes).map(([fileUri, edits]) => [
+            fileUri,
+            edits.map((e) => ({
+              range: {
+                start: { line: e.range.start.line, character: e.range.start.character },
+                end: { line: e.range.end.line, character: e.range.end.character },
+              },
+              newText: e.newText,
+            })),
+          ]),
+        ),
+      } satisfies LspRenameResult;
     },
 
     documentDiagnostics(handle: DocumentHandle): readonly LspDiagnostic[] {

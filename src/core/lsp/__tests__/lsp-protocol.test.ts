@@ -92,3 +92,29 @@ describe("isJsonRpcError", () => {
     expect(isJsonRpcError(undefined)).toBe(false);
   });
 });
+
+describe("RenameParams", () => {
+  it("satisfaz a estrutura esperada", () => {
+    const params: import("../lsp-protocol").RenameParams = {
+      textDocument: { uri: "file:///test.ts" },
+      position: { line: 0, character: 5 },
+      newName: "novoNome",
+    };
+    expect(params.textDocument.uri).toBe("file:///test.ts");
+    expect(params.position.line).toBe(0);
+    expect(params.position.character).toBe(5);
+    expect(params.newName).toBe("novoNome");
+  });
+});
+
+describe("PrepareRenameParams", () => {
+  it("satisfaz a estrutura esperada", () => {
+    const params: import("../lsp-protocol").PrepareRenameParams = {
+      textDocument: { uri: "file:///test.ts" },
+      position: { line: 1, character: 10 },
+    };
+    expect(params.textDocument.uri).toBe("file:///test.ts");
+    expect(params.position.line).toBe(1);
+    expect(params.position.character).toBe(10);
+  });
+});

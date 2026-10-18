@@ -397,6 +397,13 @@ async function dispatchIpc(
     }
     case "lsp.documentSymbols":
       return core.requestDocumentSymbols(requireHandle(request.args[0], "lsp.documentSymbols"));
+    case "lsp.rename": {
+      const handle = requireHandle(request.args[0], "lsp.rename");
+      const line = requireNumber(request.args[1], "lsp.rename", "line");
+      const col = requireNumber(request.args[2], "lsp.rename", "col");
+      const newName = requireString(request.args[3], "lsp.rename", "newName");
+      return core.requestRename(handle, line, col, newName);
+    }
     default:
       // Inalcançável: `parseIpcRequest` já validou o método; guarda contra regressão.
       throw new IpcProtocolError("unknown-method", "método desconhecido");

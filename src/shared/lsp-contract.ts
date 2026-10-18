@@ -172,3 +172,36 @@ export interface LspDocumentSymbol {
 export interface LspDocumentSymbolHierarchy extends LspDocumentSymbol {
   readonly children?: readonly LspDocumentSymbolHierarchy[];
 }
+
+// ── Code Actions ────────────────────────────────────────────────────────────────────────────────
+
+/** Range LSP simplificado para o contrato IPC. */
+export interface LspRange {
+  readonly start: { readonly line: number; readonly character: number };
+  readonly end: { readonly line: number; readonly character: number };
+}
+
+/** WorkspaceEdit LSP simplificado para o contrato IPC. */
+export interface LspWorkspaceEdit {
+  readonly changes?: Record<string, readonly { readonly range: LspRange; readonly newText: string }[]>;
+}
+
+/** Code Action LSP simplificada para o contrato IPC. */
+export interface LspCodeAction {
+  readonly title: string;
+  readonly kind?: string;
+  readonly diagnostics?: readonly number[];
+  readonly edit?: LspWorkspaceEdit;
+  readonly command?: { readonly command: string; readonly arguments?: readonly unknown[] };
+}
+
+/** Range 0‑based (linha/coluna) — contratos de fronteira do LSP. */
+export interface LspRange {
+  readonly start: { readonly line: number; readonly character: number };
+  readonly end: { readonly line: number; readonly character: number };
+}
+
+/** Resultado de rename (WorkspaceEdit simplificado). */
+export interface LspRenameResult {
+  readonly edits: Record<string, readonly { readonly range: LspRange; readonly newText: string }[]>;
+}

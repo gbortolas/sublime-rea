@@ -12,7 +12,7 @@ import type { LspServerConfig } from "../../shared/lsp-contract";
 import { LspClient } from "./lsp-client";
 import { LspStdioTransport } from "./lsp-transport";
 import { LspError } from "./lsp-protocol";
-import type { CompletionItem, Hover, Diagnostic, InitializeParams, Location, SignatureHelp, DocumentSymbol } from "./lsp-protocol";
+import type { CompletionItem, Hover, Diagnostic, InitializeParams, Location, SignatureHelp, DocumentSymbol, RenameParams, PrepareRenameParams, WorkspaceEdit, Range } from "./lsp-protocol";
 
 export class LspManager implements Disposable {
   private readonly clients = new Map<string, LspClient>();
@@ -239,6 +239,48 @@ export class LspManager implements Disposable {
     if (result === null || result === undefined) return [];
     if (Array.isArray(result)) return result as DocumentSymbol[];
     return [];
+  }
+
+  /**
+   * Solicita rename (WorkspaceEdit) ao servidor adequado.
+   * Retorna null se não houver servidor para a extensão.
+   */
+  async requestRename(
+    uri: string,
+    line: number,
+    col: number,
+    newName: string,
+  ): Promise<WorkspaceEdit | null> {
+    const ext = this.extensionFromUri(uri);
+    const client = this.getClient(ext);
+    if (!client) return null;
+
+    const result = await client.sendRequest("textDocument/rename", {
+      textDocument: { uri },
+      position: { line, character: col },
+      newName,
+    } satisfies RenameParams);
+    return (result as WorkspaceEdit | null) ?? null;
+  }
+
+  /**
+   * Solicita prepareRename ao servidor adequado.
+   * Retorna null se não houver servidor, ou o Range / {range, placeholder} do símbolo.
+   */
+  async prepareRename(
+    uri: string,
+    line: number,
+    col: number,
+  ): Promise<Range | { range: Range; placeholder: string } | null> {
+    const ext = this.extensionFromUri(uri);
+    const client = this.getClient(ext);
+    if (!client) return null;
+
+    const result = await client.sendRequest("textDocument/prepareRename", {
+      textDocument: { uri },
+      position: { line, character: col },
+    } satisfies PrepareRenameParams);
+    return (result as Range | { range: Range; placeholder: string } | null) ?? null;
   }
 
   /** Desconecta todos os servidores LSP. */
