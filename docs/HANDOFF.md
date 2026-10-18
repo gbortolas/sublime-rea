@@ -25,7 +25,9 @@ P2.4b/c ✅ · P2.5 (salvar) ✅ · P3.10/11/12 (dívidas) ✅ · P1#1 (seleçã
 **🐛 LSP TypeScript: initializationOptions.tsserver.path injetado no boot ✅** ·
 **🐛 Plugin host UnhandledPromiseRejection: try/catch no postMessage + .catch() órfão ✅** ·
 **⚡ Tokenização: cache incremental (diff de linhas, trunca só da 1ª alterada) ✅** ·
-**📊 Performance profiling: startup 203ms, render 280 FPS, memória 15.4 MB, zero leaks ✅**
+**📊 Performance profiling: startup 203ms, render 280 FPS, memória 15.4 MB, zero leaks ✅** ·
+**⚡ Input latency: resultado rico do `document.insert` elimina 2/3 IPC roundtrips por tecla ✅** -
+(insert retorna `{revision, text, canUndo, canRedo}` — mata `bridge.text()` e `refreshUndoStatus()`)
 
 **✅ Passo operacional resolvido (2026-10-16).** O `setup.py` foi rodado e o MCP `rea` foi relançado
 **já com `REA_GHIDRA_STARTUP_TIMEOUT_MS=900000`** (confirmado em `/proc/*/environ`) — **não** é mais
@@ -41,13 +43,13 @@ Sem o deadline maior, `open_binary`/`analyze` **via MCP** volta a estourar os 33
 
 **Próximas tarefas (escolha do usuário na próxima sessão):**
 
-> Esta sessão fechou a **revisão geral** (validação com LSP reais, CDP screenshots) + **correções**
-> (TypeScript LSP, UnhandledRejection do plugin host) + **performance profiling** (startup, render,
-> memória, gargalos) + **cache incremental de tokenização**. O backlog de features de linguagem
-> (P4) está completo. A próxima fronteira é:
+> Esta sessão fechou a **input latency — Fase A** (resultado rico do `document.insert`).
+> 3 IPC roundtrips por tecla → **1**: elimina `bridge.text()` e `refreshUndoStatus()`.
+> A próxima fronteira é:
 
-1. **⌨️ Input latency (batching IPC)** — cada tecla faz um round-trip renderer↔main (16.5 ms/key,
-   no limite dos 60 FPS). Batching no renderer + navegação local resolveriam.
+1. **⌨️ Input latency (Fase B — batching de teclas)** — acumular keystrokes entre rAF e enviar
+   como lote único (`document.batchInsert`). Depois da Fase A, o roundtrip restante é o `insert`.
+   Batching múltiplas teclas num só IPC cortaria ainda mais a latência em digitação contínua.
 2. **🔧 P3.5 — Provisionar Rizin** — instalar Rizin (alternativa open-source ao Ghidra) como
    segundo provider de análise pro REA. O REA faz `spawn("rizin")` e não há nenhum instalado.
 3. **📦 Release** — cortar um release do Scribe com as melhorias acumuladas.
@@ -635,6 +637,41 @@ para TypeScript e Python.
 
 - Gates: `typecheck`/`lint`/`build` exit 0 · **519 testes / 50 arquivos** (baseline 449; +70: 4 arquivos de teste LSP com 55 testes, +15 de integração)
 - Os 4 novos test files (`lsp-protocol.test.ts` 16 testes, `lsp-transport.test.ts` 14, `lsp-client.test.ts` 10, `lsp-manager.test.ts` 15) cobrem: guards de tipo JSON-RPC, framing Content-Length (mensagens completas/fracionadas/múltiplas/cabeçalhos extras), connect/send/disconnect, request/response correlação, timeout, notificações, handler com disposable, `onDiagnostics`, shutdown/exit, manager com 2 servidores, roteamento de operações de documento, completion/hover routing
+
+---
+
+## ⚡ Input latency — Fase A: resultado rico do `document.insert` (2026-10-18)
+
+**Diagnóstico (confirmado por análise de fluxo):** cada tecla imprimível fazia **3 IPC
+roundtrips** (insert → text → undoState), cada um lendo o buffer inteiro via JSON serialization.
+Em documentos grandes, isso explica os 16.5 ms/tecla.
+
+**O que foi feito:** o `document.insert` e `document.replaceOne` agora devolvem um resultado
+rico (`DocumentInsertResult`) contendo `{revision, text, canUndo, canRedo}` em vez de só revision:
+
+- **Antes:** `insert` (IPC #1) → `text` (IPC #2) → `undoState` (IPC #3) = **3 roundtrips**
+- **Depois:** `insert` (IPC #1, retorna tudo) = **1 roundtrip** (redução de 66%)
+
+**Alterações pontuais:**
+
+| Camada | Mudança |
+|---|---|
+| `src/shared/ipc-contract.ts` | Novo `DocumentInsertResult` + `DocumentChangedEvent.origin?` |
+| `src/core/editor/editor-core.ts` | `runInsert`/`runReplaceOne` retornam `DocumentInsertResult` com texto+undo |
+| `src/main/index.ts` | Dispatch passa resultado rico (tipo flui) |
+| `src/preload/index.ts` | `insert()`/`replaceOne()` retornam `DocumentInsertResult` |
+| `src/renderer/main.ts` | `insertText`: usa `result.text` → elimina `bridge.text()`; usa `result.canUndo/Redo` → elimina `refreshUndoStatus()`. `onDocumentChanged`: pula revisão já aplicada (`source.revision >= event.revision`). **Todas** as chamadas de `replaceText` (snippet, backspace/delete) também usam resultado rico. |
+
+### Verificação
+
+- Gates: `typecheck`/`lint`/`build` exit 0 · **520 testes / 50 arquivos** (baseline 519)
+- Retoques nos testes que comparavam `insertText` como número (`after.revision`)
+
+### Segunda fase (Fase B)
+
+O próximo passo é **batching de teclas** (`document.batchInsert`): acumular keystrokes entre
+frames de rAF e enviar como lote único, eliminando por completo o roundtrip por caractere em
+digitação contínua.
 
 ---
 

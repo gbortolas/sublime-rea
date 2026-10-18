@@ -26,6 +26,7 @@ import type {
   DocumentChangedEvent,
   DocumentHandle,
   DocumentHighlight,
+  DocumentInsertResult,
   DocumentRegistry,
   DocumentUndoState,
   Edit,
@@ -165,16 +166,21 @@ export interface EditorCore {
 
   openDocument(path: string, signal?: AbortSignal): Promise<DocumentHandle>;
   documentText(handle: DocumentHandle): string;
+  /**
+   * Insere texto na posição `at` do documento, devolvendo resultado rico
+   * (revisão, texto completo, estado de undo/redo) para eliminar roundtrips.
+   */
   insertText(
     handle: DocumentHandle,
     at: number,
     text: string,
     origin?: "plugin" | "user",
-  ): Promise<number>;
+  ): Promise<DocumentInsertResult>;
   /**
-   * Substitui `remove` caracteres a partir de `at` por `insert`. Retorna a nova revisão.
+   * Substitui `remove` caracteres a partir de `at` por `insert`.
+   * Devolve resultado rico (revisão, texto completo, undo/redo).
    */
-  replaceOne(handle: DocumentHandle, at: number, remove: number, insert: string): Promise<number>;
+  replaceOne(handle: DocumentHandle, at: number, remove: number, insert: string): Promise<DocumentInsertResult>;
   revisionOf(handle: DocumentHandle): number;
   saveDocument(handle: DocumentHandle, signal?: AbortSignal): Promise<void>;
   isDirty(handle: DocumentHandle): boolean;
@@ -911,7 +917,7 @@ export function createEditorCore(options: EditorCoreOptions = {}): EditorCore {
     at: number,
     text: string,
     origin: "plugin" | "user",
-  ): Promise<number> {
+  ): Promise<DocumentInsertResult> {
     assertNotDisposed();
     const buffer = resolveBuffer(handle);
     state.pendingHandle = handle;
@@ -982,7 +988,12 @@ export function createEditorCore(options: EditorCoreOptions = {}): EditorCore {
         lspManager.changeDocument(uri, buffer.text(), buffer.revision);
       }
     }
-    return buffer.revision;
+    return {
+      revision: buffer.revision,
+      text: buffer.text(),
+      canUndo: commands.undoStack.undoDepth > 0,
+      canRedo: commands.undoStack.redoDepth > 0,
+    };
   }
 
   /**
@@ -996,7 +1007,7 @@ export function createEditorCore(options: EditorCoreOptions = {}): EditorCore {
     at: number,
     remove: number,
     insert: string,
-  ): Promise<number> {
+  ): Promise<DocumentInsertResult> {
     assertNotDisposed();
     const buffer = resolveBuffer(handle);
     state.pendingHandle = handle;
@@ -1024,7 +1035,12 @@ export function createEditorCore(options: EditorCoreOptions = {}): EditorCore {
         lspManager.changeDocument(uri, buffer.text(), buffer.revision);
       }
     }
-    return buffer.revision;
+    return {
+      revision: buffer.revision,
+      text: buffer.text(),
+      canUndo: commands.undoStack.undoDepth > 0,
+      canRedo: commands.undoStack.redoDepth > 0,
+    };
   }
 
   /**
@@ -1132,7 +1148,7 @@ export function createEditorCore(options: EditorCoreOptions = {}): EditorCore {
       at: number,
       text: string,
       origin: "plugin" | "user" = "user",
-    ): Promise<number> {
+    ): Promise<DocumentInsertResult> {
       return enqueue(() => runInsert(handle, at, text, origin));
     },
 
@@ -1141,7 +1157,7 @@ export function createEditorCore(options: EditorCoreOptions = {}): EditorCore {
       at: number,
       remove: number,
       insert: string,
-    ): Promise<number> {
+    ): Promise<DocumentInsertResult> {
       return enqueue(() => runReplaceOne(handle, at, remove, insert));
     },
 

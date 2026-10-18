@@ -57,10 +57,10 @@ describe("createEditorCore (integração)", () => {
       const after = await core.insertText(handle, 5, "!", "user");
 
       expect(core.documentText(handle)).toBe("hello!\nworld");
-      expect(after).toBe(before + 1);
-      expect(core.revisionOf(handle)).toBe(after);
+      expect(after.revision).toBe(before + 1);
+      expect(core.revisionOf(handle)).toBe(after.revision);
       expect(events).toHaveLength(1);
-      expect(events[0]).toEqual({ handle, revision: after });
+      expect(events[0]).toEqual({ handle, revision: after.revision });
     } finally {
       core.dispose();
     }
@@ -76,7 +76,7 @@ describe("createEditorCore (integração)", () => {
       const r1 = await core.insertText(handle, 0, "X", "plugin");
       const r2 = await core.insertText(handle, 1, "Y", "plugin");
       expect(core.documentText(handle)).toBe("XYabc");
-      expect(r2).toBeGreaterThan(r1);
+      expect(r2.revision).toBeGreaterThan(r1.revision);
     } finally {
       core.dispose();
     }

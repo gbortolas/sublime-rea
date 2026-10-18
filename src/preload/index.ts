@@ -18,6 +18,7 @@ import type {
   DocumentChangedEvent,
   DocumentHandle,
   DocumentHighlight,
+  DocumentInsertResult,
   DocumentUndoState,
   LspCompletionItem,
   LspDiagnostic,
@@ -55,8 +56,8 @@ export interface ScribePreloadApi {
     at: number,
     text: string,
     origin?: InsertOrigin,
-  ): Promise<number>;
-  replaceOne(handle: DocumentHandle, at: number, remove: number, insert: string): Promise<number>;
+  ): Promise<DocumentInsertResult>;
+  replaceOne(handle: DocumentHandle, at: number, remove: number, insert: string): Promise<DocumentInsertResult>;
   undo(handle: DocumentHandle): Promise<DocumentUndoState>;
   redo(handle: DocumentHandle): Promise<DocumentUndoState>;
   undoState(handle: DocumentHandle): Promise<DocumentUndoState>;
@@ -184,9 +185,9 @@ const api: ScribePreloadApi = {
     at: number,
     text: string,
     origin: InsertOrigin = "user",
-  ): Promise<number> => call<number>("document.insert", [handle, at, text, origin]),
-  replaceOne: (handle: DocumentHandle, at: number, remove: number, insert: string): Promise<number> =>
-    call<number>("document.replaceOne", [handle, at, remove, insert]),
+  ): Promise<DocumentInsertResult> => call<DocumentInsertResult>("document.insert", [handle, at, text, origin]),
+  replaceOne: (handle: DocumentHandle, at: number, remove: number, insert: string): Promise<DocumentInsertResult> =>
+    call<DocumentInsertResult>("document.replaceOne", [handle, at, remove, insert]),
   undo: (handle: DocumentHandle): Promise<DocumentUndoState> =>
     call<DocumentUndoState>("editor.undo", [handle]),
   redo: (handle: DocumentHandle): Promise<DocumentUndoState> =>

@@ -26,6 +26,7 @@ import type {
   CommandListResult,
   Disposable,
   DocumentHighlight,
+  DocumentInsertResult,
   EditorTheme,
   HighlightSpan,
   LspCompletionItem,
@@ -425,8 +426,8 @@ interface ScribeBridge {
   openDialog(): Promise<string | null>;
   text(handle: number): Promise<string>;
   revision(handle: number): Promise<number>;
-  insert(handle: number, at: number, text: string, origin?: "plugin" | "user"): Promise<number>;
-  replaceOne(handle: number, at: number, remove: number, insert: string): Promise<number>;
+  insert(handle: number, at: number, text: string, origin?: "plugin" | "user"): Promise<DocumentInsertResult>;
+  replaceOne(handle: number, at: number, remove: number, insert: string): Promise<DocumentInsertResult>;
   undo(handle: number): Promise<UndoStateDto>;
   redo(handle: number): Promise<UndoStateDto>;
   undoState(handle: number): Promise<UndoStateDto>;
@@ -879,6 +880,9 @@ class DocumentController {
 
     const unsubscribe = this.bridge.onDocumentChanged((event) => {
       if (event.handle !== handle) return;
+      // Se já temos o texto desta revisão (aplicado via insertText/replaceText com resultado rico),
+      // não precisa reler — elimina roundtrip redundante do evento.
+      if (source.revision >= event.revision) return;
       void this.bridge.text(handle).then((next) => {
         source.setText(next, event.revision);
         // Atualiza estado dirty da sessão
@@ -1078,7 +1082,7 @@ class DocumentController {
     await this.runHistory("redo");
   }
 
-  /** Digitação mínima: insere no caret e relê o documento. */
+  /** Digitação mínima: insere no caret e aplica resultado rico localmente. */
   async insertText(text: string): Promise<void> {
     const session = this.current;
     if (session === undefined) return;
@@ -1091,18 +1095,19 @@ class DocumentController {
       }
       // Seleção colapsada: insere normalmente
       const insertAt = session.caret;
-      const revision = await session.bridge.insert(session.handle, insertAt, text, "user");
+      const result = await session.bridge.insert(session.handle, insertAt, text, "user");
       session.caret = insertAt + text.length;
       session.selection = SelectionOps.collapsed(session.caret);
       session.selections = SelectionSetOps.singular(session.caret);
       this.renderer.setSelection(session.selection);
       this.renderer.setSelections(session.selections);
-      const next = await session.bridge.text(session.handle);
-      session.source.setText(next, revision);
+      // Aplica o texto do resultado rico — elimina roundtrip bridge.text()
+      session.source.setText(result.text, result.revision);
       this.viewport.setMetrics({ lineCount: session.source.lineCount() });
       updateCaretStatus(session.source, session.caret);
       session.dirty = true;
-      await this.refreshUndoStatus();
+      // Undo status vem no resultado — elimina roundtrip refreshUndoStatus()
+      setUndoStatus(result.canUndo, result.canRedo);
       this.renderer.start();
     } catch (error) {
       console.error("Scribe: falha ao inserir texto no documento", error);
@@ -1111,16 +1116,14 @@ class DocumentController {
 
   /**
    * Substitui um range do documento: remove `remove` caracteres de `at` e insere `insert`.
-   * Atualiza o caret, seleção, viewport e estado dirty — sem refreshUndoStatus (útil para
-   * operações internas como snippet expansion).
+   * Atualiza o caret, seleção, viewport e estado dirty — undo status vem no resultado rico.
    */
   async replaceText(at: number, remove: number, insert: string): Promise<void> {
     const session = this.current;
     if (session === undefined) return;
     try {
-      const revision = await session.bridge.replaceOne(session.handle, at, remove, insert);
-      const next = await session.bridge.text(session.handle);
-      session.source.setText(next, revision);
+      const result = await session.bridge.replaceOne(session.handle, at, remove, insert);
+      session.source.setText(result.text, result.revision);
       session.caret = at + insert.length;
       session.selection = SelectionOps.collapsed(session.caret);
       session.selections = SelectionSetOps.singular(session.caret);
@@ -1129,6 +1132,7 @@ class DocumentController {
       this.viewport.setMetrics({ lineCount: session.source.lineCount() });
       updateCaretStatus(session.source, session.caret);
       session.dirty = true;
+      setUndoStatus(result.canUndo, result.canRedo);
       this.renderer.start();
     } catch (error) {
       console.error("Scribe: falha ao substituir texto no documento", error);
@@ -2715,14 +2719,13 @@ function attachInputListeners(
           void (async () => {
             // Usa replaceOne para deletar o trigger + inserir o template
             const triggerLen = word.length;
-            const revision = await session.bridge.replaceOne(
+            const result = await session.bridge.replaceOne(
               session.handle, wordStart, triggerLen, expansion.text,
             );
-            const next = await session.bridge.text(session.handle);
-            session.source.setText(next, revision);
+            session.source.setText(result.text, result.revision);
             viewport.setMetrics({ lineCount: session.source.lineCount() });
             session.dirty = true;
-            setDirtyStatus(true);
+            setUndoStatus(result.canUndo, result.canRedo);
             // Posiciona cursor no primeiro tabstop (se houver)
             if (expansion.tabStops.length > 0) {
               const first = expansion.tabStops[0]!.start;

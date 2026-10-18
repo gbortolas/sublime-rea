@@ -48,10 +48,25 @@ export type IpcChannel = (typeof IPC_CHANNEL)[keyof typeof IPC_CHANNEL];
  * Evento de mudança de documento, **cross-boundary** (é o shape que viaja no IPC e o que o
  * `EditorCore.onDocumentChanged` publica). Definido aqui para que main, renderer e core usem o
  * mesmo shape sem import cruzado.
+ * `origin` permite que o renderer ignore seus próprios eventos (evita bridge.text() redundante
+ * quando o insertText já aplicou o texto localmente).
  */
 export interface DocumentChangedEvent {
   readonly handle: DocumentHandle;
   readonly revision: number;
+  readonly origin?: "plugin" | "user";
+}
+
+/**
+ * Resultado rico de `document.insert` e `document.replaceOne`.
+ * Antes: cada insert fazia 3 IPC roundtrips (insert → text → undoState).
+ * Agora: 1 roundtrip devolve tudo que o renderer precisa.
+ */
+export interface DocumentInsertResult {
+  readonly revision: number;
+  readonly text: string;
+  readonly canUndo: boolean;
+  readonly canRedo: boolean;
 }
 
 /**
@@ -85,8 +100,8 @@ export interface IpcMethods {
     at: number,
     text: string,
     origin: "plugin" | "user",
-  ): number;
-  "document.replaceOne"(handle: DocumentHandle, at: number, remove: number, insert: string): number;
+  ): DocumentInsertResult;
+  "document.replaceOne"(handle: DocumentHandle, at: number, remove: number, insert: string): DocumentInsertResult;
   "editor.undo"(handle: DocumentHandle): DocumentUndoState;
   "editor.redo"(handle: DocumentHandle): DocumentUndoState;
   "editor.undoState"(handle: DocumentHandle): DocumentUndoState;

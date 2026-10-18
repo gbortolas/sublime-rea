@@ -146,12 +146,12 @@ describe("realce de sintaxe de ponta a ponta (PackageResolver → gramática →
 
       // 2) Edita a linha 1 (insere "X" no offset que cai nela).
       const rev1 = await core.insertText(handle, "const ".length, "X", "user");
-      expect(rev1).toBeGreaterThan(rev0);
+      expect(rev1.revision).toBeGreaterThan(rev0);
 
       // 3) Pede destaque de novo — linhas 0 e 1 agora visíveis (2 linhas).
       cached: {
         const partial = core.highlightDocument(handle, 0, 2);
-        expect(partial.revision).toBe(rev1);
+        expect(partial.revision).toBe(rev1.revision);
 
         // Linha 0 NÃO foi tocada → spans originais preservados (cache incremental).
         expect(partial.lines[0]?.spans.some((s) => s.scope === "keyword.control.demo")).toBe(true);

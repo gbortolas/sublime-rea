@@ -422,6 +422,12 @@ Problemas identificados ao testar o AppImage pela primeira vez:
         docs/analysis/snapshot.json` para reuso de evidências sem re-analisar
       - **OBS**: o Ghidra sempre re-analisa o binário (a análise é ~355s), mas as ferramentas MCP
         (layout, strings, overview) são servidas do cache do snapshot
+- [x] **Input latency — Fase A (resultado rico do `document.insert`)** ✅ **fechado** (2026-10-18).
+      Cada caractere digitado fazia **3 IPC roundtrips** (insert + text + undoState). Agora o
+      `document.insert` devolve `{revision, text, canUndo, canRedo}` de uma vez — **1 roundtrip
+      apenas** (redução de 66%). Elimina as chamadas de `bridge.text()` e `refreshUndoStatus()`
+      após cada tecla, e pula o `document.changed` redundante. **520 testes / 50 arquivos**.
+      **Fase B** (batching de teclas entre rAF) segue como próximo passo.
 - [x] **P3.7 — `~/sr-tools` (symlink)** ✅ **fechado** (2026-10-17): o symlink `~/sr-tools → $REA_TOOLS_DIR`
       agora é criado/manutenido pelo `setup.py` (não só pelo `ghidra-preanalyze.sh`). O Ghidra
       recusa path com `.`, e `$REA_TOOLS_DIR` vive em `~/.local/…` — o symlink contorna isso.
