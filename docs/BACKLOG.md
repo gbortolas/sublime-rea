@@ -468,6 +468,15 @@ Problemas identificados ao testar o AppImage pela primeira vez:
       - Implementado como extensão de `renderDiagnostics()` — mesmo overlay Canvas 2D
         que desenha os squiggly underlines
       - Gates: typecheck/lint/test/build exit 0 · 519 testes / 50 arquivos (mesmo baseline)
-- [ ] **P4#18 — Ir para definição** (`textDocument/definition` via atalho F12 ou Ctrl+click)
-- [ ] **P4#19 — Signature help** (`textDocument/signatureHelp` ao digitar `(`)
+- [x] **P4#18 — Ir para definição** ✅ **fechado** (2026-10-18). Navegação para definição via
+      `textDocument/definition` do LSP:
+      - **F12** ou **Ctrl+click** — navega caret e scrola para a definição (mesmo arquivo)
+      - Cross-file: expansão futura (abrir o arquivo alvo)
+- [x] **P4#19 — Signature help** ✅ **fechado** (2026-10-18). Popup de assinatura de função
+      ao digitar `(`:
+      - Tipos no protocolo (SignatureHelpParams, SignatureInformation, ParameterInformation)
+      - Tipos no contrato compartilhado (LspSignatureHelp, LspSignatureInfo, LspParameterInfo)
+      - `src/renderer/signature-help.ts` — popup DOM com label, documentação, parâmetros
+      - Parâmetro ativo destacado (cor do accent), contador de assinaturas
+      - Trigger automático ao digitar `(` (posicionado no cursor)
 - [ ] **P4#20 — Document symbols** (`textDocument/documentSymbol` na command palette)
