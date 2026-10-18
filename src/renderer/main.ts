@@ -28,6 +28,9 @@ import type {
   DocumentHighlight,
   EditorTheme,
   HighlightSpan,
+  LspCompletionItem,
+  LspDiagnostic,
+  LspHoverResult,
   RenderBackendKind,
   RGBA,
   ReplaceAllResult,
@@ -46,6 +49,10 @@ import {
 import type { FindBarApi, FindBarState } from "./find-bar";
 import { attachCommandPalette } from "./command-palette";
 import type { CommandPaletteApi, CommandPaletteBinding } from "./command-palette";
+import { createCompletionPopup } from "./completions";
+import type { CompletionPopupBinding } from "./completions";
+import { createHoverTooltip } from "./hover-tooltip";
+import type { HoverTooltipBinding } from "./hover-tooltip";
 import { attachMinimap } from "./minimap";
 import type { MinimapBinding } from "./minimap";
 import { findSnippet, parseSnippet } from "./snippets";
@@ -435,6 +442,14 @@ interface ScribeBridge {
   listCommands(): Promise<CommandListResult>;
   executeCommand(commandId: string): Promise<void>;
   onMenuAction(callback: (action: string) => void): () => void;
+  /** Pedido de completação LSP (opcional: preload antigo pode não expor). */
+  completions?(handle: number, line: number, col: number): Promise<LspCompletionItem[]>;
+  /** Pedido de hover LSP (opcional). */
+  hover?(handle: number, line: number, col: number): Promise<LspHoverResult | null>;
+  /** Escuta diagnósticos LSP enviados pelo processo principal (opcional). */
+  onDiagnostics?(
+    callback: (event: { handle: number; diagnostics: LspDiagnostic[] }) => void,
+  ): () => void;
 }
 
 function readBridge(): ScribeBridge | undefined {
@@ -882,6 +897,7 @@ class DocumentController {
     this.sessions.push(session);
     this.activeIndex = this.sessions.length - 1;
     this.renderer.attachSource(source);
+    this.renderer.setActiveHandle(handle);
     this.viewport.setMetrics({ lineCount: source.lineCount() });
     this.viewport.scrollTo(0);
     this.renderer.setSelection(session.selection);
@@ -909,6 +925,7 @@ class DocumentController {
     this.activeIndex = index;
     const session = this.sessions[index]!;
     this.renderer.attachSource(session.source);
+    this.renderer.setActiveHandle(session.handle);
     this.viewport.setMetrics({ lineCount: session.source.lineCount() });
     this.viewport.scrollTo(Math.round(session.savedScrollPx / this.lineHeight()));
     this.renderer.setSelection(session.selection);
@@ -1199,6 +1216,10 @@ class ScribeRenderer {
   private currentSelections: SelectionSet | undefined; // P2#5
   /** Minimap binding ativo (opcional). */
   private minimapBinding: MinimapBinding | undefined;
+  /** Diagnósticos LSP por handle do documento. */
+  private diagnosticsByHandle: Map<number, readonly LspDiagnostic[]> = new Map();
+  /** Handle do documento ativo para desenhar diagnósticos. */
+  private activeHandle: number | undefined;
 
   constructor(
     private readonly canvas: HTMLCanvasElement,
@@ -1407,6 +1428,8 @@ class ScribeRenderer {
       this.pipeline.flush();
     }
     this.pipeline.present(damage);
+    // Diagnósticos LSP: desenha squiggly underlines (apenas canvas2d)
+    this.renderDiagnostics();
     // Atualiza minimap a cada frame
     this.minimapBinding?.update();
   }
@@ -1420,10 +1443,97 @@ class ScribeRenderer {
     this.minimapBinding = binding;
   }
 
+  /** Define os diagnósticos LSP para um handle de documento. */
+  setDiagnostics(handle: number, diagnostics: readonly LspDiagnostic[]): void {
+    this.diagnosticsByHandle.set(handle, diagnostics);
+  }
+
+  /** Define o handle do documento ativo para renderizar diagnósticos. */
+  setActiveHandle(handle: number | undefined): void {
+    this.activeHandle = handle;
+  }
+
   /** Desconecta o minimap. */
   detachMinimap(): void {
     this.minimapBinding?.dispose();
     this.minimapBinding = undefined;
+  }
+
+  /**
+   * Desenha squiggly underlines para diagnósticos LSP do documento ativo.
+   * Usa a API Canvas 2D diretamente sobre o canvas (funciona em cima do que
+   * o pipeline já desenhou).
+   */
+  private renderDiagnostics(): void {
+    if (this.activeHandle === undefined) return;
+    const diags = this.diagnosticsByHandle.get(this.activeHandle);
+    if (diags === undefined || diags.length === 0) return;
+
+    const lineHeight = this.lineHeight();
+    const scrollPx = this.viewport.scrollOffsetPx();
+    const firstLine = Math.floor(scrollPx / lineHeight);
+    const visibleLines = Math.ceil(this.viewportHeight / lineHeight) + 1;
+    const lastLine = firstLine + visibleLines;
+
+    // Filtra diagnósticos visíveis
+    const visible = diags.filter(
+      (d) => d.range.startLine <= lastLine && d.range.endLine >= firstLine,
+    );
+    if (visible.length === 0) return;
+
+    const ctx = this.canvas.getContext("2d");
+    if (ctx === null) return;
+
+    const gutterWidth = (() => {
+      const digits = Math.max(1, Math.floor(Math.log10(Math.max(1, this.source.lineCount()))) + 1);
+      return digits * 9 + 16;
+    })();
+    const paddingLeft = gutterWidth + 8;
+    const paddingTop = 8;
+    const charW = this.style.sizePx * 0.6;
+
+    ctx.save();
+
+    for (const diag of visible) {
+      // Determina cor por severidade
+      let color: string;
+      switch (diag.severity) {
+        case "error":
+          color = "#f14c4c";
+          break;
+        case "warning":
+          color = "#cca700";
+          break;
+        case "info":
+          color = "#3794ff";
+          break;
+        case "hint":
+          color = "#6e6e6e";
+          break;
+      }
+
+      const startY = diag.range.startLine * lineHeight + lineHeight - 2 - scrollPx;
+      const startX = paddingLeft + diag.range.startCol * charW;
+      const endX = paddingLeft + diag.range.endCol * charW;
+      const width = Math.max(4, endX - startX);
+
+      ctx.strokeStyle = color;
+      ctx.lineWidth = 1;
+
+      // Desenha uma linha ondulada (squiggly) simples
+      const squigglyY = startY + paddingTop;
+      ctx.beginPath();
+      const segments = Math.max(1, Math.floor(width / 6));
+      for (let i = 0; i <= segments; i++) {
+        const x = startX + (width / segments) * i;
+        const y = squigglyY + (i % 2 === 0 ? 0 : 3);
+        if (i === 0) ctx.moveTo(x, y);
+        else ctx.lineTo(x, y);
+      }
+      ctx.stroke();
+    }
+
+    ctx.restore();
   }
 }
 
@@ -1638,6 +1748,23 @@ export async function bootRenderer(): Promise<boolean> {
       ? attachFindBar({ bridge, controller, source, viewport, renderer, surface })
       : undefined;
 
+  // ── Apoio ao rastreio de handle ativo para diagnósticos ─────────────────────────────────────
+  const updateActiveHandle = (): void => {
+    const session = controller?.current;
+    renderer.setActiveHandle(session?.handle);
+  };
+
+  // ── Diagnósticos LSP ──────────────────────────────────────────────────────────────────────────
+  if (bridge?.onDiagnostics !== undefined) {
+    void bridge.onDiagnostics((event) => {
+      renderer.setDiagnostics(event.handle, event.diagnostics);
+      if (controller?.current?.handle === event.handle) {
+        renderer.start();
+      }
+    });
+    updateActiveHandle();
+  }
+
   const commandPaletteApi: CommandPaletteApi | undefined =
     bridge !== undefined
       ? {
@@ -1752,7 +1879,41 @@ export async function bootRenderer(): Promise<boolean> {
     });
   }
 
-  attachInputListeners(surface, viewport, renderer, controller, findBar, palette);
+  // ── LSP UI widgets ───────────────────────────────────────────────────────────────────────────
+  /**
+   * Popup de completação vazio (fallback para quando o DOM não tem #completion-popup).
+   */
+  function createNullCompletionPopup(): CompletionPopupBinding {
+    return {
+      isOpen: false,
+      open: () => {},
+      close: () => {},
+      selectNext: () => {},
+      selectPrev: () => {},
+      selected: undefined,
+      dispose: () => {},
+    };
+  }
+  /**
+   * Tooltip vazio (fallback para quando o DOM não tem #hover-tooltip).
+   */
+  function createNullHoverTooltip(): HoverTooltipBinding {
+    return { show: () => {}, hide: () => {}, dispose: () => {} };
+  }
+
+  let completion: CompletionPopupBinding;
+  let hoverTooltip: HoverTooltipBinding;
+  try {
+    completion = createCompletionPopup();
+    hoverTooltip = createHoverTooltip();
+  } catch (error) {
+    console.warn("Scribe: widgets LSP indisponíveis (DOM ausente)", error);
+    // Fallback: stubs que não fazem nada
+    completion = createNullCompletionPopup();
+    hoverTooltip = createNullHoverTooltip();
+  }
+
+  attachInputListeners(surface, viewport, renderer, controller, findBar, palette, bridge, completion, hoverTooltip);
 
   // Minimap (P2#9): as cores vêm do tema ativo — sem isso a faixa fica preta no tema claro.
   const minimap = attachMinimap({
@@ -2059,6 +2220,9 @@ function attachInputListeners(
   controller: DocumentController | undefined,
   findBar: FindBarBinding | undefined,
   palette: CommandPaletteBinding | undefined,
+  bridge: ScribeBridge | undefined,
+  completion: CompletionPopupBinding,
+  hoverTooltip: HoverTooltipBinding,
 ): void {
   const lineHeight = Math.ceil(TEXT_STYLE.sizePx * 1.4);
   const currentLine = (): number => Math.floor(viewport.scrollOffsetPx() / lineHeight);
@@ -2179,8 +2343,76 @@ function attachInputListeners(
     mouseDragAnchor = undefined;
   });
 
+  // ── Hover LSP (Ctrl+hover) ──────────────────────────────────────────────────────────────────
+  let hoverTimer: ReturnType<typeof setTimeout> | undefined;
+  surface.addEventListener("mousemove", (event: MouseEvent) => {
+    // Só dispara hover quando Ctrl/Meta está pressionado
+    if (!event.ctrlKey && !event.metaKey) {
+      hoverTooltip.hide();
+      clearTimeout(hoverTimer);
+      return;
+    }
+    const session = controller?.current;
+    if (session === undefined || bridge?.hover === undefined) {
+      hoverTooltip.hide();
+      return;
+    }
+    clearTimeout(hoverTimer);
+    hoverTimer = setTimeout(() => {
+      const rect = surface.getBoundingClientRect();
+      const x = event.clientX - rect.left;
+      const y = event.clientY - rect.top;
+      const line = Math.floor((y + viewport.scrollOffsetPx() - TEXT_STYLE.sizePx * 0.7) / lineHeight);
+      if (line < 0 || line >= session.source.lineCount()) return;
+      const text = session.source.line(line);
+      const approxCharW = TEXT_STYLE.sizePx * 0.6;
+      let col = Math.round((x - 12) / approxCharW);
+      col = Math.max(0, Math.min(col, text.length));
+      void (async () => {
+        try {
+          const result = await bridge.hover!(session.handle, line, col);
+          if (result === null || result.contents.length === 0) return;
+          hoverTooltip.show(result.contents, event.clientX, event.clientY);
+        } catch {
+          // Silencia erro de hover
+        }
+      })();
+    }, 300); // debounce de 300ms
+  });
+
   surface.addEventListener("keydown", (event: KeyboardEvent) => {
     const primary = event.ctrlKey || event.metaKey;
+
+    // Ctrl+Space: aciona completação LSP
+    if (primary && !event.shiftKey && !event.altKey && event.key === " ") {
+      event.preventDefault();
+      const session = controller?.current;
+      if (session === undefined || bridge?.completions === undefined) return;
+      const pos = session.source.positionAt(session.caret);
+      void (async () => {
+        try {
+          const items = await bridge.completions!(
+            session.handle, pos.line, pos.column,
+          );
+          if (items.length === 0) return;
+          // Posiciona o popup próximo ao cursor
+          const lineHeightVal = Math.ceil(TEXT_STYLE.sizePx * 1.4);
+          const charW = TEXT_STYLE.sizePx * 0.6;
+          const scrollPx = viewport.scrollOffsetPx();
+          const gutterDigits = Math.max(1, Math.floor(Math.log10(Math.max(1, session.source.lineCount()))) + 1);
+          const gutterW = gutterDigits * 9 + 16;
+          const x = (gutterW + 8) + pos.column * charW;
+          const y = (pos.line * lineHeightVal - scrollPx + lineHeightVal) + 8;
+          completion.open(items, (item) => {
+            const text = item.insertText ?? item.label;
+            void controller?.replaceText(session.caret, 0, text);
+          }, x, y);
+        } catch (error) {
+          console.warn("Scribe: falha ao buscar completação", error);
+        }
+      })();
+      return;
+    }
 
     // Atalhos de documento: Ctrl/Cmd+O (abrir), Ctrl/Cmd+Z (undo), Ctrl/Cmd+Shift+Z / Ctrl/Cmd+Y
     // (redo) e Esc durante "abrindo…" (cancela a abertura em curso).

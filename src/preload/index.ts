@@ -19,6 +19,9 @@ import type {
   DocumentHandle,
   DocumentHighlight,
   DocumentUndoState,
+  LspCompletionItem,
+  LspDiagnostic,
+  LspHoverResult,
   MainThreadBusy,
   ReplaceAllResult,
   SearchDocumentResult,
@@ -76,6 +79,14 @@ export interface ScribePreloadApi {
   executeCommand(commandId: string): Promise<void>;
   /** Escuta ações de menu enviadas pelo processo principal (menu nativo). */
   onMenuAction(callback: (action: string) => void): () => void;
+  /** Pedido de completação LSP (main → servidor → resposta). */
+  completions(handle: DocumentHandle, line: number, col: number): Promise<LspCompletionItem[]>;
+  /** Pedido de hover LSP. */
+  hover(handle: DocumentHandle, line: number, col: number): Promise<LspHoverResult | null>;
+  /** Escuta diagnósticos LSP enviados pelo processo principal. */
+  onDiagnostics(
+    callback: (event: { handle: DocumentHandle; diagnostics: LspDiagnostic[] }) => void,
+  ): () => void;
 }
 
 // Duplicado de propósito: o preload não importa `src/shared` em runtime (sandbox).
@@ -216,6 +227,27 @@ const api: ScribePreloadApi = {
     const listener = (_event: unknown, action: string): void => { callback(action); };
     ipcRenderer.on(CHANNEL_MENU_ACTION, listener);
     return () => { ipcRenderer.removeListener(CHANNEL_MENU_ACTION, listener); };
+  },
+  completions: (handle: DocumentHandle, line: number, col: number): Promise<LspCompletionItem[]> =>
+    call<LspCompletionItem[]>("lsp.completions", [handle, line, col]),
+  hover: (handle: DocumentHandle, line: number, col: number): Promise<LspHoverResult | null> =>
+    call<LspHoverResult | null>("lsp.hover", [handle, line, col]),
+  onDiagnostics: (
+    callback: (event: { handle: DocumentHandle; diagnostics: LspDiagnostic[] }) => void,
+  ): (() => void) => {
+    const listener = (_event: unknown, raw: unknown): void => {
+      if (typeof raw !== "object" || raw === null) return;
+      const envelope = raw as EventEnvelope;
+      if (envelope.event !== "lsp.diagnostics") return;
+      const argument = envelope.args[0];
+      if (typeof argument === "object" && argument !== null) {
+        callback(argument as { handle: DocumentHandle; diagnostics: LspDiagnostic[] });
+      }
+    };
+    ipcRenderer.on(CHANNEL_EVENT, listener);
+    return () => {
+      ipcRenderer.removeListener(CHANNEL_EVENT, listener);
+    };
   },
 };
 

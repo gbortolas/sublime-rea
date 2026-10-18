@@ -1,8 +1,8 @@
 # HANDOFF — sublime-rea
 
-> **Documento de handoff entre sessões** (leia antes de retomar). Atualizado em **2026-10-17**.
-> Status: 🎨 **Repaginação do design (VS Code-like) ✅** + **3 bugs de render/realce corrigidos ✅** —
-> próxima: P1 — Performance dos menus, P3.6 snapshot de análise, ou nova feature do roadmap.
+> **Documento de handoff entre sessões** (leia antes de retomar). Atualizado em **2026-10-18**.
+> Status: 🎨 **Repaginação do design (VS Code-like) ✅** + **3 bugs de render/realce corrigidos ✅** +
+> **P4#16 — LSP Client (completo) ✅** — próxima: P3.6 snapshot de análise, ou revisão geral.
 
 ---
 
@@ -20,7 +20,7 @@ P2.4b/c ✅ · P2.5 (salvar) ✅ · P3.10/11/12 (dívidas) ✅ · P1#1 (seleçã
 **P2#7 (drag & drop) ✅ · Infra (GitHub repo + CI/Release) ✅ · P2#6 (abas) ✅ · P2#8 (temas) ✅** ·
 **P3#12 (go to line) ✅ · P3#13 (auto-pair) ✅ · P3#14 (bracket matching) ✅ · PyCharm ✅** ·
 **🐛 UX: welcome screen ✅ · menu bar ✅ · branding/ícone ✅ · dica abrir arquivo ✅** ·
-**P3#11 Command Palette ✅** · **P2#9 Minimap ✅** · **P3#15 Indentation Guides ✅** · **cursor line highlight ✅** · **smooth mouse wheel ✅** · **P4#18 Snippets ✅** · **🎨 repaginação do design (casca VS Code-like + tema como fonte única + sintaxe clara) ✅** · **🐛 3 bugs de render/realce (tint do `canvas2d`, revisão do realce, raiz de pacote) ✅** · **🐛 P1 — Performance dos menus (Cut/Copy/Paste implementados, menu simplificado) ✅** · **P3#10 — Plugin host (entry point + wiring + bridging) ✅** · **P3#15 — Soft wrap (wrap de linha visual, quebra oportunista) ✅**
+**P3#11 Command Palette ✅** · **P2#9 Minimap ✅** · **P3#15 Indentation Guides ✅** · **cursor line highlight ✅** · **smooth mouse wheel ✅** · **P4#18 Snippets ✅** · **🎨 repaginação do design (casca VS Code-like + tema como fonte única + sintaxe clara) ✅** · **🐛 3 bugs de render/realce (tint do `canvas2d`, revisão do realce, raiz de pacote) ✅** · **🐛 P1 — Performance dos menus (Cut/Copy/Paste implementados, menu simplificado) ✅** · **P3#10 — Plugin host (entry point + wiring + bridging) ✅** · **P3#15 — Soft wrap (wrap de linha visual, quebra oportunista) ✅** · **P4#16 — LSP Client (servidores builtin: TypeScript, Python; diagnóstico, completação, hover) ✅**
 
 **✅ Passo operacional resolvido (2026-10-16).** O `setup.py` foi rodado e o MCP `rea` foi relançado
 **já com `REA_GHIDRA_STARTUP_TIMEOUT_MS=900000`** (confirmado em `/proc/*/environ`) — **não** é mais
@@ -34,7 +34,7 @@ python3 setup/setup.py        # idempotente: reescreve setup/env.sh + environmen
 Sem o deadline maior, `open_binary`/`analyze` **via MCP** volta a estourar os 330 s (a análise leva
 ~355 s).
 
-**Próxima tarefa recomendada:** **Revisão geral** ou **P4#16 — LSP client** (conectar a servidores LSP tipo pyright/tsserver). Com P3#10 (plugin host) e P3#15 (soft wrap) fechados, todos os P1-P3 do roadmap estão entregues. Alternativa: **P3.6 — Snapshot de análise do REA** (baixa prioridade).
+**Próxima tarefa recomendada:** **P3.6 — Snapshot de análise do REA** (baixa prioridade) ou **revisão geral**. Com P4#16 (LSP client) entregue, o núcleo de linguagem está completo. Alternativa: iniciar **P4#?? — Diagnósticos visuais no gutter** (ícones de erro/warning) ou **finalizar o roadmap de P4**. **Nota**: a gramática de brinde `.demo` é a única suportada — servidores LSP reais (pyright, typescript-language-server) são detectados automaticamente se estiverem no `$PATH`.
 
 > ✅ **Pegadinha resolvida (2026-10-16, P3.9):** o `setup.py` agora **detecta** um JDK ≥ 21
 > compatível (`JAVA_HOME`, PATH, sdkman, `/usr/lib/jvm`) e escreve um **`export JAVA_HOME=…` ativo**
@@ -485,6 +485,80 @@ moderno"* → direção escolhida por ele: **moderno tipo VS Code**. Escopo acei
 - Paste: lê da clipboard e insere na posição do caret (ou substitui a seleção)
 
 **Verificação:** typecheck/test/build exit 0 · **449 testes / 44 arquivos** · commit `5392724`
+
+---
+
+## 🧩 P4#16 — LSP Client (2026-10-18)
+
+**Pedido do usuário:** continuar os trabalhos no Scribe — a próxima fronteira natural era conectar
+a servidores LSP (Language Server Protocol) para oferecer **diagnósticos, completação e hover**
+para TypeScript e Python.
+
+### O que foi entregue
+
+**Módulo `src/core/lsp/`** (novo, 4 arquivos + 4 testes):
+
+| Arquivo | Papel |
+|---|---|
+| `lsp-protocol.ts` | Tipos JSON-RPC 2.0 + LSP (subconjunto mínimo: Position, Range, Diagnostic, CompletionItem, Hover, InitializeParams, ServerCapabilities, guards de tipo) |
+| `lsp-transport.ts` | Transporte stdio com framing `Content-Length`, `MessageBuffer` (lida com chunks fracionados, múltiplas mensagens, cabeçalhos extras), ciclo de vida do processo (SIGTERM → SIGKILL 3s) |
+| `lsp-client.ts` | Cliente JSON-RPC: `connect` (initialize/initialized handshake), `sendRequest` (correlação id→deferred com timeout de 15s), `sendNotification`, `onNotification` handler, `onDiagnostics` evento canônico, `disconnect` (shutdown+exit) |
+| `lsp-manager.ts` | Gerente de ciclo de vida: `startServer(config)` cria transporte+cliente+handshake, roteia operações de documento (open/change/close) e pedidos de linguagem (completion/hover) pelo servidor adequado por extensão |
+
+**Contratos compartilhados** (`src/shared/lsp-contract.ts` novo):
+
+- `LspServerConfig` — comando, args, env, languageId, languages (extensões)
+- `BUILTIN_LSP_SERVERS` — **TypeScript** (`typescript-language-server --stdio`) e **Python** (`pyright-langserver --stdio`)
+- `LspDiagnostic` / `LspCompletionItem` / `LspHoverResult` — resultados simplificados que cruzam o IPC
+- `LspConnectionState` / `LspSettings` — estado de conexão e configuração futura
+
+**Fiação no editor** (`src/core/editor/editor-core.ts`):
+
+- `attachLsp(manager)` — associa o LspManager e reabre todos os documentos já abertos
+- `requestCompletions` / `requestHover` — delega ao manager com conversão de tipos internos → contratos
+- `documentDiagnostics` — cache de diagnósticos por URI
+- `findHandleByUri` — resolve URI `file://` para handle do documento
+- Notificações LSP automáticas: insert → `didChange`, replaceText → `didChange`, undo/redo → `didChange`, openDocument → `didOpen`, replaceAll → `didChange`
+
+**Main process** (`src/main/index.ts`):
+
+- Cria `LspManager` com `BUILTIN_LSP_SERVERS`
+- Inicia cada servidor em paralelo com `Promise.allSettled` + try/catch (servidor ausente = warn, não crash)
+- Broadcast de diagnósticos: `onDiagnostics` → resolve handle → `IpcEventEnvelope<"lsp.diagnostics">`
+- Associa o manager ao core **após** todos os servidores tentarem iniciar
+
+**Preload** (`src/preload/index.ts`):
+
+- `completions(handle, line, col)` → `lsp.completions`
+- `hover(handle, line, col)` → `lsp.hover`
+- `onDiagnostics(callback)` → escuta `lsp.diagnostics` event
+
+**Renderer** (`src/renderer/`):
+
+- `completions.ts` (novo) — Popup DOM com ícones por kind (method/função/variável/propriedade/keyword/snippet/classe/módulo/interface/enum), navegação setas/Enter/Tab/Esc, fallback silencioso
+- `hover-tooltip.ts` (novo) — Tooltip com formatação markdown (code/bold/italic), posicionamento adaptativo, auto-hide 8s, fallback silencioso
+- `main.ts` — Squiggly underlines por severidade (error=red, warning=amber, info=blue, hint=gray); **Ctrl+Space** → popup de completação posicionado no cursor; **Ctrl+hover** → tooltip de hover com debounce de 300ms; diagnóstico ativo por handle; fallback de widgets LSP se DOM ausente
+- `index.html` — Elementos `#completion-popup` + `#hover-tooltip`
+- `index.css` — Estilos completos (borda, sombra, cores do tema via `--s-*`, radius, spacing)
+
+**IPC contract** (`src/shared/ipc-contract.ts`):
+
+- Métodos novos: `lsp.completions`, `lsp.hover`, `lsp.diagnostics`
+- Evento novo: `lsp.diagnostics`
+
+### Limitações declaradas
+
+- Servidores LSP precisam estar no `$PATH` — se ausentes, são ignorados com warn
+- Completação envia o **texto inteiro** do documento (`full document sync`), não incremental
+- O squiggly underline é um zig-zag simples (não uma ondulação real tipo wavy)
+- Hover tooltip não tem suporte a links clicáveis nem syntax highlighting no markdown
+- Diagnósticos não aparecem no gutter (só squiggly no texto)
+- Não há suporte a `textDocument/signatureHelp`, `textDocument/documentSymbol`, `textDocument/references`, `textDocument/definition`, `textDocument/codeAction` — só completion e hover
+
+### Verificação
+
+- Gates: `typecheck`/`lint`/`build` exit 0 · **519 testes / 50 arquivos** (baseline 449; +70: 4 arquivos de teste LSP com 55 testes, +15 de integração)
+- Os 4 novos test files (`lsp-protocol.test.ts` 16 testes, `lsp-transport.test.ts` 14, `lsp-client.test.ts` 10, `lsp-manager.test.ts` 15) cobrem: guards de tipo JSON-RPC, framing Content-Length (mensagens completas/fracionadas/múltiplas/cabeçalhos extras), connect/send/disconnect, request/response correlação, timeout, notificações, handler com disposable, `onDiagnostics`, shutdown/exit, manager com 2 servidores, roteamento de operações de documento, completion/hover routing
 
 ---
 

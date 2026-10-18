@@ -796,6 +796,149 @@ body {
   font-size: var(--s-fs-xs);
 }
 
+/* ══ Completion popup ════════════════════════════════════════════════════════ */
+
+#completion-popup {
+  pointer-events: auto;
+  position: absolute;
+  z-index: 6;
+  min-width: 280px;
+  max-width: 480px;
+  max-height: 320px;
+  border: 1px solid var(--s-border);
+  border-radius: var(--s-radius-lg);
+  background: var(--s-sidebar);
+  box-shadow: var(--s-shadow);
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+}
+
+#completion-popup[hidden] {
+  display: none;
+}
+
+.completion-list {
+  flex: 1;
+  overflow-y: auto;
+  padding: var(--s-space-1);
+}
+
+.completion-item {
+  display: flex;
+  align-items: center;
+  gap: var(--s-space-2);
+  padding: 5px var(--s-space-2);
+  border-radius: var(--s-radius);
+  font-size: var(--s-fs-sm);
+  cursor: pointer;
+  user-select: none;
+}
+
+.completion-item:hover,
+.completion-item.selected {
+  background: var(--s-selected);
+}
+
+.completion-icon {
+  flex: none;
+  display: grid;
+  place-items: center;
+  width: 18px;
+  height: 18px;
+  color: var(--s-accent);
+  opacity: 0.8;
+}
+
+.completion-label {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--s-fg);
+  font-family: var(--s-font-mono);
+  font-size: var(--s-fs-sm);
+}
+
+.completion-detail {
+  flex: none;
+  margin-left: auto;
+  padding-left: var(--s-space-2);
+  color: var(--s-muted);
+  font-size: var(--s-fs-xs);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  max-width: 140px;
+}
+
+.completion-kind {
+  flex: none;
+  order: 2;
+  margin-left: var(--s-space-1);
+  padding: 1px 5px;
+  border-radius: var(--s-radius-sm);
+  background: var(--s-hover);
+  color: var(--s-accent);
+  font-size: var(--s-fs-xs);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  white-space: nowrap;
+}
+
+/* ══ Hover tooltip ═══════════════════════════════════════════════════════════ */
+
+#hover-tooltip {
+  pointer-events: none;
+  position: fixed;
+  z-index: 7;
+  max-width: 400px;
+  max-height: 300px;
+  padding: var(--s-space-2) var(--s-space-3);
+  border: 1px solid var(--s-border);
+  border-radius: var(--s-radius);
+  background: var(--s-sidebar);
+  box-shadow: var(--s-shadow);
+  overflow-y: auto;
+  font-size: var(--s-fs-sm);
+  line-height: 1.5;
+  color: var(--s-fg);
+}
+
+#hover-tooltip[hidden] {
+  display: none;
+}
+
+.hover-body {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.hover-content-line {
+  margin: 0;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.hover-content-line code {
+  padding: 1px 4px;
+  border-radius: var(--s-radius-sm);
+  background: var(--s-hover);
+  font-family: var(--s-font-mono);
+  font-size: var(--s-fs-xs);
+  color: var(--s-accent);
+}
+
+.hover-content-line strong {
+  font-weight: 600;
+}
+
+.hover-content-line em {
+  font-style: italic;
+}
+
 /* ══ Status bar ════════════════════════════════════════════════════════════ */
 
 #status-bar {

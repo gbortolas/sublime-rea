@@ -165,6 +165,14 @@
                 <input id="palette-input" type="text" placeholder="Digite um comando…" autocomplete="off" spellcheck="false" />
                 <div id="palette-results"></div>
               </div>
+              <!-- Completion popup: lista de sugestões LSP (Ctrl+Space). -->
+              <div id="completion-popup" role="listbox" aria-label="Sugestões de completação" hidden>
+                <div class="completion-list" role="presentation"></div>
+              </div>
+              <!-- Hover tooltip: informações de hover LSP (Ctrl+hover). -->
+              <div id="hover-tooltip" role="tooltip" aria-label="Informação do símbolo" hidden>
+                <div class="hover-body"></div>
+              </div>
             </div>
           </div>
         </div>

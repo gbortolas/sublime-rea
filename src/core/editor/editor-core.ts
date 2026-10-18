@@ -79,6 +79,9 @@ import {
   type MethodHandlers,
 } from "../extension";
 import type { ExtensionHost } from "../../shared";
+import type { LspDiagnostic, LspCompletionItem, LspHoverResult } from "../../shared";
+import { LspManager } from "../lsp";
+import type { Diagnostic, CompletionItem, Hover } from "../lsp";
 
 /** Lane `index` (cold-start) — teto por propriedade (DEC-CON-6/9). */
 export const PROPERTY_INDEX_WORKERS = "index.indexWorkers";
@@ -213,6 +216,35 @@ export interface EditorCore {
   listCommands(): readonly Command[];
   /** Executa um comando pelo id (lança se desconhecido). */
   executeCommand(id: string): Promise<void>;
+  /** Gerente LSP associado (null se não houver). */
+  readonly lsp: LspManager | null;
+  /** Associa um LspManager ao núcleo. */
+  attachLsp(manager: LspManager): void;
+  /**
+   * Solicita completação LSP para a posição do documento.
+   * Retorna lista vazia se não houver servidor para a extensão.
+   */
+  requestCompletions(
+    handle: DocumentHandle,
+    line: number,
+    col: number,
+  ): Promise<readonly LspCompletionItem[]>;
+  /**
+   * Solicita hover LSP para a posição do documento.
+   * Retorna null se não houver servidor para a extensão.
+   */
+  requestHover(
+    handle: DocumentHandle,
+    line: number,
+    col: number,
+  ): Promise<LspHoverResult | null>;
+  /**
+   * Diagnósticos LSP atuais do documento (do último `publishDiagnostics`).
+   * Vazio se não houver servidor ou nenhum diagnóstico.
+   */
+  documentDiagnostics(handle: DocumentHandle): readonly LspDiagnostic[];
+  /** Localiza o handle de um documento a partir de sua URI (file:// ou path absoluto). */
+  findHandleByUri(uri: string): DocumentHandle | undefined;
   dispose(): void;
   /** Inicia o processo de host de plugins (`utilityProcess.fork`). Cria o `ExtensionHost` sob demanda. */
   startPluginHost(
@@ -276,6 +308,75 @@ async function loadGrammars(
       console.error(`Scribe: gramática ignorada (${entry.uri})`, error);
     }
   }
+}
+
+// ── Helpers LSP ──────────────────────────────────────────────────────────────────────────────
+
+function toFileUri(path: string): string {
+  return `file://${path.startsWith("/") ? "" : "/"}${path}`;
+}
+
+function convertSeverity(severity: number | undefined): "error" | "warning" | "info" | "hint" {
+  switch (severity) {
+    case 1: return "error";
+    case 2: return "warning";
+    case 3: return "info";
+    case 4: return "hint";
+    default: return "info";
+  }
+}
+
+function convertCompletionItem(item: CompletionItem): LspCompletionItem {
+  const result: Record<string, unknown> = { label: item.label };
+  if (item.kind !== undefined) result.kind = String(item.kind);
+  if (item.detail !== undefined) result.detail = item.detail;
+  if (item.insertText !== undefined) result.insertText = item.insertText;
+  return result as unknown as LspCompletionItem;
+}
+
+function convertHover(hover: Hover): LspHoverResult {
+  const contents: string[] = [];
+  const raw = hover.contents;
+  if (typeof raw === "string") {
+    contents.push(raw);
+  } else if ("language" in raw && "value" in raw) {
+    contents.push((raw as { language: string; value: string }).value);
+  } else if ("kind" in raw && "value" in raw) {
+    contents.push((raw as { kind: string; value: string }).value);
+  } else if (Array.isArray(raw)) {
+    for (const item of raw) {
+      if (typeof item === "string") contents.push(item);
+      else if ("language" in item && "value" in item) contents.push((item as { language: string; value: string }).value);
+      else contents.push(String(item));
+    }
+  }
+  return {
+    contents,
+    ...(hover.range !== undefined
+      ? {
+          range: {
+            startLine: hover.range.start.line,
+            startCol: hover.range.start.character,
+            endLine: hover.range.end.line,
+            endCol: hover.range.end.character,
+          } as const,
+        }
+      : {}),
+  } as LspHoverResult;
+}
+
+function convertDiagnostic(d: Diagnostic): LspDiagnostic {
+  return {
+    range: {
+      startLine: d.range.start.line,
+      startCol: d.range.start.character,
+      endLine: d.range.end.line,
+      endCol: d.range.end.character,
+    },
+    severity: convertSeverity(d.severity),
+    message: d.message,
+    source: d.source ?? "LSP",
+  };
 }
 
 interface InsertArgs {
@@ -420,6 +521,12 @@ export function createEditorCore(options: EditorCoreOptions = {}): EditorCore {
   const subscriptions = new Map<DocumentHandle, Disposable>();
   /** Lote em andamento cujas notificações estão sendo agrupadas (ver `coalesceDocumentChanges`). */
   let coalescing: { readonly handle: DocumentHandle; changed: boolean } | undefined;
+
+  // ── LSP ────────────────────────────────────────────────────────────────────────────────────
+  let lspManager: LspManager | null = null;
+  const diagnosticsCache = new Map<string, readonly Diagnostic[]>();
+  const uriToHandle = new Map<string, DocumentHandle>();
+  let lspDisposable: Disposable | undefined;
 
   function resolveTarget(): UndoTarget | undefined {
     const handle = state.pendingHandle ?? state.activeHandle;
@@ -721,6 +828,14 @@ export function createEditorCore(options: EditorCoreOptions = {}): EditorCore {
     }
     // BLOCKER-1 (P2.5 review): toda edição de usuário suja o documento.
     registry.setDirty(handle, true);
+    // Notifica LSP sobre a mudança
+    if (lspManager !== null) {
+      const state = registry.get(handle);
+      if (state !== undefined) {
+        const uri = toFileUri(state.uri);
+        lspManager.changeDocument(uri, buffer.text(), buffer.revision);
+      }
+    }
     return buffer.revision;
   }
 
@@ -755,6 +870,14 @@ export function createEditorCore(options: EditorCoreOptions = {}): EditorCore {
     state.selection = SelectionOps.collapsed(state.caret);
     state.selections = SelectionSetOps.singular(state.caret);
     registry.setDirty(handle, true);
+    // Notifica LSP sobre a substituição
+    if (lspManager !== null) {
+      const st = registry.get(handle);
+      if (st !== undefined) {
+        const uri = toFileUri(st.uri);
+        lspManager.changeDocument(uri, buffer.text(), buffer.revision);
+      }
+    }
     return buffer.revision;
   }
 
@@ -800,6 +923,14 @@ export function createEditorCore(options: EditorCoreOptions = {}): EditorCore {
       const buf = resolveBuffer(handle);
       const savedRev = registry.get(handle)?.savedRevision ?? 0;
       registry.setDirty(handle, buf.revision !== savedRev);
+      // Notifica LSP sobre a mudança de undo/redo
+      if (lspManager !== null) {
+        const st = registry.get(handle);
+        if (st !== undefined) {
+          const uri = toFileUri(st.uri);
+          lspManager.changeDocument(uri, buf.text(), buf.revision);
+        }
+      }
       return Promise.resolve(undoStateOf(handle));
     });
   }
@@ -830,6 +961,19 @@ export function createEditorCore(options: EditorCoreOptions = {}): EditorCore {
       documentExtensions.set(handle, extensionOfPath(path));
       ensureSubscribed(handle);
       state.activeHandle = handle;
+
+      // Notifica LSP sobre a abertura do documento
+      if (lspManager !== null) {
+        const uri = toFileUri(path);
+        uriToHandle.set(path, handle);
+        const buffer = registry.resolve(handle);
+        if (buffer !== undefined) {
+          const ext = extensionOfPath(path);
+          const languageId = ext.length > 0 ? ext : "plaintext";
+          lspManager.openDocument(uri, languageId, buffer.text(), buffer.revision);
+        }
+      }
+
       return handle;
     },
 
@@ -958,6 +1102,14 @@ export function createEditorCore(options: EditorCoreOptions = {}): EditorCore {
           state.selection = SelectionOps.collapsed(state.caret);
           // Blocker-1 (P2.5 review): replaceAll também suja o documento.
           registry.setDirty(handle, true);
+          // Notifica LSP após todas as substituições
+          if (lspManager !== null) {
+            const st = registry.get(handle);
+            if (st !== undefined) {
+              const uri = toFileUri(st.uri);
+              lspManager.changeDocument(uri, buffer.text(), buffer.revision);
+            }
+          }
           return { replaced: edits.length, revision: buffer.revision };
         }),
       );
@@ -1081,9 +1233,96 @@ export function createEditorCore(options: EditorCoreOptions = {}): EditorCore {
       }
     },
 
+    get lsp(): LspManager | null {
+      return lspManager;
+    },
+
+    attachLsp(manager: LspManager): void {
+      if (lspDisposable !== undefined) {
+        lspDisposable.dispose();
+        lspDisposable = undefined;
+      }
+      lspManager = manager;
+      diagnosticsCache.clear();
+      uriToHandle.clear();
+      lspDisposable = manager.onDiagnostics((params) => {
+        diagnosticsCache.set(params.uri, [...params.diagnostics]);
+        // Broadcast via IPC acontece no main, não aqui.
+      });
+
+      // Reabre todos os documentos já abertos no novo manager
+      for (const handle of opened) {
+        const path = registry.get(handle)?.uri;
+        if (path === undefined) continue;
+        const uri = toFileUri(path);
+        uriToHandle.set(path, handle);
+        const buffer = registry.resolve(handle);
+        if (buffer === undefined) continue;
+        const ext = documentExtensions.get(handle) ?? "";
+        const languageId = ext.length > 0 ? ext : "plaintext";
+        manager.openDocument(uri, languageId, buffer.text(), buffer.revision);
+      }
+    },
+
+    async requestCompletions(
+      handle: DocumentHandle,
+      line: number,
+      col: number,
+    ): Promise<readonly LspCompletionItem[]> {
+      if (lspManager === null) return [];
+      const path = registry.get(handle)?.uri;
+      if (path === undefined) return [];
+      const uri = toFileUri(path);
+      const items = await lspManager.requestCompletion(uri, line, col);
+      return items.map(convertCompletionItem);
+    },
+
+    async requestHover(
+      handle: DocumentHandle,
+      line: number,
+      col: number,
+    ): Promise<LspHoverResult | null> {
+      if (lspManager === null) return null;
+      const path = registry.get(handle)?.uri;
+      if (path === undefined) return null;
+      const uri = toFileUri(path);
+      const hover = await lspManager.requestHover(uri, line, col);
+      if (hover === null) return null;
+      return convertHover(hover);
+    },
+
+    documentDiagnostics(handle: DocumentHandle): readonly LspDiagnostic[] {
+      const path = registry.get(handle)?.uri;
+      if (path === undefined || lspManager === null) return [];
+      const uri = toFileUri(path);
+      const diagnostics = diagnosticsCache.get(uri);
+      if (diagnostics === undefined) return [];
+      return diagnostics.map(convertDiagnostic);
+    },
+
+    findHandleByUri(uri: string): DocumentHandle | undefined {
+      const path = uri.startsWith("file://") ? decodeURIComponent(uri.slice(7)) : uri;
+      // Remove trailing null byte if present (LSP servers sometimes append it)
+      const clean = path.replace(/\0+$/, "");
+      const handle = uriToHandle.get(clean);
+      if (handle !== undefined && registry.isValid(handle)) return handle;
+      // Fallback: percorre documentos abertos
+      for (const h of opened) {
+        const state = registry.get(h);
+        if (state !== undefined && state.uri === clean) return h;
+      }
+      return undefined;
+    },
+
     dispose(): void {
       if (disposed) return;
       disposed = true;
+      lspDisposable?.dispose();
+      lspDisposable = undefined;
+      void lspManager?.disconnectAll().catch(() => {});
+      lspManager = null;
+      diagnosticsCache.clear();
+      uriToHandle.clear();
       void extensionHost?.shutdown().catch(() => {});
       for (const subscription of subscriptions.values()) subscription.dispose();
       subscriptions.clear();

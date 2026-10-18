@@ -436,3 +436,23 @@ Problemas identificados ao testar o AppImage pela primeira vez:
       `export` comentado com o caminho detectado. Bônus: também propaga para
       `mcp.servers.rea.environment`. Verificado: `python3 setup/setup.py` **sem** `JAVA_HOME` no
       ambiente → etapa 10 `rea doctor` = **`healthy: true`**.
+
+---
+
+## 🧩 P4 — Language features (próximo roadmap)
+
+> Features de linguagem baseadas em LSP. Com P4#16 fechado, o pipeline LSP está completo
+> (transporte + cliente + manager + fiação + UI). Os itens abaixo expandem o que já existe.
+
+- [x] **P4#16 — LSP Client** ✅ **fechado** (2026-10-18). Conexão a servidores LSP para
+      TypeScript e Python com diagnóstico, completação e hover. Entregue:
+      - `src/core/lsp/` — protocolo, transporte stdio, cliente JSON-RPC, manager
+      - `src/shared/lsp-contract.ts` — contratos de fronteira + servidores builtin
+      - Fiação completa: main (startup), preload (bridge), renderer (UI + squiggly)
+      - **519 testes / 50 arquivos** (baseline 449; +70: 4 testes LSP com 55 + 15 integração)
+      - **Limitações conhecidas**: servidores precisam estar no `$PATH`; full document sync;
+        sem signatureHelp / documentSymbol / references / definition / codeAction
+- [ ] **P4#17 — Diagnósticos no gutter** (ícones de erro/warning à esquerda das linhas)
+- [ ] **P4#18 — Ir para definição** (`textDocument/definition` via atalho F12 ou Ctrl+click)
+- [ ] **P4#19 — Signature help** (`textDocument/signatureHelp` ao digitar `(`)
+- [ ] **P4#20 — Document symbols** (`textDocument/documentSymbol` na command palette)

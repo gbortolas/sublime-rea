@@ -607,7 +607,7 @@ export class TaskPoolImpl implements TaskPool {
     // Fallback: compila o worker de .ts com esbuild (apenas em dev/test).
     // Import dinâmico porque esbuild é devDependency — não disponível em produção.
     const tsEntry = path.join(__dirname, "worker-entry.ts");
-    // eslint-disable-next-line @typescript-eslint/no-require-imports, @typescript-eslint/no-var-requires
+    // eslint-disable-next-line @typescript-eslint/no-require-imports
     const { buildSync } = require("esbuild") as typeof import("esbuild");
     const result = buildSync({
       entryPoints: [tsEntry],

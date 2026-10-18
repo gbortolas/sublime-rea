@@ -26,6 +26,7 @@ import type { MainThreadBusy } from "./concurrency-contract";
 import type { CommandListResult } from "./command-contract";
 import type { ReplaceAllResult, SearchDocumentResult, SearchQuery } from "./search-contract";
 import type { Selection, SelectionSet } from "./selection-contract";
+import type { LspCompletionItem, LspDiagnostic, LspHoverResult } from "./lsp-contract";
 
 /** Versão do contrato do canal — `"<major>.<minor>"` (DEC-IPC-11: handshake negocia). */
 export type IpcVersion = `${number}.${number}`;
@@ -108,6 +109,9 @@ export interface IpcMethods {
   "search.replaceAll"(handle: DocumentHandle, query: SearchQuery, replacement: string): ReplaceAllResult;
   "command.list"(): CommandListResult;
   "command.execute"(commandId: string): void;
+  "lsp.completions"(handle: DocumentHandle, line: number, col: number): LspCompletionItem[];
+  "lsp.hover"(handle: DocumentHandle, line: number, col: number): LspHoverResult | null;
+  "lsp.diagnostics"(handle: DocumentHandle): LspDiagnostic[];
 }
 
 export type IpcMethodName = keyof IpcMethods & string;
@@ -115,6 +119,7 @@ export type IpcMethodName = keyof IpcMethods & string;
 /** Eventos emitidos pelo main para o renderer (mapa de handlers — o wire é array de args). */
 export interface IpcEvents {
   "document.changed"(event: DocumentChangedEvent): void;
+  "lsp.diagnostics"(event: { handle: DocumentHandle; diagnostics: LspDiagnostic[] }): void;
 }
 
 export type IpcEventName = keyof IpcEvents & string;
@@ -142,9 +147,12 @@ export const IPC_METHODS = [
   "search.replaceAll",
   "command.list",
   "command.execute",
+  "lsp.completions",
+  "lsp.hover",
+  "lsp.diagnostics",
 ] as const satisfies readonly IpcMethodName[];
 
-export const IPC_EVENT_NAMES = ["document.changed"] as const satisfies readonly IpcEventName[];
+export const IPC_EVENT_NAMES = ["document.changed", "lsp.diagnostics"] as const satisfies readonly IpcEventName[];
 
 export interface IpcErrorPayload {
   readonly code: string;

@@ -37,6 +37,8 @@ import type {
   ResourceLayer,
   SearchQuery,
 } from "../shared";
+import { LspManager } from "../core/lsp/lsp-manager";
+import { BUILTIN_LSP_SERVERS } from "../shared/lsp-contract";
 
 export type { EditorCore, EditorCoreOptions } from "../core/editor";
 
@@ -357,6 +359,20 @@ async function dispatchIpc(
       }
       return core.executeCommand(commandId);
     }
+    case "lsp.completions": {
+      const handle = requireHandle(request.args[0], "lsp.completions");
+      const line = requireNumber(request.args[1], "lsp.completions", "line");
+      const col = requireNumber(request.args[2], "lsp.completions", "col");
+      return core.requestCompletions(handle, line, col);
+    }
+    case "lsp.hover": {
+      const handle = requireHandle(request.args[0], "lsp.hover");
+      const line = requireNumber(request.args[1], "lsp.hover", "line");
+      const col = requireNumber(request.args[2], "lsp.hover", "col");
+      return core.requestHover(handle, line, col);
+    }
+    case "lsp.diagnostics":
+      return core.documentDiagnostics(requireHandle(request.args[0], "lsp.diagnostics"));
     default:
       // Inalcançável: `parseIpcRequest` já validou o método; guarda contra regressão.
       throw new IpcProtocolError("unknown-method", "método desconhecido");
@@ -543,6 +559,7 @@ export async function startMainProcess(): Promise<void> {
       clearInterval(metricsTimer);
       metricsTimer = null;
     }
+    void lspManager.disconnectAll().catch(() => {});
     ipcRegistration?.dispose();
     ipcRegistration = null;
     core?.dispose();
@@ -636,6 +653,40 @@ export async function startMainProcess(): Promise<void> {
   const activeCore = core;
   void activeCore.packagesReady.catch((error: unknown) => {
     console.error("Scribe: falha ao indexar pacotes", error);
+  });
+
+  // ── LSP: inicializa servidores ──────────────────────────────────────────────────────────────
+  const lspManager = new LspManager(BUILTIN_LSP_SERVERS);
+  // Conecta diagnósticos ao broadcast IPC: resolve handle pela URI e dispara evento
+  lspManager.onDiagnostics((params) => {
+    const handle = activeCore.findHandleByUri(params.uri);
+    if (handle === undefined) return; // documento não está aberto no core
+    const diagnostics = activeCore.documentDiagnostics(handle);
+    const envelope: IpcEventEnvelope<"lsp.diagnostics"> = {
+      v: IPC_VERSION,
+      event: "lsp.diagnostics",
+      args: [{ handle, diagnostics: [...diagnostics] }],
+    };
+    events.broadcast(IPC_CHANNEL.event, envelope);
+  });
+  // Inicia cada servidor builtin com try/catch (pode não estar instalado)
+  const lspInitPromises = [];
+  for (const config of BUILTIN_LSP_SERVERS) {
+    if (config.enabled) {
+      lspInitPromises.push(
+        lspManager.startServer(config).then((client) => {
+          console.info(`Scribe: servidor LSP "${config.name}" iniciado`);
+          return client;
+        }).catch((error: unknown) => {
+          console.warn(`Scribe: servidor LSP "${config.name}" não disponível:`, error instanceof Error ? error.message : String(error));
+        }),
+      );
+    }
+  }
+  // Aguarda todos os servidores tentarem iniciar e depois associa ao core
+  void Promise.allSettled(lspInitPromises).then(() => {
+    activeCore.attachLsp(lspManager);
+    console.info("Scribe: LSP Manager associado ao EditorCore");
   });
 
   // P3#10: plugin host — inicia o processo de extensão em background.
