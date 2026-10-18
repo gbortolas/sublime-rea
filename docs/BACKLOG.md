@@ -183,12 +183,14 @@ IDs). Cada item vira uma seção da spec técnica abstrata. **Fase 1 FECHADA** �
       - **sintaxe** — `visiting` copiado por ramo (corte de ciclo preservado), escopo do **contexto do
             topo** no fallback, captura para grupo inexistente vira `warn` único, re-registro recomputa
             `byExtension` na ordem de registro, warn de teto por **instância** de gramática.
-      - **ABERTO (residual declarado)** — o teto é **por linha**, não por documento: `highlightDocument`
+      - ~~**ABERTO (residual declarado)** — o teto é **por linha**, não por documento: `highlightDocument`
             tokeniza do estado inicial até a linha visível **absoluta** (custo O(`end`)), então *deep
             scroll* + keystroke em documento grande re-tokeniza o prefixo inteiro a cada revisão, e regex
             catastrófica **dentro** do prefixo de 4096 code units segue um vetor de *freeze*
             (`src/core/editor/editor-core.ts`, `MAX_TOKENIZE_LINE_LENGTH` em `src/core/syntax/tokenizer.ts`).
-            Correção de verdade = cap de `end` **ou** tokenização em worker com prazo (novo `TaskKind`).
+            Correção de verdade = cap de `end` **ou** tokenização em worker com prazo (novo `TaskKind`).~~ ✅
+            **RESOLVIDO em 2026-10-18**: tokenização em worker com deadline (`TaskKind: "syntax"`,
+            `SerializedGrammar`, `SYNC_SYNTAX_THRESHOLD=50`, deadline via `Atomics` a cada 50 linhas).
 
 - [x] **P2.4c — Busca/substituição na lane `background`** ✅ **fechado** (2026-10-17). Primeira fatia a
       exercitar o `TaskPool` e a lane `background` do `Scheduler` de verdade. Gates finais:
@@ -425,7 +427,7 @@ Problemas identificados ao testar o AppImage pela primeira vez:
       - **Verificado:** `rea execute-rizin-command` → `exit_code: 0`, `completion_status: complete`,
         provider `rizin` analisando o binário alvo (`iI` revela arch, bits, bintype, relro, nx, pie)
       - **Setup roda em 12 etapas** (sem quebras; dry-run e execução real validados)
-- [x] **🔬 P3.5b — Análise via Rizin** ✅ **fechado** (2026-10-18). Primeira análise real do binário
+- [x] **P3.5b — Análise via Rizin** ✅ **fechado** (2026-10-18). Primeira análise real do binário
       via Rizin, confirmando independentemente os achados da Fase 1 (Ghidra):
       - **13.312 funções** catalogadas com `aac` (Rizin v0.9.1, binário stripped)
       - **76.042 strings** extraídas com `izz`
@@ -436,6 +438,18 @@ Problemas identificados ao testar o AppImage pela primeira vez:
       - **17 evidências RZ-E1–E17** documentadas em `docs/analysis/rizin-analysis.md`
       - Pipeline de render (P1.4), concorrência (P1.2), IPC (P1.3), empacotamento (P1.6) —
         **todos confirmados**
+- [x] **⚡ P2.4b — Tokenização em worker com deadline** ✅ **fechado** (2026-10-18). A dívida declarada
+      do O(end) da tokenização de sintaxe foi resolvida:
+      - `TaskKind: "syntax"` adicionado ao `TaskPool`
+      - `SerializedGrammar` — gramática compilada convertida para formato serializável
+        (patterns com `{ match: string, matchFlags: string }` em vez de RegExp)
+      - `tokenizeSyntaxTask()` no worker — importa `tokenizeCompiledLine` direto,
+        deadline via `Atomics.load()` a cada 50 linhas, retorna `truncated` se estourou
+      - `extendHighlightCacheSmart()` — delega pro pool se `needLines > SYNC_SYNTAX_THRESHOLD(50)`,
+        continua síncrono para pedidos pequenos (evita overhead de IPC)
+      - `highlightDocument()` agora é async
+      - 5 testes de paridade sync vs worker no `pool.test.ts`
+      - Gates: typecheck/test/build exit 0 · **543 testes / 50 arquivos** (baseline 520)
 - [x] **🎯 Minimap Avançado** ✅ **fechado** (2026-10-18). Três melhorias no minimap:
       - **Syntax colorida no canvas**: cada linha do minimap agora exibe barras com as cores
         reais de syntax highlighting, dividindo a barra horizontal em segmentos proporcionais
@@ -536,3 +550,35 @@ Problemas identificados ao testar o AppImage pela primeira vez:
       - Seleção navega caret + scroll para o símbolo
       - `src/renderer/document-symbols.ts` — popup DOM com input e lista
       - Árvore de símbolos achatada com indentação por profundidade
+
+## 🧩 P5 — LSP expandido (2026-10-18)
+
+> Expandindo o LSP Client além do baseline (completion, hover, definition, signature help, document symbols).
+
+- [x] **P5#21 — Code Actions** ✅ **fechado** (2026-10-18). Ctrl+. dispara popup com ações de código
+      do servidor LSP (organize imports, quick fix, refactoring):
+      - `LspCodeAction`, `LspWorkspaceEdit`, `LspRange` em `lsp-contract.ts`
+      - `CodeActionParams`, `CodeAction`, `WorkspaceEdit`, `Command` em `lsp-protocol.ts`
+      - `LspManager.requestCodeActions()` → `textDocument/codeAction`
+      - `EditorCore.requestCodeActions()` com conversão de tipos
+      - IPC `lsp.codeActions` (main dispatch + preload + renderer bridge)
+      - Popup DOM com título + kind tag; aplica TextEdits via `controller.replaceText()`
+      - Gatilho: Ctrl+.
+      - 20 novos testes (14 protocolo + 6 manager)
+- [x] **P5#22 — Find References** ✅ **fechado** (2026-10-18). Ctrl+Shift+F12 lista referências
+      do símbolo sob o cursor:
+      - `ReferenceParams` em `lsp-protocol.ts`
+      - `LspManager.requestReferences()` → `textDocument/references`
+      - `EditorCore.requestReferences()` com `convertLocation()`
+      - IPC `lsp.references` (main dispatch + preload + renderer bridge)
+      - Popup `references-popup.ts` com filtro incremental, navegação setas/Enter/Esc
+      - Gatilho: Ctrl+Shift+F12
+      - 5 novos testes (2 protocolo + 3 manager)
+- [x] **P5#23 — Rename Symbol** ✅ **fechado** (2026-10-18). F2 renomeia símbolo via LSP:
+      - `RenameParams`, `PrepareRenameParams` em `lsp-protocol.ts`
+      - `LspManager.requestRename()` + `prepareRename()` → `textDocument/rename`
+      - `LspRenameResult` em `lsp-contract.ts`
+      - IPC `lsp.rename` (main dispatch + preload + renderer bridge)
+      - `showRenameInput()` (dialog) + `applyRenameEdits()` aplica TextEdits
+      - Gatilho: F2
+      - 4 novos testes (2 protocolo + 2 manager)

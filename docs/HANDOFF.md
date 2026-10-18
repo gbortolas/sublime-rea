@@ -34,7 +34,9 @@ lote no próximo rAF — transação única, 1 revisão, 1 `document.changed` �
 **🔍 Minimap Hover Preview: tooltip com código real e syntax highlighting ao passar o mouse
 no minimap — "lupa" estilo VS Code ✅** ·
 **🎯 Minimap Avançado — syntax colorida no canvas + marcadores de busca + diagnóstico ✅** ·
-**🔧 P3.5 — Rizin provisionado ✅ · 🔬 Análise via Rizin concluída ✅**
+**🔧 P3.5 — Rizin provisionado ✅ · 🔬 Análise via Rizin concluída ✅** ·
+**⚡ P2.4b — Tokenização em worker com deadline (TaskKind syntax, SerializedGrammar, SYNC_SYNTAX_THRESHOLD=50) ✅** ·
+**🧩 P5 — Code Actions (Ctrl+.) ✅ · P5 — Find References (Ctrl+Shift+F12) ✅ · P5 — Rename Symbol (F2) ✅**
 
 **✅ Passo operacional resolvido (2026-10-16).** O `setup.py` foi rodado e o MCP `rea` foi relançado
 **já com `REA_GHIDRA_STARTUP_TIMEOUT_MS=900000`** (confirmado em `/proc/*/environ`) — **não** é mais
@@ -50,15 +52,13 @@ Sem o deadline maior, `open_binary`/`analyze` **via MCP** volta a estourar os 33
 
 **Próximas tarefas:**
 
-> Esta sessão executou a **primeira análise real via Rizin**, confirmando de forma independente
-> os achados da Fase 1 (shaders GLSL, GTK runtime, Skia, jemalloc, estrutura de packages,
-> threads POSIX, IPC via shm) e documentando 17 novas evidências (RZ-E1–E17).
+> Esta sessão resolveu a **dívida P2.4b** (tokenização em worker com deadline) e expandiu o
+> **LSP Client** com Code Actions, References e Rename — 3 features novas, 543 testes verdes.
+> O Scribe agora tem um LSP Client comparável a editores profissionais.
 
-1. **⚡ Tokenização em worker com deadline** — dívida declarada do P2.4b: `highlightDocument`
-   tokeniza do estado inicial até a linha visível (custo O(`end`)). Deep scroll + keystroke
-   re-tokeniza o prefixo inteiro. Correção = cap de `end` ou tokenização em `TaskPool` com prazo.
-2. **🧩 P5 — Novas features LSP** — Rename, Code Actions, References, Folding, Formatting.
-3. **📦 Release** — cortar um release do Scribe com as melhorias acumuladas.
+1. **📦 Release** — cortar um release do Scribe com todas as melhorias acumuladas.
+2. **🧩 P5 — Próximas features LSP** — Formatting (`textDocument/formatting`), Folding, Inlay Hints.
+3. **🔬 Análise de novos binários** — usar o Rizin com o plugin host (`plugin_host-3.14`).
 
 > ✅ **Pegadinha resolvida (2026-10-16, P3.9):** o `setup.py` agora **detecta** um JDK ≥ 21
 > compatível (`JAVA_HOME`, PATH, sdkman, `/usr/lib/jvm`) e escreve um **`export JAVA_HOME=…` ativo**
