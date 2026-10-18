@@ -22,6 +22,8 @@ import type {
   LspCompletionItem,
   LspDiagnostic,
   LspHoverResult,
+  LspLocation,
+  LspSignatureHelp,
   MainThreadBusy,
   ReplaceAllResult,
   SearchDocumentResult,
@@ -87,6 +89,10 @@ export interface ScribePreloadApi {
   onDiagnostics(
     callback: (event: { handle: DocumentHandle; diagnostics: LspDiagnostic[] }) => void,
   ): () => void;
+  /** Go-to-definition LSP. */
+  definition(handle: DocumentHandle, line: number, col: number): Promise<LspLocation | null>;
+  /** Signature help LSP. */
+  signatureHelp(handle: DocumentHandle, line: number, col: number, triggerCharacter?: string): Promise<LspSignatureHelp | null>;
 }
 
 // Duplicado de propósito: o preload não importa `src/shared` em runtime (sandbox).
@@ -249,6 +255,10 @@ const api: ScribePreloadApi = {
       ipcRenderer.removeListener(CHANNEL_EVENT, listener);
     };
   },
+  definition: (handle: DocumentHandle, line: number, col: number): Promise<LspLocation | null> =>
+    call<LspLocation | null>("lsp.definition", [handle, line, col]),
+  signatureHelp: (handle: DocumentHandle, line: number, col: number, triggerCharacter?: string): Promise<LspSignatureHelp | null> =>
+    call<LspSignatureHelp | null>("lsp.signatureHelp", [handle, line, col, triggerCharacter]),
 };
 
 contextBridge.exposeInMainWorld("scribe", api);

@@ -31,6 +31,8 @@ import type {
   LspCompletionItem,
   LspDiagnostic,
   LspHoverResult,
+  LspLocation,
+  LspSignatureHelp,
   RenderBackendKind,
   RGBA,
   ReplaceAllResult,
@@ -53,6 +55,8 @@ import { createCompletionPopup } from "./completions";
 import type { CompletionPopupBinding } from "./completions";
 import { createHoverTooltip } from "./hover-tooltip";
 import type { HoverTooltipBinding } from "./hover-tooltip";
+import { createSignatureHelp } from "./signature-help";
+import type { SignatureHelpBinding } from "./signature-help";
 import { attachMinimap } from "./minimap";
 import type { MinimapBinding } from "./minimap";
 import { findSnippet, parseSnippet } from "./snippets";
@@ -450,6 +454,10 @@ interface ScribeBridge {
   onDiagnostics?(
     callback: (event: { handle: number; diagnostics: LspDiagnostic[] }) => void,
   ): () => void;
+  /** Go-to-definition LSP (opcional). */
+  definition?(handle: number, line: number, col: number): Promise<LspLocation | null>;
+  /** Signature help LSP (opcional). */
+  signatureHelp?(handle: number, line: number, col: number, triggerCharacter?: string): Promise<LspSignatureHelp | null>;
 }
 
 function readBridge(): ScribeBridge | undefined {
@@ -1986,17 +1994,20 @@ export async function bootRenderer(): Promise<boolean> {
 
   let completion: CompletionPopupBinding;
   let hoverTooltip: HoverTooltipBinding;
+  let signatureHelpPopup: SignatureHelpBinding;
   try {
     completion = createCompletionPopup();
     hoverTooltip = createHoverTooltip();
+    signatureHelpPopup = createSignatureHelp();
   } catch (error) {
     console.warn("Scribe: widgets LSP indisponíveis (DOM ausente)", error);
     // Fallback: stubs que não fazem nada
     completion = createNullCompletionPopup();
     hoverTooltip = createNullHoverTooltip();
+    signatureHelpPopup = { isOpen: false, show: () => {}, close: () => {}, dispose: () => {} };
   }
 
-  attachInputListeners(surface, viewport, renderer, controller, findBar, palette, bridge, completion, hoverTooltip);
+  attachInputListeners(surface, viewport, renderer, controller, findBar, palette, bridge, completion, hoverTooltip, signatureHelpPopup);
 
   // Minimap (P2#9): as cores vêm do tema ativo — sem isso a faixa fica preta no tema claro.
   const minimap = attachMinimap({
@@ -2306,6 +2317,7 @@ function attachInputListeners(
   bridge: ScribeBridge | undefined,
   completion: CompletionPopupBinding,
   hoverTooltip: HoverTooltipBinding,
+  signatureHelpPopup: SignatureHelpBinding,
 ): void {
   const lineHeight = Math.ceil(TEXT_STYLE.sizePx * 1.4);
   const currentLine = (): number => Math.floor(viewport.scrollOffsetPx() / lineHeight);
@@ -2426,6 +2438,37 @@ function attachInputListeners(
     mouseDragAnchor = undefined;
   });
 
+  // ── Ctrl+click: go-to-definition ────────────────────────────────────────────────────────────
+  surface.addEventListener("click", (event: MouseEvent) => {
+    if (!event.ctrlKey && !event.metaKey) return;
+    event.preventDefault();
+    const session = controller?.current;
+    if (session === undefined || bridge?.definition === undefined) return;
+    const pos = session.source.positionAt(session.caret);
+    void (async () => {
+      try {
+        const loc = await bridge.definition!(session.handle, pos.line, pos.column);
+        if (loc === null) return;
+        // Se for no mesmo arquivo, navega o caret
+        const targetLine = loc.range.startLine;
+        const targetCol = loc.range.startCol;
+        if (targetLine < session.source.lineCount()) {
+          const targetOffset = session.source.offsetOf(targetLine, targetCol);
+          session.caret = targetOffset;
+          session.selection = { anchor: targetOffset, active: targetOffset };
+          session.selections = [session.selection] as SelectionSet;
+          viewport.scrollTo(Math.max(0, targetLine - 5));
+          renderer.setSelection(session.selection);
+          renderer.setSelections(session.selections);
+          renderer.start();
+        }
+        // Para cross-file, logs o URI (expansão futura: abrir o arquivo)
+      } catch {
+        // Silencia
+      }
+    })();
+  });
+
   // ── Hover LSP (Ctrl+hover) ──────────────────────────────────────────────────────────────────
   let hoverTimer: ReturnType<typeof setTimeout> | undefined;
   surface.addEventListener("mousemove", (event: MouseEvent) => {
@@ -2495,6 +2538,60 @@ function attachInputListeners(
         }
       })();
       return;
+    }
+
+    // F12: go-to-definition
+    if (event.key === "F12") {
+      event.preventDefault();
+      const session = controller?.current;
+      if (session === undefined || bridge?.definition === undefined) return;
+      const pos = session.source.positionAt(session.caret);
+      void (async () => {
+        try {
+          const loc = await bridge.definition!(session.handle, pos.line, pos.column);
+          if (loc === null) return;
+          const targetLine = loc.range.startLine;
+          const targetCol = loc.range.startCol;
+          if (targetLine < session.source.lineCount()) {
+            const targetOffset = session.source.offsetOf(targetLine, targetCol);
+            session.caret = targetOffset;
+            session.selection = { anchor: targetOffset, active: targetOffset };
+            session.selections = [session.selection] as SelectionSet;
+            viewport.scrollTo(Math.max(0, targetLine - 5));
+            renderer.setSelection(session.selection);
+            renderer.setSelections(session.selections);
+            renderer.start();
+          }
+        } catch {
+          // Silencia
+        }
+      })();
+      return;
+    }
+
+    // `(` dispara signature help (quando o LSP suportar)
+    if (event.key === "(" && !event.ctrlKey && !event.metaKey && !event.altKey) {
+      const session = controller?.current;
+      if (session === undefined || bridge?.signatureHelp === undefined) return;
+      setTimeout(() => {
+        const pos = session.source.positionAt(session.caret);
+        void (async () => {
+          try {
+            const help = await bridge.signatureHelp!(session.handle, pos.line, pos.column, "(");
+            if (help === null || help.signatures.length === 0) return;
+            const lineHeightVal = Math.ceil(TEXT_STYLE.sizePx * 1.4);
+            const charW = TEXT_STYLE.sizePx * 0.6;
+            const scrollPx = viewport.scrollOffsetPx();
+            const gutterDigits = Math.max(1, Math.floor(Math.log10(Math.max(1, session.source.lineCount()))) + 1);
+            const gutterW = gutterDigits * 9 + 16;
+            const x = (gutterW + 8) + pos.column * charW;
+            const y = (pos.line * lineHeightVal - scrollPx + lineHeightVal) + 8;
+            signatureHelpPopup.show(help, x, y);
+          } catch {
+            // Silencia falha de signatureHelp
+          }
+        })();
+      }, 0);
     }
 
     // Atalhos de documento: Ctrl/Cmd+O (abrir), Ctrl/Cmd+Z (undo), Ctrl/Cmd+Shift+Z / Ctrl/Cmd+Y

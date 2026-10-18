@@ -121,3 +121,34 @@ export const DEFAULT_LSP_SETTINGS: LspSettings = {
   completionTrigger: "Ctrl+Space",
   diagnosticsEnabled: true,
 };
+
+/** Resultado de go-to-definition (Location simplificado). */
+export interface LspLocation {
+  readonly uri: string;
+  readonly range: {
+    readonly startLine: number;
+    readonly startCol: number;
+    readonly endLine: number;
+    readonly endCol: number;
+  };
+}
+
+/** Informação de um parâmetro em signature help. */
+export interface LspParameterInfo {
+  readonly label: string;
+  readonly documentation?: string;
+}
+
+/** Informação de uma assinatura (sobrecarga). */
+export interface LspSignatureInfo {
+  readonly label: string;
+  readonly documentation?: string;
+  readonly parameters?: readonly LspParameterInfo[];
+}
+
+/** Resultado de signature help (já simplificado para o renderer). */
+export interface LspSignatureHelp {
+  readonly signatures: readonly LspSignatureInfo[];
+  readonly activeSignature: number;
+  readonly activeParameter: number;
+}

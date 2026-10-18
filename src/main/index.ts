@@ -373,6 +373,19 @@ async function dispatchIpc(
     }
     case "lsp.diagnostics":
       return core.documentDiagnostics(requireHandle(request.args[0], "lsp.diagnostics"));
+    case "lsp.definition": {
+      const handleDef = requireHandle(request.args[0], "lsp.definition");
+      const lineDef = requireNumber(request.args[1], "lsp.definition", "line");
+      const colDef = requireNumber(request.args[2], "lsp.definition", "col");
+      return core.requestDefinition(handleDef, lineDef, colDef);
+    }
+    case "lsp.signatureHelp": {
+      const handleSig = requireHandle(request.args[0], "lsp.signatureHelp");
+      const lineSig = requireNumber(request.args[1], "lsp.signatureHelp", "line");
+      const colSig = requireNumber(request.args[2], "lsp.signatureHelp", "col");
+      const triggerSig = request.args[3] as string | undefined;
+      return core.requestSignatureHelp(handleSig, lineSig, colSig, triggerSig);
+    }
     default:
       // Inalcançável: `parseIpcRequest` já validou o método; guarda contra regressão.
       throw new IpcProtocolError("unknown-method", "método desconhecido");

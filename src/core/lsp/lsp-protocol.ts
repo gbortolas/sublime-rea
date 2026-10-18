@@ -214,6 +214,42 @@ export interface HoverParams {
   readonly position: Position;
 }
 
+// ── Go to Definition ──────────────────────────────────────────────────────────────────────────
+
+export type DefinitionParams = HoverParams;
+
+// ── Signature Help ────────────────────────────────────────────────────────────────────────────
+
+export interface SignatureHelpParams {
+  readonly textDocument: TextDocumentIdentifier;
+  readonly position: Position;
+  readonly context?: {
+    readonly triggerKind: number;        // 1=invoked, 2=triggerCharacter, 3=contentChange
+    readonly triggerCharacter?: string;
+    readonly isRetrigger: boolean;
+  };
+}
+
+export interface ParameterInformation {
+  readonly label: string | [number, number];
+  readonly documentation?: string | MarkupContent;
+}
+
+export interface SignatureInformation {
+  readonly label: string;
+  readonly documentation?: string | MarkupContent;
+  readonly parameters?: readonly ParameterInformation[];
+  readonly activeParameter?: number;
+}
+
+export interface SignatureHelp {
+  readonly signatures: readonly SignatureInformation[];
+  readonly activeSignature: number;
+  readonly activeParameter: number;
+}
+
+// ── Document diagnóstico ───────────────────────────────────────────────────────────────────────
+
 export interface DocumentDiagnosticParams {
   readonly textDocument: TextDocumentIdentifier;
 }
@@ -229,6 +265,11 @@ export interface ServerCapabilities {
   readonly textDocumentSync?: number | { readonly openClose?: boolean; readonly change?: number };
   readonly completionProvider?: { readonly triggerCharacters?: readonly string[] };
   readonly hoverProvider?: boolean;
+  readonly definitionProvider?: boolean | { readonly dynamicRegistration?: boolean };
+  readonly signatureHelpProvider?: {
+    readonly triggerCharacters?: readonly string[];
+    readonly retriggerCharacters?: readonly string[];
+  };
   readonly diagnosticProvider?: {
     readonly identifier?: string;
     readonly interFileDependencies?: boolean;

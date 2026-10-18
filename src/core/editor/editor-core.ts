@@ -79,9 +79,9 @@ import {
   type MethodHandlers,
 } from "../extension";
 import type { ExtensionHost } from "../../shared";
-import type { LspDiagnostic, LspCompletionItem, LspHoverResult } from "../../shared";
+import type { LspDiagnostic, LspCompletionItem, LspHoverResult, LspLocation, LspSignatureHelp } from "../../shared";
 import { LspManager } from "../lsp";
-import type { Diagnostic, CompletionItem, Hover } from "../lsp";
+import type { Diagnostic, CompletionItem, Hover, Location, SignatureHelp } from "../lsp";
 
 /** Lane `index` (cold-start) — teto por propriedade (DEC-CON-6/9). */
 export const PROPERTY_INDEX_WORKERS = "index.indexWorkers";
@@ -239,6 +239,25 @@ export interface EditorCore {
     col: number,
   ): Promise<LspHoverResult | null>;
   /**
+   * Solicita go-to-definition LSP para a posição do documento.
+   * Retorna null se não houver servidor ou definição.
+   */
+  requestDefinition(
+    handle: DocumentHandle,
+    line: number,
+    col: number,
+  ): Promise<LspLocation | null>;
+  /**
+   * Solicita signature help LSP para a posição do documento.
+   * Retorna null se não houver servidor.
+   */
+  requestSignatureHelp(
+    handle: DocumentHandle,
+    line: number,
+    col: number,
+    triggerCharacter?: string,
+  ): Promise<LspSignatureHelp | null>;
+  /**
    * Diagnósticos LSP atuais do documento (do último `publishDiagnostics`).
    * Vazio se não houver servidor ou nenhum diagnóstico.
    */
@@ -376,6 +395,47 @@ function convertDiagnostic(d: Diagnostic): LspDiagnostic {
     severity: convertSeverity(d.severity),
     message: d.message,
     source: d.source ?? "LSP",
+  };
+}
+
+function convertLocation(loc: Location): LspLocation {
+  return {
+    uri: loc.uri,
+    range: {
+      startLine: loc.range.start.line,
+      startCol: loc.range.start.character,
+      endLine: loc.range.end.line,
+      endCol: loc.range.end.character,
+    },
+  };
+}
+
+function convertSignatureHelp(help: SignatureHelp): LspSignatureHelp {
+  const activeSig = help.activeSignature;
+  const activeParam = help.activeParameter;
+  return {
+    activeSignature: activeSig,
+    activeParameter: activeParam,
+    signatures: help.signatures.map((sig) => ({
+      label: sig.label,
+      ...(typeof sig.documentation === "string"
+        ? { documentation: sig.documentation }
+        : typeof sig.documentation === "object" && sig.documentation !== null
+          ? { documentation: (sig.documentation as { value: string }).value }
+          : {}),
+      ...(sig.parameters !== undefined
+        ? {
+            parameters: sig.parameters.map((p) => ({
+              label: typeof p.label === "string" ? p.label : "…",
+              ...(typeof p.documentation === "string"
+                ? { documentation: p.documentation }
+                : typeof p.documentation === "object" && p.documentation !== null
+                  ? { documentation: (p.documentation as { value: string }).value }
+                  : {}),
+            })),
+          }
+        : {}),
+    })),
   };
 }
 
@@ -1289,6 +1349,35 @@ export function createEditorCore(options: EditorCoreOptions = {}): EditorCore {
       const hover = await lspManager.requestHover(uri, line, col);
       if (hover === null) return null;
       return convertHover(hover);
+    },
+
+    async requestDefinition(
+      handle: DocumentHandle,
+      line: number,
+      col: number,
+    ): Promise<LspLocation | null> {
+      if (lspManager === null) return null;
+      const path = registry.get(handle)?.uri;
+      if (path === undefined) return null;
+      const uri = toFileUri(path);
+      const loc = await lspManager.requestDefinition(uri, line, col);
+      if (loc === null) return null;
+      return convertLocation(loc);
+    },
+
+    async requestSignatureHelp(
+      handle: DocumentHandle,
+      line: number,
+      col: number,
+      triggerCharacter?: string,
+    ): Promise<LspSignatureHelp | null> {
+      if (lspManager === null) return null;
+      const path = registry.get(handle)?.uri;
+      if (path === undefined) return null;
+      const uri = toFileUri(path);
+      const help = await lspManager.requestSignatureHelp(uri, line, col, triggerCharacter);
+      if (help === null) return null;
+      return convertSignatureHelp(help);
     },
 
     documentDiagnostics(handle: DocumentHandle): readonly LspDiagnostic[] {

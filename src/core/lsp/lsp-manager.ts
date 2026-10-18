@@ -12,7 +12,7 @@ import type { LspServerConfig } from "../../shared/lsp-contract";
 import { LspClient } from "./lsp-client";
 import { LspStdioTransport } from "./lsp-transport";
 import { LspError } from "./lsp-protocol";
-import type { CompletionItem, Hover, Diagnostic, InitializeParams } from "./lsp-protocol";
+import type { CompletionItem, Hover, Diagnostic, InitializeParams, Location, SignatureHelp } from "./lsp-protocol";
 
 export class LspManager implements Disposable {
   private readonly clients = new Map<string, LspClient>();
@@ -164,6 +164,62 @@ export class LspManager implements Disposable {
       position: { line, character: col },
     });
     return (result as Hover | null) ?? null;
+  }
+
+  /**
+   * Solicita definição (go-to-definition) ao servidor adequado.
+   * Retorna `null` se não houver servidor ou nenhuma definição encontrada.
+   */
+  async requestDefinition(
+    uri: string,
+    line: number,
+    col: number,
+  ): Promise<Location | null> {
+    const ext = this.extensionFromUri(uri);
+    const client = this.getClient(ext);
+    if (!client) return null;
+
+    const result = await client.sendRequest("textDocument/definition", {
+      textDocument: { uri },
+      position: { line, character: col },
+    });
+
+    // LSP pode retornar Location, Location[], ou null
+    if (result === null || result === undefined) return null;
+    if (Array.isArray(result)) {
+      return (result.length > 0 ? result[0] : null) as Location | null;
+    }
+    return result as Location;
+  }
+
+  /**
+   * Solicita signature help ao servidor adequado.
+   * Retorna `null` se não houver servidor.
+   */
+  async requestSignatureHelp(
+    uri: string,
+    line: number,
+    col: number,
+    triggerCharacter?: string,
+  ): Promise<SignatureHelp | null> {
+    const ext = this.extensionFromUri(uri);
+    const client = this.getClient(ext);
+    if (!client) return null;
+
+    const params: Record<string, unknown> = {
+      textDocument: { uri },
+      position: { line, character: col },
+    };
+    if (triggerCharacter !== undefined) {
+      params.context = {
+        triggerKind: 2, // triggerCharacter
+        triggerCharacter,
+        isRetrigger: false,
+      };
+    }
+
+    const result = await client.sendRequest("textDocument/signatureHelp", params);
+    return (result as SignatureHelp | null) ?? null;
   }
 
   /** Desconecta todos os servidores LSP. */

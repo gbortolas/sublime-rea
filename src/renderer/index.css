@@ -939,6 +939,86 @@ body {
   font-style: italic;
 }
 
+/* ══ Signature help popup ════════════════════════════════════════════════════ */
+
+#signature-popup {
+  pointer-events: auto;
+  position: absolute;
+  z-index: 6;
+  min-width: 240px;
+  max-width: 480px;
+  max-height: 300px;
+  border: 1px solid var(--s-border);
+  border-radius: var(--s-radius-lg);
+  background: var(--s-sidebar);
+  box-shadow: var(--s-shadow);
+  overflow-y: auto;
+  padding: var(--s-space-2) var(--s-space-3);
+  display: flex;
+  flex-direction: column;
+  gap: var(--s-space-1);
+  font-size: var(--s-fs-sm);
+  line-height: 1.4;
+  color: var(--s-fg);
+}
+
+#signature-popup[hidden] {
+  display: none;
+}
+
+.signature-label {
+  font-family: var(--s-font-mono);
+  font-size: var(--s-fs-sm);
+  color: var(--s-fg);
+  white-space: pre-wrap;
+  word-break: break-all;
+}
+
+.signature-doc {
+  font-size: var(--s-fs-xs);
+  color: var(--s-muted);
+  margin-top: 2px;
+}
+
+.signature-doc code {
+  padding: 1px 3px;
+  border-radius: var(--s-radius-sm);
+  background: var(--s-hover);
+  font-family: var(--s-font-mono);
+  font-size: var(--s-fs-xs);
+}
+
+.signature-params {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0;
+  margin-top: 2px;
+}
+
+.signature-param {
+  font-family: var(--s-font-mono);
+  font-size: var(--s-fs-sm);
+  color: var(--s-muted);
+}
+
+.signature-param.active {
+  color: var(--s-accent);
+  font-weight: 600;
+}
+
+.signature-param-sep {
+  color: var(--s-muted);
+  font-size: var(--s-fs-sm);
+  margin: 0 1px;
+}
+
+.signature-count {
+  font-size: var(--s-fs-xs);
+  color: var(--s-muted);
+  margin-top: 2px;
+  text-align: right;
+}
+
 /* ══ Status bar ════════════════════════════════════════════════════════════ */
 
 #status-bar {
