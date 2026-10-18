@@ -605,12 +605,6 @@ export async function startMainProcess(): Promise<void> {
         ],
       },
       {
-        label: "Selection",
-        submenu: [
-          { label: "Select All", accelerator: "CmdOrCtrl+A", click: () => sendMenuAction(win, "edit.selectAll") },
-        ],
-      },
-      {
         label: "Find",
         submenu: [
           { label: "Find", accelerator: "CmdOrCtrl+F", click: () => sendMenuAction(win, "find.open") },

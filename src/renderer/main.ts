@@ -1642,15 +1642,33 @@ export async function bootRenderer(): Promise<boolean> {
         }
         break;
       }
-      case "edit.cut":
       case "edit.copy":
-        // Canvas editor — clipboard é tratado pelo handler de keydown do canvas.
-        // Disparar document.execCommand aqui não funciona pra canvas.
-        // Por enquanto, no-op (o atalho de teclado Ctrl+C/X no canvas funciona).
+      case "edit.cut": {
+        const session = controller?.current;
+        if (session !== undefined && !SelectionOps.isCollapsed(session.selection)) {
+          const sel = SelectionOps.normalized(session.selection);
+          const text = session.source.text.slice(sel.start, sel.end);
+          void navigator.clipboard.writeText(text).catch(() => {});
+          if (action === "edit.cut") {
+            void controller?.replaceText(sel.start, sel.end - sel.start, "");
+          }
+        }
         break;
-      case "edit.paste":
-        // Idem cut/copy — no-op; o handler de teclado do canvas faz o paste.
+      }
+      case "edit.paste": {
+        const cur = controller?.current;
+        if (cur === undefined) break;
+        void navigator.clipboard.readText().then((text) => {
+          const pos = cur.selection;
+          if (SelectionOps.isCollapsed(pos)) {
+            void controller?.replaceText(pos.anchor, 0, text);
+          } else {
+            const sel = SelectionOps.normalized(pos);
+            void controller?.replaceText(sel.start, sel.end - sel.start, text);
+          }
+        }).catch(() => {});
         break;
+      }
       case "find.open":
         if (findBar !== undefined && !findBar.model.isOpen) {
           findBar.model.open();
