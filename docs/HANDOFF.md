@@ -1,10 +1,8 @@
 # HANDOFF — sublime-rea
 
 > **Documento de handoff entre sessões** (leia antes de retomar). Atualizado em **2026-10-18**.
-> Status: **🧩 LSP Formatting + Folding + Inlay Hints implementados ✅**<br>
-> (13.312 funções catalogadas, 76.042 strings extraídas, shaders GLSL reais confirmados,
-> 17 evidências RZ-E1–E17 consolidadas em `docs/analysis/rizin-analysis.md`).
-> Próximo: Push da tag v0.4.0 ou Multi-root workspace.
+> Status: **🧩 Formatting + Folding + Inlay Hints + Git blame/diff + Multi-root WS ✅**<br>
+> Próximo: **DAP (Debug Adapter Protocol) ou snippets avançados**
 
 ---
 
@@ -36,9 +34,7 @@ no minimap — "lupa" estilo VS Code ✅** ·
 **🎯 Minimap Avançado — syntax colorida no canvas + marcadores de busca + diagnóstico ✅** ·
 **🔧 P3.5 — Rizin provisionado ✅ · 🔬 Análise via Rizin concluída ✅** ·
 **⚡ P2.4b — Tokenização em worker com deadline (TaskKind syntax, SerializedGrammar, SYNC_SYNTAX_THRESHOLD=50) ✅** ·
-**🧩 P5 — Code Actions (Ctrl+.) ✅ · P5 — Find References (Ctrl+Shift+F12) ✅ · P5 — Rename Symbol (F2) ✅**<br>
-**🧩 P4#24 — LSP Formatting (Ctrl+Shift+I) ✅ · P4#25 — Folding ✅ · P4#26 — Inlay Hints ✅ · 🌐 Multi-root workspace ✅ · 🐙 Git blame na status bar ✅ · 🐙 Git diff indicators no gutter ✅**<br>
-**🧩 P4#24 — LSP Formatting (Ctrl+Shift+I) ✅ · P4#25 — Folding ✅ · P4#26 — Inlay Hints ✅ · 🌐 Multi-root workspace ✅ · 🐙 Git blame na status bar ✅ · 🐙 Git diff indicators no gutter ✅**
+**🧩 P5 — Code Actions (Ctrl+.) ✅ · P5 — Find References (Ctrl+Shift+F12) ✅ · P5 — Rename Symbol (F2) ✅ · P4#24 — LSP Formatting (Ctrl+Shift+I) ✅ · P4#25 — Folding ✅ · P4#26 — Inlay Hints ✅ · 🌐 Multi-root workspace ✅ · 🐙 Git blame na status bar ✅ · 🐙 Git diff indicators no gutter ✅**<br>
 
 **✅ Passo operacional resolvido (2026-10-16).** O `setup.py` foi rodado e o MCP `rea` foi relançado
 **já com `REA_GHIDRA_STARTUP_TIMEOUT_MS=900000`** (confirmado em `/proc/*/environ`) — **não** é mais
