@@ -35,6 +35,14 @@ import type {
   ReplaceAllResult,
   SearchDocumentResult,
   SearchQuery,
+  DapBreakpoint,
+  DapOutputEvent,
+  DapScope,
+  DapSessionState,
+  DapStackFrame,
+  DapStoppedEvent,
+  DapThread,
+  DapVariable,
 } from "../shared";
 
 export interface HostReadyInfo {
@@ -124,6 +132,42 @@ export interface ScribePreloadApi {
   blame(handle: DocumentHandle, line: number): Promise<{ commitHash: string; author: string; timeAgo: string } | null>;
   /** Git diff do documento em relação ao HEAD (barras coloridas no gutter). */
   gitDiff(handle: DocumentHandle): Promise<readonly { startLine: number; lineCount: number; kind: string }[]>;
+  /** Inicia uma sessão de depuração (DAP) para o documento. */
+  dapStart(handle: DocumentHandle, stopOnEntry?: boolean): Promise<DapSessionState>;
+  /** Encerra a sessão de depuração ativa. */
+  dapStop(): Promise<DapSessionState>;
+  /** Estado atual da sessão de depuração. */
+  dapState(): Promise<DapSessionState>;
+  /** Define os breakpoints (linhas 1‑based) de um documento. */
+  dapSetBreakpoints(handle: DocumentHandle, lines: readonly number[]): Promise<readonly DapBreakpoint[]>;
+  /** Breakpoints desejados de um documento. */
+  dapBreakpoints(handle: DocumentHandle): Promise<readonly number[]>;
+  /** Threads do programa depurado. */
+  dapThreads(): Promise<readonly DapThread[]>;
+  /** Pilha de chamadas de uma thread. */
+  dapStackTrace(threadId: number): Promise<readonly DapStackFrame[]>;
+  /** Escopos de variáveis de um frame. */
+  dapScopes(frameId: number): Promise<readonly DapScope[]>;
+  /** Variáveis de um escopo (ou nó expandido). */
+  dapVariables(variablesReference: number): Promise<readonly DapVariable[]>;
+  /** Continua a execução de uma thread. */
+  dapContinue(threadId: number): Promise<void>;
+  /** Pausa a execução de uma thread. */
+  dapPause(threadId: number): Promise<void>;
+  /** Passo por cima. */
+  dapStepOver(threadId: number): Promise<void>;
+  /** Passo para dentro. */
+  dapStepInto(threadId: number): Promise<void>;
+  /** Passo para fora. */
+  dapStepOut(threadId: number): Promise<void>;
+  /** Escuta mudanças de estado da sessão de depuração. */
+  onDapState(callback: (event: { state: DapSessionState }) => void): () => void;
+  /** Escuta o evento de parada (breakpoint/passo/exceção). */
+  onDapStopped(callback: (event: DapStoppedEvent) => void): () => void;
+  /** Escuta a saída do programa depurado. */
+  onDapOutput(callback: (event: DapOutputEvent) => void): () => void;
+  /** Escuta a confirmação de breakpoints (verificados) de um arquivo. */
+  onDapBreakpoints(callback: (event: { path: string; breakpoints: DapBreakpoint[] }) => void): () => void;
 }
 
 // Duplicado de propósito: o preload não importa `src/shared` em runtime (sandbox).
@@ -314,7 +358,53 @@ const api: ScribePreloadApi = {
     call<{ commitHash: string; author: string; timeAgo: string } | null>("git.blame", [handle, line]),
   gitDiff: (handle: DocumentHandle): Promise<readonly { startLine: number; lineCount: number; kind: string }[]> =>
     call<readonly { startLine: number; lineCount: number; kind: string }[]>("git.diff", [handle]),
+  dapStart: (handle: DocumentHandle, stopOnEntry?: boolean): Promise<DapSessionState> =>
+    call<DapSessionState>("dap.start", [handle, stopOnEntry]),
+  dapStop: (): Promise<DapSessionState> => call<DapSessionState>("dap.stop", []),
+  dapState: (): Promise<DapSessionState> => call<DapSessionState>("dap.state", []),
+  dapSetBreakpoints: (handle: DocumentHandle, lines: readonly number[]): Promise<readonly DapBreakpoint[]> =>
+    call<readonly DapBreakpoint[]>("dap.setBreakpoints", [handle, lines]),
+  dapBreakpoints: (handle: DocumentHandle): Promise<readonly number[]> =>
+    call<readonly number[]>("dap.breakpoints", [handle]),
+  dapThreads: (): Promise<readonly DapThread[]> => call<readonly DapThread[]>("dap.threads", []),
+  dapStackTrace: (threadId: number): Promise<readonly DapStackFrame[]> =>
+    call<readonly DapStackFrame[]>("dap.stackTrace", [threadId]),
+  dapScopes: (frameId: number): Promise<readonly DapScope[]> =>
+    call<readonly DapScope[]>("dap.scopes", [frameId]),
+  dapVariables: (variablesReference: number): Promise<readonly DapVariable[]> =>
+    call<readonly DapVariable[]>("dap.variables", [variablesReference]),
+  dapContinue: (threadId: number): Promise<void> => call<void>("dap.continue", [threadId]),
+  dapPause: (threadId: number): Promise<void> => call<void>("dap.pause", [threadId]),
+  dapStepOver: (threadId: number): Promise<void> => call<void>("dap.stepOver", [threadId]),
+  dapStepInto: (threadId: number): Promise<void> => call<void>("dap.stepInto", [threadId]),
+  dapStepOut: (threadId: number): Promise<void> => call<void>("dap.stepOut", [threadId]),
+  onDapState: (callback: (event: { state: DapSessionState }) => void): (() => void) =>
+    subscribeDap("dap.state", callback as (payload: unknown) => void),
+  onDapStopped: (callback: (event: DapStoppedEvent) => void): (() => void) =>
+    subscribeDap("dap.stopped", callback as (payload: unknown) => void),
+  onDapOutput: (callback: (event: DapOutputEvent) => void): (() => void) =>
+    subscribeDap("dap.output", callback as (payload: unknown) => void),
+  onDapBreakpoints: (
+    callback: (event: { path: string; breakpoints: DapBreakpoint[] }) => void,
+  ): (() => void) => subscribeDap("dap.breakpoints", callback as (payload: unknown) => void),
 };
+
+/**
+ * Assina um evento do canal `scribe:ipc:event` filtrando pelo nome; devolve o *unsubscribe*.
+ */
+function subscribeDap(event: string, callback: (payload: unknown) => void): () => void {
+  const listener = (_event: unknown, raw: unknown): void => {
+    if (typeof raw !== "object" || raw === null) return;
+    const envelope = raw as EventEnvelope;
+    if (envelope.event !== event) return;
+    const argument = envelope.args[0];
+    if (typeof argument === "object" && argument !== null) callback(argument);
+  };
+  ipcRenderer.on(CHANNEL_EVENT, listener);
+  return () => {
+    ipcRenderer.removeListener(CHANNEL_EVENT, listener);
+  };
+}
 
 contextBridge.exposeInMainWorld("scribe", api);
 

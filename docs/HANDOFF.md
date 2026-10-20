@@ -1,8 +1,8 @@
 # HANDOFF — sublime-rea
 
-> **Documento de handoff entre sessões** (leia antes de retomar). Atualizado em **2026-10-18**.
-> Status: **🧩 Formatting + Folding + Inlay Hints + Git blame/diff + Multi-root WS ✅**<br>
-> Próximo: **DAP (Debug Adapter Protocol) ou snippets avançados**
+> **Documento de handoff entre sessões** (leia antes de retomar). Atualizado em **2026-10-20**.
+> Status: **🧩 DAP (Debug Adapter Protocol) ✅**<br>
+> Próximo: **snippets avançados** ou **undo/redo por cursor (multi-cursor)**
 
 ---
 
@@ -34,7 +34,8 @@ no minimap — "lupa" estilo VS Code ✅** ·
 **🎯 Minimap Avançado — syntax colorida no canvas + marcadores de busca + diagnóstico ✅** ·
 **🔧 P3.5 — Rizin provisionado ✅ · 🔬 Análise via Rizin concluída ✅** ·
 **⚡ P2.4b — Tokenização em worker com deadline (TaskKind syntax, SerializedGrammar, SYNC_SYNTAX_THRESHOLD=50) ✅** ·
-**🧩 P5 — Code Actions (Ctrl+.) ✅ · P5 — Find References (Ctrl+Shift+F12) ✅ · P5 — Rename Symbol (F2) ✅ · P4#24 — LSP Formatting (Ctrl+Shift+I) ✅ · P4#25 — Folding ✅ · P4#26 — Inlay Hints ✅ · 🌐 Multi-root workspace ✅ · 🐙 Git blame na status bar ✅ · 🐙 Git diff indicators no gutter ✅**<br>
+**🧩 P5 — Code Actions (Ctrl+.) ✅ · P5 — Find References (Ctrl+Shift+F12) ✅ · P5 — Rename Symbol (F2) ✅ · P4#24 — LSP Formatting (Ctrl+Shift+I) ✅ · P4#25 — Folding ✅ · P4#26 — Inlay Hints ✅ · 🌐 Multi-root workspace ✅ · 🐙 Git blame na status bar ✅ · 🐙 Git diff indicators no gutter ✅** ·
+**🧩 DAP (Debug Adapter Protocol) — sessão de depuração Python (debugpy), breakpoints no gutter, painel de pilha/variáveis/saída, F5/F9/F10/F11 ✅**<br>
 
 **✅ Passo operacional resolvido (2026-10-16).** O `setup.py` foi rodado e o MCP `rea` foi relançado
 **já com `REA_GHIDRA_STARTUP_TIMEOUT_MS=900000`** (confirmado em `/proc/*/environ`) — **não** é mais
@@ -50,15 +51,15 @@ Sem o deadline maior, `open_binary`/`analyze` **via MCP** volta a estourar os 33
 
 **Próximas tarefas:**
 
-> Esta sessão implementou **Multi-root workspace, Git blame e Git diff indicators** —
-> expandindo o suporte a projetos reais e integração com git.
+> A sessão de 2026-10-20 **finalizou a feature DAP** (que estava WIP não commitado no working
+> tree): fiação do renderer (`debug-panel`), breakpoints no gutter, atalhos de teclado via menu,
+> **44 testes novos** e o **bug do `DapClient.dispose()`** descoberto e corrigido pelos testes.
 
-1. **🧩 DAP (Debug Adapter Protocol)** — integrar debuggers (Python, Node) via DAP no Scribe.
-   Suporte a breakpoints, step, variáveis e pilha de chamadas.
-2. **📦 Suporte a múltiplos cursores com undo/redo por cursor** — expansão do P2#5 para
-   permitir edições simultâneas com histórico de undo granular.
-3. **📝 Snippets avançados** — suporte a placeholders, tab stops, transformações e
+1. **📝 Snippets avançados** — suporte a placeholders, tab stops, transformações e
    aninhamento (expansão do P4#18 existente).
+2. **🧩 DAP — expansões** — avaliar adaptador Node (`vscode-js-debug`), *conditional
+   breakpoints*, *watch expressions* e inspeção de hover de variáveis parada.
+3. **🔄 Undo/redo por cursor** — histórico granular para múltiplos cursores (expansão do P2#5).
 
 > ✅ **Pegadinha resolvida (2026-10-16, P3.9):** o `setup.py` agora **detecta** um JDK ≥ 21
 > compatível (`JAVA_HOME`, PATH, sdkman, `/usr/lib/jvm`) e escreve um **`export JAVA_HOME=…` ativo**
@@ -737,6 +738,72 @@ real em **tamanho legível com syntax highlighting** — tipo a "lupa" do VS Cod
 - Preview sem realce enquanto a requisição de highlight não chega (~100ms debounce + IPC)
 - O tooltip não segue o mouse verticalmente depois de mostrado (fica fixo até próximo hover)
 - Sem suporte a teclas de atalho para fixar o preview
+
+---
+
+---
+
+## 🧩 DAP — Debug Adapter Protocol (2026-10-20, feature finalizada)
+
+A feature estava **WIP não commitado** no working tree (core + main + preload prontos, renderer
+sem fiação, zero testes). Esta sessão a **finalizou ponta a ponta**.
+
+### O que é
+
+Depuração de arquivo único no Scribe via **DAP** (padrão da Microsoft, *não* observado no alvo —
+escolha nossa, escopo fora do RE). Adaptador embutido: **Python via debugpy**
+(`python3 -m debugpy.adapter`); ausente no PATH ⇒ warn, nunca fatal.
+
+### O que já existia (WIP) vs. o que esta sessão entregou
+
+| Camada | WIP (já pronto) | Esta sessão |
+|---|---|---|
+| `src/core/dap/` | protocolo, transporte stdio, cliente, manager (4 arquivos) | **4 arquivos de teste** (44 testes) |
+| `src/main/index.ts` | dispatch `dap.*`, menu Debug, broadcast de eventos | — |
+| `src/preload/index.ts` | 19 métodos/escutas `dap*` | — |
+| `src/shared/dap-contract.ts` | contratos + `BUILTIN_DAP_SERVERS` | — |
+| `src/renderer/debug-panel.ts` | painel "burro" (toolbar + pilha + variáveis + saída) | fix TS6133 |
+| `src/renderer/main.ts` | **nada** | **fiação completa** |
+| `src/core/render/scene.ts` | — | **bolinha de breakpoint no gutter** (`breakpointLines`, `●` vermelho `#E51400`) |
+
+### Fiação do renderer (`src/renderer/main.ts`)
+
+- `ScribeBridge` ganhou 15 métodos + 4 escutas `dap*` (**todos opcionais** — preload antigo
+  simplesmente não expõe, padrão de `highlight`/`blame`).
+- `ScribeRenderer.setBreakpointLines()` — bolinhas no gutter, repintadas ao abrir/ativar
+  documento (`fetchDebugBreakpoints`, chamada em `openDocument` e `activate`, como o git diff).
+- **`createDebugView()`** fiado: `onAction` → chamadas IPC; `onScopesRequest`/`onVariablesRequest`
+  → carga on-demand das variáveis; eventos `dap.state`/`dap.stopped`/`dap.output`/`dap.breakpoints`
+  → atualiza painel, `debugThreadId` (do último `stopped`, fallback `dapThreads()[0]`) e espelho
+  local de breakpoints (`debugBreakpoints`, **fonte da verdade no main** — persiste entre sessões).
+- **`handleDebugAction("start")` é contextual (F5):** parado ⇒ continuar; inativo/terminado/erro
+  ⇒ nova sessão para o documento ativo.
+- `handleMenuAction`: cases `debug.start/continue/pause/stop/stepOver/stepInto/stepOut/toggleBreakpoint`.
+- **F9** toggle de breakpoint na linha do caret (via menu; `dapSetBreakpoints` persiste no main).
+
+### 🐛 Contrato travado pelo teste (achado)
+
+`DapClient.dispose()` **quebrava** com um transporte fake que devolvia a função de unsubscribe
+crua (`item.dispose is not a function`). **Conclusão:** o `Event<T>` do Scribe
+(`src/shared/events.ts`) devolve um **Disposable** (objeto com `.dispose()`), não `() => void` —
+fakes de transporte devem conformar a esse contrato. O código de produção estava correto; o
+teste é que foi alinhado (e agora trava o contrato).
+
+### Limitações declaradas
+
+- Só **Python/debugpy** embutido (Node dependente de `vscode-js-debug` no PATH — adiado).
+- Uma **sessão por vez** (`DAP_SESSION_ACTIVE`).
+- Sem *conditional breakpoints*, *watch*, *hover-inspect* de variáveis, *hot reload*.
+- Requisições reversas do adaptador (`runInTerminal`) respondem `success: false` explicitamente.
+- Parada de execução não move o caret para a linha do frame (navegação via painel apenas).
+
+### Verificação
+
+- Gates: `typecheck`/`lint`/`build` exit 0 · **587 testes / 54 arquivos** (baseline 543/50; +44
+  DAP: protocolo 5 · transporte 10 · cliente 15 · manager 14, com **auto-responder** de handshake
+  no teste do manager — elimina a race de respostas órfãs).
+- `package-lock.json` sincronizado com o bump 0.4.0 (ficara pendente do release); `graft/`
+  (cache do grafo de código) ignorado no `.gitignore`.
 
 ---
 

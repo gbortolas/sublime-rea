@@ -60,3 +60,6 @@ venv/
 
 # Cache do LSP Serena
 .serena/
+
+# Cache do graft (grafo de código — gerado)
+graft/

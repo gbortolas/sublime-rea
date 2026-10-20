@@ -40,6 +40,8 @@ import type {
 } from "../shared";
 import { LspManager } from "../core/lsp/lsp-manager";
 import { BUILTIN_LSP_SERVERS } from "../shared/lsp-contract";
+import { DapManager } from "../core/dap/dap-manager";
+import { BUILTIN_DAP_SERVERS } from "../shared/dap-contract";
 
 export type { EditorCore, EditorCoreOptions } from "../core/editor";
 
@@ -121,6 +123,8 @@ export interface FileDialogPort {
 export interface IpcHandlerDeps {
   readonly signals?: IpcSignalRegistry;
   readonly dialog?: FileDialogPort;
+  /** Gerente de depuração (DAP). Sem ele, os métodos `dap.*` falham com `dap-unavailable`. */
+  readonly dap?: DapManager;
 }
 
 /** `true` quando o envelope é um `IpcCancel` (push de cancelamento, não um request). */
@@ -193,8 +197,11 @@ export function registerIpcHandlers(
   deps: IpcHandlerDeps = {},
 ): Disposable {
   const signals = deps.signals ?? createIpcSignalRegistry();
-  const handlerDeps: IpcHandlerDeps =
-    deps.dialog !== undefined ? { signals, dialog: deps.dialog } : { signals };
+  const handlerDeps: IpcHandlerDeps = {
+    signals,
+    ...(deps.dialog !== undefined ? { dialog: deps.dialog } : {}),
+    ...(deps.dap !== undefined ? { dap: deps.dap } : {}),
+  };
 
   const subscription = core.onDocumentChanged((event) => {
     const envelope: IpcEventEnvelope<"document.changed"> = {
@@ -490,10 +497,98 @@ async function dispatchIpc(
         return [];
       }
     }
+    case "dap.start": {
+      const dap = requireDap(deps);
+      const handle = requireHandle(request.args[0], "dap.start");
+      const path = core.registry.get(handle)?.uri;
+      if (path === undefined) {
+        throw new IpcProtocolError("dap-no-document", "dap.start: documento não encontrado");
+      }
+      const config = dap.findConfigFor(path);
+      if (config === undefined) {
+        throw new IpcProtocolError(
+          "dap-no-adapter",
+          `dap.start: nenhum adaptador de depuração para "${path}"`,
+        );
+      }
+      return request.args[1] === true
+        ? dap.start(config, { program: path, stopOnEntry: true })
+        : dap.start(config, { program: path });
+    }
+    case "dap.stop":
+      return requireDap(deps).stop().then(() => requireDap(deps).state);
+    case "dap.state":
+      return requireDap(deps).state;
+    case "dap.setBreakpoints": {
+      const dap = requireDap(deps);
+      const handle = requireHandle(request.args[0], "dap.setBreakpoints");
+      const rawLines = request.args[1];
+      if (!Array.isArray(rawLines)) {
+        throw new IpcProtocolError(
+          "invalid-args",
+          "dap.setBreakpoints: lines deve ser um array",
+        );
+      }
+      const lines = rawLines.filter((n): n is number => typeof n === "number");
+      const path = core.registry.get(handle)?.uri;
+      if (path === undefined) return [];
+      return dap.setBreakpoints(path, lines);
+    }
+    case "dap.breakpoints": {
+      const dap = requireDap(deps);
+      const handle = requireHandle(request.args[0], "dap.breakpoints");
+      const path = core.registry.get(handle)?.uri;
+      if (path === undefined) return [];
+      return dap.breakpointsFor(path);
+    }
+    case "dap.threads":
+      return requireDap(deps).threads();
+    case "dap.stackTrace":
+      return requireDap(deps).stackTrace(
+        requireNumber(request.args[0], "dap.stackTrace", "threadId"),
+      );
+    case "dap.scopes":
+      return requireDap(deps).scopes(
+        requireNumber(request.args[0], "dap.scopes", "frameId"),
+      );
+    case "dap.variables":
+      return requireDap(deps).variables(
+        requireNumber(request.args[0], "dap.variables", "variablesReference"),
+      );
+    case "dap.continue":
+      return requireDap(deps)
+        .continueExecution(requireNumber(request.args[0], "dap.continue", "threadId"))
+        .then(() => undefined);
+    case "dap.pause":
+      return requireDap(deps)
+        .pause(requireNumber(request.args[0], "dap.pause", "threadId"))
+        .then(() => undefined);
+    case "dap.stepOver":
+      return requireDap(deps)
+        .stepOver(requireNumber(request.args[0], "dap.stepOver", "threadId"))
+        .then(() => undefined);
+    case "dap.stepInto":
+      return requireDap(deps)
+        .stepInto(requireNumber(request.args[0], "dap.stepInto", "threadId"))
+        .then(() => undefined);
+    case "dap.stepOut":
+      return requireDap(deps)
+        .stepOut(requireNumber(request.args[0], "dap.stepOut", "threadId"))
+        .then(() => undefined);
     default:
       // Inalcançável: `parseIpcRequest` já validou o método; guarda contra regressão.
       throw new IpcProtocolError("unknown-method", "método desconhecido");
   }
+}
+
+function requireDap(deps: IpcHandlerDeps): DapManager {
+  if (deps.dap === undefined) {
+    throw new IpcProtocolError(
+      "dap-unavailable",
+      "depuração indisponível: gerente DAP não injetado",
+    );
+  }
+  return deps.dap;
 }
 
 function extractId(raw: unknown): number {
@@ -693,6 +788,7 @@ export async function startMainProcess(): Promise<void> {
       metricsTimer = null;
     }
     void lspManager.disconnectAll().catch(() => {});
+    void dapManager.stop().catch(() => {});
     ipcRegistration?.dispose();
     ipcRegistration = null;
     core?.dispose();
@@ -768,11 +864,26 @@ export async function startMainProcess(): Promise<void> {
           { label: "Toggle Theme", accelerator: "CmdOrCtrl+Shift+T", click: () => sendMenuAction(win, "view.toggleTheme") },
         ],
       },
+      {
+        label: "Debug",
+        submenu: [
+          { label: "Start Debugging", accelerator: "F5", click: () => sendMenuAction(win, "debug.start") },
+          { label: "Stop Debugging", accelerator: "Shift+F5", click: () => sendMenuAction(win, "debug.stop") },
+          { type: "separator" },
+          { label: "Toggle Breakpoint", accelerator: "F9", click: () => sendMenuAction(win, "debug.toggleBreakpoint") },
+          { label: "Step Over", accelerator: "F10", click: () => sendMenuAction(win, "debug.stepOver") },
+          { label: "Step Into", accelerator: "F11", click: () => sendMenuAction(win, "debug.stepInto") },
+          { label: "Step Out", accelerator: "Shift+F11", click: () => sendMenuAction(win, "debug.stepOut") },
+        ],
+      },
     ];
     return Menu.buildFromTemplate(template);
   };
 
   await app.whenReady();
+
+  // ── DAP: gerente de depuração (uma sessão por vez) ─────────────────────────────────────────
+  const dapManager = new DapManager(BUILTIN_DAP_SERVERS);
 
   core = await createEditorCore({
     packageRoots: packageRoots(app.getAppPath(), app.getPath("userData")),
@@ -780,8 +891,48 @@ export async function startMainProcess(): Promise<void> {
   ipcRegistration = registerIpcHandlers(core, ipcMain, events, {
     signals,
     dialog: fileDialog,
+    dap: dapManager,
   });
   mainWindow = createWindow(pendingDocumentPath);
+
+  // Encaminha os eventos do DAP para o renderer (estado, parada, saída e breakpoints).
+  dapManager.onState((state) => {
+    const envelope: IpcEventEnvelope<"dap.state"> = {
+      v: IPC_VERSION,
+      event: "dap.state",
+      args: [{ state }],
+    };
+    events.broadcast(IPC_CHANNEL.event, envelope);
+  });
+  dapManager.onStopped((event) => {
+    const envelope: IpcEventEnvelope<"dap.stopped"> = {
+      v: IPC_VERSION,
+      event: "dap.stopped",
+      args: [{
+        reason: event.reason,
+        ...(event.threadId !== undefined ? { threadId: event.threadId } : {}),
+        ...(event.description !== undefined ? { description: event.description } : {}),
+        ...(event.text !== undefined ? { text: event.text } : {}),
+      }],
+    };
+    events.broadcast(IPC_CHANNEL.event, envelope);
+  });
+  dapManager.onOutput((event) => {
+    const envelope: IpcEventEnvelope<"dap.output"> = {
+      v: IPC_VERSION,
+      event: "dap.output",
+      args: [{ category: event.category, output: event.output }],
+    };
+    events.broadcast(IPC_CHANNEL.event, envelope);
+  });
+  dapManager.onBreakpoints((event) => {
+    const envelope: IpcEventEnvelope<"dap.breakpoints"> = {
+      v: IPC_VERSION,
+      event: "dap.breakpoints",
+      args: [{ path: event.sourcePath, breakpoints: [...event.breakpoints] }],
+    };
+    events.broadcast(IPC_CHANNEL.event, envelope);
+  });
 
   const activeCore = core;
   void activeCore.packagesReady.catch((error: unknown) => {

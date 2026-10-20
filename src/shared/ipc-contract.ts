@@ -27,6 +27,7 @@ import type { CommandListResult } from "./command-contract";
 import type { ReplaceAllResult, SearchDocumentResult, SearchQuery } from "./search-contract";
 import type { Selection, SelectionSet } from "./selection-contract";
 import type { LspCompletionItem, LspDiagnostic, LspHoverResult, LspLocation, LspRenameResult, LspSignatureHelp, LspDocumentSymbol, LspCodeAction, LspTextEdit, LspFoldingRange, LspInlayHint } from "./lsp-contract";
+import type { DapBreakpoint, DapOutputEvent, DapScope, DapSessionState, DapStackFrame, DapStoppedEvent, DapThread, DapVariable } from "./dap-contract";
 
 /** Versão do contrato do canal — `"<major>.<minor>"` (DEC-IPC-11: handshake negocia). */
 export type IpcVersion = `${number}.${number}`;
@@ -148,6 +149,32 @@ export interface IpcMethods {
   "lsp.inlayHints"(handle: DocumentHandle, startLine?: number, endLine?: number): readonly LspInlayHint[];
   "git.blame"(handle: DocumentHandle, line: number): { commitHash: string; author: string; timeAgo: string } | null;
   "git.diff"(handle: DocumentHandle): readonly { startLine: number; lineCount: number; kind: string }[];
+  /**
+   * Depuração (DAP) — o main resolve o caminho do documento e o adaptador pela extensão
+   * (`BUILTIN_DAP_SERVERS`), dispara a sessão e devolve o estado resultante.
+   */
+  "dap.start"(handle: DocumentHandle, stopOnEntry?: boolean): DapSessionState;
+  /** Encerra a sessão ativa (best-effort) e volta a `inactive`. */
+  "dap.stop"(): DapSessionState;
+  /** Estado atual da sessão de depuração. */
+  "dap.state"(): DapSessionState;
+  /** Define os breakpoints (linhas 1‑based) de um documento; devolve-os já verificados se houver sessão. */
+  "dap.setBreakpoints"(handle: DocumentHandle, lines: readonly number[]): readonly DapBreakpoint[];
+  /** Breakpoints desejados (linhas 1‑based) de um documento. */
+  "dap.breakpoints"(handle: DocumentHandle): readonly number[];
+  /** Threads do programa depurado. */
+  "dap.threads"(): readonly DapThread[];
+  /** Pilha de chamadas de uma thread. */
+  "dap.stackTrace"(threadId: number): readonly DapStackFrame[];
+  /** Escopos de variáveis de um frame. */
+  "dap.scopes"(frameId: number): readonly DapScope[];
+  /** Variáveis de um escopo (ou de um nó expandido). */
+  "dap.variables"(variablesReference: number): readonly DapVariable[];
+  "dap.continue"(threadId: number): void;
+  "dap.pause"(threadId: number): void;
+  "dap.stepOver"(threadId: number): void;
+  "dap.stepInto"(threadId: number): void;
+  "dap.stepOut"(threadId: number): void;
 }
 
 export type IpcMethodName = keyof IpcMethods & string;
@@ -156,6 +183,10 @@ export type IpcMethodName = keyof IpcMethods & string;
 export interface IpcEvents {
   "document.changed"(event: DocumentChangedEvent): void;
   "lsp.diagnostics"(event: { handle: DocumentHandle; diagnostics: LspDiagnostic[] }): void;
+  "dap.state"(event: { state: DapSessionState }): void;
+  "dap.stopped"(event: DapStoppedEvent): void;
+  "dap.output"(event: DapOutputEvent): void;
+  "dap.breakpoints"(event: { path: string; breakpoints: DapBreakpoint[] }): void;
 }
 
 export type IpcEventName = keyof IpcEvents & string;
@@ -198,9 +229,30 @@ export const IPC_METHODS = [
   "lsp.inlayHints",
   "git.blame",
   "git.diff",
+  "dap.start",
+  "dap.stop",
+  "dap.state",
+  "dap.setBreakpoints",
+  "dap.breakpoints",
+  "dap.threads",
+  "dap.stackTrace",
+  "dap.scopes",
+  "dap.variables",
+  "dap.continue",
+  "dap.pause",
+  "dap.stepOver",
+  "dap.stepInto",
+  "dap.stepOut",
 ] as const satisfies readonly IpcMethodName[];
 
-export const IPC_EVENT_NAMES = ["document.changed", "lsp.diagnostics"] as const satisfies readonly IpcEventName[];
+export const IPC_EVENT_NAMES = [
+  "document.changed",
+  "lsp.diagnostics",
+  "dap.state",
+  "dap.stopped",
+  "dap.output",
+  "dap.breakpoints",
+] as const satisfies readonly IpcEventName[];
 
 export interface IpcErrorPayload {
   readonly code: string;

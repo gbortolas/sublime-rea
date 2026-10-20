@@ -189,6 +189,8 @@ export function buildInstances(
   inlayHints?: readonly RenderInlayHint[],
   /** Git diff ranges para barras coloridas no gutter. */
   gitDiffs?: readonly GitDiffRange[],
+  /** Linhas com breakpoint (1-based) — bolinha vermelha à esquerda do número. */
+  breakpointLines?: readonly number[],
 ): SceneInstances {
   const rects: RectInstance[] = [
     { rect: layout.viewport, color: layout.background },
@@ -375,6 +377,20 @@ export function buildInstances(
             color: layout.gutterColor,
           });
         }
+      }
+
+      // Bolinha de breakpoint no gutter (vermelha, à esquerda dos números)
+      if (breakpointLines !== undefined && breakpointLines.includes(index + 1)) {
+        const dotG = atlas.resolveGlyph("●", style);
+        glyphs.push({
+          atlasX: dotG.region.x,
+          atlasY: dotG.region.y,
+          atlasW: dotG.region.w,
+          atlasH: dotG.region.h,
+          x: 5,
+          y,
+          color: 0xE51400FF, // vermelho VS Code para breakpoint
+        });
       }
     }
 

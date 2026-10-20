@@ -1,0 +1,244 @@
+/**
+ * Scribe — transporte stdio para DAP.
+ *
+ * Gerencia o ciclo de vida de um processo de adaptador DAP, escreve mensagens no stdin
+ * usando o framing `Content-Length` (igual ao LSP) e lê do stdout reconstituindo mensagens
+ * completas. O framing de conteúdo é o **mesmo** do LSP; o que muda é o corpo (mensagens DAP
+ * com `seq`/`type`), por isso este transporte é próprio do módulo `core/dap/`.
+ */
+
+import { spawn, type ChildProcess } from "node:child_process";
+
+import { Emitter, type Event } from "../../shared/events";
+import { toDisposable, type Disposable, DisposableStore } from "../../shared/disposable";
+import { DapError } from "./dap-protocol";
+
+// ── Helpers ─────────────────────────────────────────────────────────────────────────────────
+
+const HEADER_TERMINATOR = "\r\n\r\n";
+const CONTENT_LENGTH_RE = /^Content-Length:\s*(\d+)\r?$/im;
+
+/**
+ * Buffer de mensagens com decodificação do framing `Content-Length`.
+ *
+ * Acumula dados crus do stdout e extrai mensagens completas na ordem em que chegam.
+ * Lida com múltiplas mensagens num mesmo chunk e mensagens fracionadas em chunks.
+ */
+class DapMessageBuffer {
+  private data = "";
+  private pendingLength = -1;
+
+  append(chunk: string): void {
+    this.data += chunk;
+  }
+
+  /**
+   * Tenta extrair a próxima mensagem completa do buffer.
+   * @returns o corpo da mensagem (JSON payload) ou `null` se ainda não há dados suficientes.
+   */
+  extractNext(): string | null {
+    while (true) {
+      if (this.pendingLength < 0) {
+        const termIdx = this.data.indexOf(HEADER_TERMINATOR);
+        if (termIdx === -1) return null;
+
+        const headerBlock = this.data.slice(0, termIdx);
+        this.data = this.data.slice(termIdx + HEADER_TERMINATOR.length);
+
+        const match = headerBlock.match(CONTENT_LENGTH_RE);
+        if (!match) continue; // cabeçalho inválido — descarta e tenta de novo
+
+        const lengthStr = match[1];
+        if (lengthStr === undefined) continue;
+
+        this.pendingLength = parseInt(lengthStr, 10);
+        if (Number.isNaN(this.pendingLength) || this.pendingLength < 0) {
+          this.pendingLength = -1;
+          continue;
+        }
+      }
+
+      if (this.data.length < this.pendingLength) return null;
+
+      const body = this.data.slice(0, this.pendingLength);
+      this.data = this.data.slice(this.pendingLength);
+      this.pendingLength = -1;
+      return body;
+    }
+  }
+}
+
+// ── Transporte ──────────────────────────────────────────────────────────────────────────────
+
+export class DapStdioTransport implements Disposable {
+  private proc: ChildProcess | null = null;
+  private readonly store = new DisposableStore();
+  private readonly buffer = new DapMessageBuffer();
+
+  private readonly onMessageEmitter = new Emitter<string>();
+  private readonly onErrorEmitter = new Emitter<Error>();
+  private readonly onExitEmitter = new Emitter<{
+    readonly code: number | null;
+    readonly signal: string | null;
+  }>();
+
+  /** Evento disparado a cada mensagem DAP crua recebida do adaptador. */
+  readonly onMessage: Event<string> = this.onMessageEmitter.event;
+
+  /** Evento disparado em erro do processo (ex.: comando não encontrado). */
+  readonly onError: Event<Error> = this.onErrorEmitter.event;
+
+  /** Evento disparado quando o processo encerra. */
+  readonly onExit: Event<{
+    readonly code: number | null;
+    readonly signal: string | null;
+  }> = this.onExitEmitter.event;
+
+  constructor(
+    private readonly command: string,
+    private readonly args: readonly string[],
+    private readonly extraEnv?: Readonly<Record<string, string>>,
+  ) {}
+
+  /** `true` se o processo está ativo e os pipes estão abertos. */
+  get connected(): boolean {
+    return this.proc !== null && !this.proc.killed && this.proc.exitCode === null;
+  }
+
+  /**
+   * Dispara o processo do adaptador DAP e conecta os pipes.
+   * A promise resolve após o primeiro tick do event loop (o processo pode falhar
+   * imediatamente e rejeitar pelo evento `error`).
+   */
+  connect(): Promise<void> {
+    if (this.proc !== null) {
+      throw new DapError("DAP_ALREADY_CONNECTED", "Transport já conectado");
+    }
+
+    return new Promise<void>((resolve, reject) => {
+      const env = { ...process.env, ...this.extraEnv };
+      let resolved = false;
+
+      const proc = spawn(this.command, [...this.args], {
+        stdio: ["pipe", "pipe", "pipe"],
+        env,
+      });
+      this.proc = proc;
+
+      proc.on("error", (err: Error) => {
+        this.onErrorEmitter.fire(err);
+        if (!resolved) {
+          resolved = true;
+          reject(err);
+        }
+      });
+
+      proc.on("exit", (code, signal) => {
+        this.onExitEmitter.fire({ code, signal });
+        this.proc = null;
+      });
+
+      // stdin — valida que o pipe existe
+      if (!proc.stdin) {
+        reject(new DapError("DAP_NO_STDIN", "stdin indisponível"));
+        return;
+      }
+
+      // stdout — decodifica mensagens
+      if (!proc.stdout) {
+        reject(new DapError("DAP_NO_STDOUT", "stdout indisponível"));
+        return;
+      }
+
+      const onStdoutData = (chunk: Buffer): void => {
+        this.buffer.append(chunk.toString("utf8"));
+        this.flushBuffer();
+      };
+      proc.stdout.on("data", onStdoutData);
+      this.store.add(toDisposable(() => proc.stdout?.off("data", onStdoutData)));
+
+      // stderr — logado como warn (o adaptador escreve logs/erros de boot aqui)
+      proc.stderr?.on("data", (chunk: Buffer) => {
+        const text = chunk.toString("utf8").trim();
+        if (text.length > 0) {
+          console.warn(`[dap] ${text}`);
+        }
+      });
+
+      this.store.add(toDisposable(() => {
+        if (!proc.killed) {
+          const stillRunning = proc.exitCode === null;
+          if (stillRunning) {
+            proc.stdin?.end();
+            proc.kill("SIGTERM");
+          }
+        }
+      }));
+
+      // Resolve após o próximo tick (permite que `error` dispare antes caso o spawn falhe)
+      setImmediate(() => {
+        if (!resolved) {
+          resolved = true;
+          resolve();
+        }
+      });
+    });
+  }
+
+  /**
+   * Envia uma mensagem DAP crua para o adaptador com o framing `Content-Length`.
+   */
+  send(message: string): void {
+    const stdin = this.proc?.stdin;
+    if (!stdin || this.proc?.exitCode !== null) {
+      throw new DapError("DAP_NOT_CONNECTED", "Transport não conectado");
+    }
+    const encoded = `Content-Length: ${Buffer.byteLength(message, "utf8")}\r\n\r\n${message}`;
+    stdin.write(encoded, "utf8");
+  }
+
+  /**
+   * Desconecta o transporte: envia SIGTERM e, se o processo não terminar em 3s, SIGKILL.
+   */
+  disconnect(): void {
+    const proc = this.proc;
+    if (!proc) return;
+
+    // Fecha o stdin para sinalizar fim de entrada
+    try { proc.stdin?.end(); } catch { /* pipe já fechado */ }
+
+    // SIGTERM
+    const sigtermSent = proc.kill("SIGTERM");
+
+    // SIGKILL após 3s
+    if (sigtermSent || proc.exitCode === null) {
+      const timer = setTimeout(() => {
+        try {
+          if (!proc.killed && proc.exitCode === null) {
+            proc.kill("SIGKILL");
+          }
+        } catch { /* processo já encerrou */ }
+      }, 3000);
+
+      this.store.add(toDisposable(() => clearTimeout(timer)));
+    }
+
+    this.store.dispose();
+    this.onMessageEmitter.dispose();
+    this.onErrorEmitter.dispose();
+    this.onExitEmitter.dispose();
+    this.proc = null;
+  }
+
+  /** @inheritdoc */
+  dispose(): void {
+    this.disconnect();
+  }
+
+  private flushBuffer(): void {
+    let content: string | null;
+    while ((content = this.buffer.extractNext()) !== null) {
+      this.onMessageEmitter.fire(content);
+    }
+  }
+}

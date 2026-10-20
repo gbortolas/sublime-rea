@@ -642,3 +642,28 @@ Problemas identificados ao testar o AppImage pela primeira vez:
   - Barras de 3px no gutter (verde=added, azul=modified, vermelho=deleted)
   - Fetch automático ao abrir/ativar documento
   - Gates: typecheck/lint/test/build passam (543 testes, 50 arquivos)
+
+## 🧩 DAP — Debug Adapter Protocol (2026-10-20)
+
+- [x] **DAP — depuração de arquivo único** ✅ **fechado** (2026-10-20). Feature finalizada (estava
+      WIP não commitado: core/main/preload prontos, renderer sem fiação, zero testes). Entregue:
+  - `src/core/dap/` — protocolo (subconjunto DAP), transporte stdio (framing `Content-Length`),
+    cliente JSON-RPC (correlação por `request_seq`, timeout 15 s, requisições reversas respondem
+    `success: false`), manager (handshake `initialize` → `launch` → `initialized` →
+    breakpoints → `configurationDone`, uma sessão por vez)
+  - `src/shared/dap-contract.ts` — contratos de fronteira + `BUILTIN_DAP_SERVERS`
+    (**Python via debugpy**; ausente no PATH = warn, nunca fatal)
+  - **main** — dispatch `dap.*` (15 métodos), menu **Debug** (F5/Shift+F5/F9/F10/F11/Shift+F11),
+    broadcast dos eventos `dap.state/stopped/output/breakpoints`
+  - **preload** — 19 métodos/escutas `dap*` na ponte
+  - **renderer** — `createDebugView()` fiado (toolbar + painel com pilha/variáveis/saída),
+    `ScribeBridge` com métodos `dap*` opcionais, F5 contextual (parado ⇒ continuar), F9 toggle
+    de breakpoint no caret, **bolinha de breakpoint no gutter** (`scene.ts`, `#E51400`),
+    fetch ao abrir/ativar documento
+  - **44 testes novos** (5 protocolo + 10 transporte + 15 cliente + 14 manager, com
+    auto-responder de handshake — mata a race de respostas órfãs)
+  - Contrato travado: `Event<T>` devolve **Disposable** (objeto), não `() => void` — fakes de
+    transporte devem conformar (o teste de `dispose()` pega isso)
+  - **Limitações**: só Python embutido (Node adiado); sem conditional breakpoints/watch;
+    parada não move o caret para o frame
+  - Gates: typecheck/lint/build exit 0 · **587 testes / 54 arquivos** (baseline 543/50)

@@ -24,6 +24,14 @@ import {
 } from "../shared";
 import type {
   CommandListResult,
+  DapBreakpoint,
+  DapOutputEvent,
+  DapScope,
+  DapSessionState,
+  DapStackFrame,
+  DapStoppedEvent,
+  DapThread,
+  DapVariable,
   Disposable,
   DocumentHighlight,
   DocumentInsertResult,
@@ -69,6 +77,8 @@ import { createDocumentSymbolsPopup } from "./document-symbols";
 import type { DocumentSymbolsBinding } from "./document-symbols";
 import { createReferencesPopup } from "./references-popup";
 import type { ReferencesPopupBinding } from "./references-popup";
+import { createDebugView } from "./debug-panel";
+import type { DebugAction, DebugViewBinding } from "./debug-panel";
 import { attachMinimap } from "./minimap";
 import type { MinimapBinding } from "./minimap";
 import { findSnippet, parseSnippet } from "./snippets";
@@ -499,6 +509,25 @@ interface ScribeBridge {
   blame?(handle: number, line: number): Promise<{ commitHash: string; author: string; timeAgo: string } | null>;
   /** Git diff do documento em relação ao HEAD (barras coloridas no gutter). */
   gitDiff?(handle: number): Promise<readonly GitDiffRange[]>;
+  /** Depuração (DAP) — todos opcionais: preload antigo simplesmente não os expõe. */
+  dapStart?(handle: number, stopOnEntry?: boolean): Promise<DapSessionState>;
+  dapStop?(): Promise<DapSessionState>;
+  dapState?(): Promise<DapSessionState>;
+  dapSetBreakpoints?(handle: number, lines: readonly number[]): Promise<readonly DapBreakpoint[]>;
+  dapBreakpoints?(handle: number): Promise<readonly number[]>;
+  dapThreads?(): Promise<readonly DapThread[]>;
+  dapStackTrace?(threadId: number): Promise<readonly DapStackFrame[]>;
+  dapScopes?(frameId: number): Promise<readonly DapScope[]>;
+  dapVariables?(variablesReference: number): Promise<readonly DapVariable[]>;
+  dapContinue?(threadId: number): Promise<void>;
+  dapPause?(threadId: number): Promise<void>;
+  dapStepOver?(threadId: number): Promise<void>;
+  dapStepInto?(threadId: number): Promise<void>;
+  dapStepOut?(threadId: number): Promise<void>;
+  onDapState?(callback: (event: { state: DapSessionState }) => void): () => void;
+  onDapStopped?(callback: (event: DapStoppedEvent) => void): () => void;
+  onDapOutput?(callback: (event: DapOutputEvent) => void): () => void;
+  onDapBreakpoints?(callback: (event: { path: string; breakpoints: DapBreakpoint[] }) => void): () => void;
 }
 
 function readBridge(): ScribeBridge | undefined {
@@ -894,6 +923,25 @@ async function fetchGitDiff(
 }
 
 /**
+ * Busca os breakpoints desejados do documento (linhas 1-based) e pinta as bolinhas no gutter.
+ * A fonte da verdade vive no main (`DapManager.desiredBreakpoints`) — persiste entre sessões.
+ */
+async function fetchDebugBreakpoints(
+  bridge: ScribeBridge | undefined,
+  renderer: ScribeRenderer,
+  handle: number,
+): Promise<void> {
+  if (bridge?.dapBreakpoints === undefined) return;
+  try {
+    const lines = await bridge.dapBreakpoints(handle);
+    renderer.setBreakpointLines([...lines]);
+    renderer.start();
+  } catch {
+    /* silencia */
+  }
+}
+
+/**
  * Busca inlay hints via LSP para o range visível e atualiza o renderer.
  */
 async function fetchInlayHints(
@@ -1077,6 +1125,8 @@ class DocumentController {
     void fetchFolding(this.bridge, this.renderer, handle);
     // Busca git diff iniciais
     void fetchGitDiff(this.bridge, this.renderer, handle);
+    // Busca breakpoints do documento (bolinhas no gutter)
+    void fetchDebugBreakpoints(this.bridge, this.renderer, handle);
     // Busca inlay hints iniciais (LSP)
     {
       const s = this.current;
@@ -1122,6 +1172,8 @@ class DocumentController {
     void fetchInlayHints(session, this.bridge, this.renderer, this.viewport);
     // Busca git diff para o documento ativado
     void fetchGitDiff(this.bridge, this.renderer, session.handle);
+    // Busca breakpoints do documento ativado (bolinhas no gutter)
+    void fetchDebugBreakpoints(this.bridge, this.renderer, session.handle);
     this.renderer.start();
   }
 
@@ -1468,6 +1520,8 @@ class ScribeRenderer {
   private currentInlayHints: readonly RenderInlayHint[] | undefined;
   /** Git diffs ativos para o documento corrente. */
   private gitDiffs: readonly GitDiffRange[] = [];
+  /** Linhas (1-based) com breakpoint do documento ativo. */
+  private breakpointLines: readonly number[] = [];
 
   constructor(
     private readonly canvas: HTMLCanvasElement,
@@ -1504,6 +1558,11 @@ class ScribeRenderer {
   /** Define os git diffs para o documento ativo. */
   setGitDiffs(diffs: readonly GitDiffRange[]): void {
     this.gitDiffs = diffs;
+  }
+
+  /** Define as linhas com breakpoint do documento ativo (bolinha no gutter). */
+  setBreakpointLines(lines: readonly number[]): void {
+    this.breakpointLines = lines;
   }
 
   /** Largura atual do gutter em px. */
@@ -1686,6 +1745,7 @@ class ScribeRenderer {
       this.currentFolding,
       this.currentInlayHints,
       this.gitDiffs,
+      this.breakpointLines,
     );
     this.requestHighlight?.(range.first, range.count);
 
@@ -2155,6 +2215,153 @@ export async function bootRenderer(): Promise<boolean> {
         }
       : undefined;
 
+  // ── Depuração (DAP) ────────────────────────────────────────────────────────────────────────
+  /**
+   * Breakpoints desejados por caminho (linhas 1-based). A fonte da verdade vive no main
+   * (`DapManager.desiredBreakpoints`) — persiste entre sessões de depuração; aqui só espelhamos
+   * para o gutter e para o toggle de F9.
+   */
+  const debugBreakpoints = new Map<string, readonly number[]>();
+  let debugThreadId: number | undefined;
+  const debugView: DebugViewBinding | undefined =
+    bridge !== undefined && bridge.dapStart !== undefined && bridge.onDapState !== undefined
+      ? createDebugView()
+      : undefined;
+
+  /** Thread atual (do último `stopped` ou 1ª conhecida) — necessária a continue/pause/step. */
+  const withCurrentThread = (action: (threadId: number) => void): void => {
+    if (bridge === undefined) return;
+    if (debugThreadId !== undefined) {
+      action(debugThreadId);
+      return;
+    }
+    void bridge.dapThreads?.()
+      .then((threads: readonly DapThread[]) => {
+        const first = threads[0]?.id;
+        if (first !== undefined) {
+          debugThreadId = first;
+          action(first);
+        }
+      })
+      .catch(() => {});
+  };
+
+  const handleDebugAction = (action: DebugAction): void => {
+    if (bridge === undefined) return;
+    switch (action) {
+      case "start": {
+        // F5 contextual: parado → continuar; inativo/encerrado → iniciar nova sessão.
+        const session = controller?.current;
+        if (session === undefined) break;
+        void bridge.dapState?.()
+          .then((state: DapSessionState) => {
+            if (state === "stopped" && debugThreadId !== undefined) {
+              void bridge.dapContinue?.(debugThreadId).catch(() => {});
+              return;
+            }
+            if (state === "inactive" || state === "terminated" || state === "errored") {
+              debugThreadId = undefined;
+              void bridge.dapStart?.(session.handle).catch(() => {});
+            }
+          })
+          .catch(() => {});
+        break;
+      }
+      case "continue":
+        if (debugThreadId !== undefined) {
+          void bridge.dapContinue?.(debugThreadId).catch(() => {});
+        }
+        break;
+      case "pause":
+        withCurrentThread((threadId: number) => {
+          void bridge.dapPause?.(threadId).catch(() => {});
+        });
+        break;
+      case "stepOver":
+        withCurrentThread((threadId: number) => {
+          void bridge.dapStepOver?.(threadId).catch(() => {});
+        });
+        break;
+      case "stepInto":
+        withCurrentThread((threadId: number) => {
+          void bridge.dapStepInto?.(threadId).catch(() => {});
+        });
+        break;
+      case "stepOut":
+        withCurrentThread((threadId: number) => {
+          void bridge.dapStepOut?.(threadId).catch(() => {});
+        });
+        break;
+      case "stop":
+        debugThreadId = undefined;
+        void bridge.dapStop?.().catch(() => {});
+        break;
+    }
+  };
+
+  /** Toggle de breakpoint na linha do caret (F9 / menu). */
+  const toggleBreakpointAtCaret = (): void => {
+    const session = controller?.current;
+    if (session === undefined || bridge?.dapSetBreakpoints === undefined) return;
+    const line = session.source.positionAt(session.caret).line + 1; // 1-based
+    const path = session.path;
+    const current = debugBreakpoints.get(path) ?? [];
+    const next = current.includes(line)
+      ? current.filter((l: number) => l !== line)
+      : [...current, line].sort((a: number, b: number) => a - b);
+    debugBreakpoints.set(path, next);
+    renderer.setBreakpointLines(next);
+    renderer.start();
+    void bridge.dapSetBreakpoints(session.handle, next).catch(() => {});
+  };
+
+  if (debugView !== undefined && bridge !== undefined) {
+    debugView.onAction(handleDebugAction);
+    debugView.onFrameSelect(() => {
+      // A seleção de frame já dispara `onScopesRequest` no próprio painel; nada extra aqui.
+    });
+    debugView.onScopesRequest((frame: DapStackFrame) => {
+      void bridge.dapScopes?.(frame.id)
+        .then((scopes: readonly DapScope[]) => debugView.setScopes(frame.id, scopes))
+        .catch(() => {});
+    });
+    debugView.onVariablesRequest((reference: number) => {
+      void bridge.dapVariables?.(reference)
+        .then((variables: readonly DapVariable[]) => debugView.setVariables(reference, variables))
+        .catch(() => {});
+    });
+
+    bridge.onDapState?.((event: { state: DapSessionState }) => {
+      debugView.setState(event.state);
+    });
+    bridge.onDapStopped?.((event: DapStoppedEvent) => {
+      if (event.threadId !== undefined) debugThreadId = event.threadId;
+      const threadId = event.threadId ?? debugThreadId ?? 0;
+      void bridge.dapStackTrace?.(threadId)
+        .then((frames: readonly DapStackFrame[]) => {
+          debugView.showStopped(event.threadId, frames);
+        })
+        .catch(() => {});
+    });
+    bridge.onDapOutput?.((event: DapOutputEvent) => {
+      debugView.appendOutput(event.category, event.output);
+    });
+    bridge.onDapBreakpoints?.((event: { path: string; breakpoints: readonly DapBreakpoint[] }) => {
+      const verified = event.breakpoints
+        .filter((bp: DapBreakpoint) => bp.verified)
+        .map((bp: DapBreakpoint) => bp.line);
+      debugBreakpoints.set(event.path, verified);
+      debugView.setBreakpointCount(
+        [...debugBreakpoints.values()].reduce((n: number, lines: readonly number[]) => n + lines.length, 0),
+      );
+      const session = controller?.current;
+      if (session !== undefined && session.path === event.path) {
+        renderer.setBreakpointLines(verified);
+        renderer.start();
+      }
+    });
+  }
+
   const handleMenuAction = (action: string): void => {
     switch (action) {
       case "file.open":
@@ -2224,6 +2431,30 @@ export async function bootRenderer(): Promise<boolean> {
         break;
       case "view.toggleTheme":
         document.getElementById("theme-toggle")?.click();
+        break;
+      case "debug.start":
+        handleDebugAction("start");
+        break;
+      case "debug.continue":
+        handleDebugAction("continue");
+        break;
+      case "debug.pause":
+        handleDebugAction("pause");
+        break;
+      case "debug.stop":
+        handleDebugAction("stop");
+        break;
+      case "debug.stepOver":
+        handleDebugAction("stepOver");
+        break;
+      case "debug.stepInto":
+        handleDebugAction("stepInto");
+        break;
+      case "debug.stepOut":
+        handleDebugAction("stepOut");
+        break;
+      case "debug.toggleBreakpoint":
+        toggleBreakpointAtCaret();
         break;
     }
   };
