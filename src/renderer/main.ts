@@ -83,6 +83,15 @@ import { attachMinimap } from "./minimap";
 import type { MinimapBinding } from "./minimap";
 import { findSnippet, parseSnippet } from "./snippets";
 import {
+  applyEdit,
+  createSnippetSession,
+  currentStop,
+  nextTabStop,
+  previousTabStop,
+  sessionRange,
+} from "./snippet-session";
+import type { SnippetEditRange, SnippetSession } from "./snippet-session";
+import {
   Canvas2DBackend,
   GlyphAtlas,
   ViewportImpl,
@@ -553,6 +562,13 @@ interface DocumentSession {
   caret: number;
   selection: Selection;
   selections: SelectionSet; // P2#5
+  /**
+   * Sessão de snippet ativa (P4#18), viva **enquanto o documento ativo** estiver dentro da
+   * expansão — `undefined` = fora. Fica na sessão do documento (e não num campo do controller)
+   * porque os offsets são absolutos **daquele** buffer: trocar de aba, undo/redo ou abrir outro
+   * arquivo invalida o estado, e aí o campo é limpo nos respectivos pontos do controller.
+   */
+  snippetSession?: SnippetSession | undefined;
   dispose(): void;
 }
 
@@ -1042,6 +1058,9 @@ class DocumentController {
   /** Abre `path`, cancelando qualquer abertura anterior. `true` = documento ligado. */
   async open(path: string): Promise<boolean> {
     await this.flushBatch();
+    // Snippets (P4#18): abrir outro documento encerra a sessão de snippet do ativo.
+    const previous = this.current;
+    if (previous !== undefined) previous.snippetSession = undefined;
     this.cancelOpening();
     const signalId = this.bridge.nextSignalId();
     this.opening = { signalId, path };
@@ -1146,6 +1165,8 @@ class DocumentController {
     const old = this.sessions[this.activeIndex];
     if (old !== undefined) {
       old.savedScrollPx = this.viewport.scrollOffsetPx();
+      // Snippets (P4#18): trocar de documento encerra a sessão de snippet ativa.
+      old.snippetSession = undefined;
     }
     // Ativa nova sessão
     this.activeIndex = index;
@@ -1182,6 +1203,8 @@ class DocumentController {
     // Flush lote pendente antes de fechar
     void this.flushBatch();
     const session = this.sessions[index]!;
+    // Snippets (P4#18): fechar o documento encerra a sessão de snippet dele.
+    session.snippetSession = undefined;
     session.dispose();
     foldingStates.delete(session.handle);
     this.sessions.splice(index, 1);
@@ -1313,6 +1336,20 @@ class DocumentController {
     if (session === undefined) return;
     try {
       const s = session.selection;
+      if (session.snippetSession !== undefined) {
+        // Snippets (P4#18): com sessão ativa o splice local ficaria incoerente com os espelhos
+        // (o lote só chega ao main no rAF, mas o espelho precisa do valor **antes** do próximo
+        // roundtrip). Decisão: usa o caminho IPC imediato — 1 roundtrip por tecla, latência
+        // extra **só** dentro de sessão de snippet.
+        if (!SelectionOps.isCollapsed(s)) {
+          await this.flushBatch();
+          const { start, end } = SelectionOps.normalized(s);
+          await this.replaceText(start, end - start, text);
+        } else {
+          await this.replaceText(session.caret, 0, text);
+        }
+        return;
+      }
       if (!SelectionOps.isCollapsed(s)) {
         // Seleção expandida: flush + replaceText imediato
         await this.flushBatch();
@@ -1402,9 +1439,67 @@ class DocumentController {
       updateCaretStatus(session.source, session.caret);
       session.dirty = true;
       setUndoStatus(result.canUndo, result.canRedo);
+      // Snippets (P4#18): rastreia a edição na sessão ativa e propaga espelhos/ancestrais
+      // **antes** de agendar o frame (os offsets abaixo já valem no documento final).
+      await this.propagateSnippetEdit(session, { start: at, end: at + remove }, insert);
       this.renderer.start();
     } catch (error) {
       console.error("Scribe: falha ao substituir texto no documento", error);
+    }
+  }
+
+  /**
+   * Snippets (P4#18): registra a edição aplicada em `replaceText` na sessão ativa e devolve os
+   * espelhos/ancestrais re-renderizados.
+   *
+   * Cada atualização vira **1 roundtrip sequencial** de `replaceOne`; a ordem da lista é a ordem
+   * de execução e cada `start/end` já é válido no documento no momento da sua aplicação (o
+   * snapshot interno da sessão evolui na mesma sequência). `applyEdit` devolve `null` quando a
+   * edição está fora da expansão / atravessa campos / atinge um espelho → a sessão encerra.
+   * Falha da ponte durante a propagação também encerra (o snapshot divergiu do documento).
+   */
+  private async propagateSnippetEdit(
+    session: TabSession,
+    edit: SnippetEditRange,
+    newText: string,
+  ): Promise<void> {
+    const active = session.snippetSession;
+    if (active === undefined) return;
+    const next = applyEdit(active, edit, newText);
+    if (next === null) {
+      session.snippetSession = undefined;
+      return;
+    }
+    session.snippetSession = next;
+    for (const update of next.updates) {
+      try {
+        const result = await session.bridge.replaceOne(
+          session.handle,
+          update.start,
+          update.end - update.start,
+          update.newText,
+        );
+        session.source.setText(result.text, result.revision);
+        const delta = update.newText.length - (update.end - update.start);
+        if (update.start < session.caret) {
+          // Espelho anterior ao caret desloca o caret (e a seleção colapsada) junto.
+          session.caret += delta;
+          session.selection = SelectionOps.collapsed(session.caret);
+          session.selections = SelectionSetOps.singular(session.caret);
+          this.renderer.setSelection(session.selection);
+          this.renderer.setSelections(session.selections);
+        }
+        session.dirty = true;
+        setUndoStatus(result.canUndo, result.canRedo);
+      } catch (error) {
+        console.error("Scribe: falha ao atualizar espelho de snippet — sessão encerrada", error);
+        session.snippetSession = undefined;
+        return;
+      }
+    }
+    if (next.updates.length > 0) {
+      this.viewport.setMetrics({ lineCount: session.source.lineCount() });
+      updateCaretStatus(session.source, session.caret);
     }
   }
 
@@ -1412,6 +1507,8 @@ class DocumentController {
     await this.flushBatch();
     const session = this.current;
     if (session === undefined) return;
+    // Snippets (P4#18): undo/redo invalida a sessão — os offsets não sobrevivem ao rollback.
+    session.snippetSession = undefined;
     try {
       const state =
         action === "undo"
@@ -2990,6 +3087,13 @@ function attachInputListeners(
     let col = Math.round((x - 12) / approxCharW);
     col = Math.max(0, Math.min(col, text.length));
     const offset = session.source.offsetOf(line, col);
+    // Snippets (P4#18): clique fora da expansão encerra a sessão ativa (dentro do range —
+    // inclusive entre paradas — ela continua viva).
+    const activeSnippet = session.snippetSession;
+    if (activeSnippet !== undefined) {
+      const span = sessionRange(activeSnippet);
+      if (offset < span.start || offset > span.end) session.snippetSession = undefined;
+    }
     mouseDragAnchor = offset;
     if (event.ctrlKey || event.metaKey) {
       // Ctrl+click: adiciona cursor extra (P2#5)
@@ -3373,6 +3477,20 @@ function attachInputListeners(
       return;
     }
     if (event.key === "Escape") {
+      // Snippets (P4#18): com sessão ativa, Esc encerra a sessão e consome o evento —
+      // antes de qualquer outro destino do Escape.
+      const snippetOwner = controller?.current;
+      if (snippetOwner?.snippetSession !== undefined) {
+        event.preventDefault();
+        snippetOwner.snippetSession = undefined;
+        snippetOwner.selection = SelectionOps.collapsed(snippetOwner.caret);
+        snippetOwner.selections = SelectionSetOps.singular(snippetOwner.caret);
+        renderer.setSelection(snippetOwner.selection);
+        renderer.setSelections(snippetOwner.selections);
+        updateCaretStatus(snippetOwner.source, snippetOwner.caret);
+        renderer.start();
+        return;
+      }
       // Esc fecha a find bar primeiro (se aberta); só depois é que cancela uma abertura em curso.
       if (findBar !== undefined && findBar.model.isOpen) {
         event.preventDefault();
@@ -3385,11 +3503,45 @@ function attachInputListeners(
       }
     }
 
-    // Snippet expansion (P4#18): Tab sem modificador → dispara snippet se
-    // o cursor estiver no fim de um trigger.
-    if (!event.ctrlKey && !event.metaKey && !event.shiftKey && !event.altKey && event.key === "Tab") {
+    // Snippets (P4#18): com sessão ativa, Tab/Shift+Tab ciclam as paradas (não indentam).
+    if (!event.ctrlKey && !event.metaKey && !event.altKey && event.key === "Tab") {
       const session = controller?.current;
-      if (session !== undefined && session.caret > 0) {
+      const active = session?.snippetSession;
+      if (session !== undefined && active !== undefined) {
+        event.preventDefault();
+        const target = event.shiftKey ? previousTabStop(active) : nextTabStop(active);
+        if (target === null) {
+          // Fim da sessão: passar do último encerra aqui; chegar em $0 seleciona a parada
+          // final (caret no fim dela) e descarta a sessão.
+          const zero = event.shiftKey
+            ? undefined
+            : active.fields.find((f) => f.index === 0 && f.isPrimary);
+          session.snippetSession = undefined;
+          if (zero !== undefined) {
+            session.caret = zero.end;
+            session.selection = { anchor: zero.start, active: zero.end };
+          } else {
+            session.selection = SelectionOps.collapsed(session.caret);
+          }
+          session.selections = [session.selection] as SelectionSet;
+          renderer.setSelection(session.selection);
+          renderer.setSelections(session.selections);
+          updateCaretStatus(session.source, session.caret);
+          renderer.start();
+          return;
+        }
+        // Seleciona o range da parada atual (o renderer já pinta seleção no canvas).
+        session.snippetSession = target.session;
+        session.caret = target.stop.end;
+        session.selection = { anchor: target.stop.start, active: target.stop.end };
+        session.selections = [session.selection] as SelectionSet;
+        renderer.setSelection(session.selection);
+        renderer.setSelections(session.selections);
+        updateCaretStatus(session.source, session.caret);
+        renderer.start();
+        return;
+      }
+      if (!event.shiftKey && session !== undefined && session.caret > 0) {
         const text = session.source.text;
         // Pega a palavra antes do cursor
         let wordStart = session.caret - 1;
@@ -3412,15 +3564,21 @@ function attachInputListeners(
             viewport.setMetrics({ lineCount: session.source.lineCount() });
             session.dirty = true;
             setUndoStatus(result.canUndo, result.canRedo);
-            // Posiciona cursor no primeiro tabstop (se houver)
-            if (expansion.tabStops.length > 0) {
-              const first = expansion.tabStops[0]!.start;
-              session.caret = wordStart + first;
+            // Snippets (P4#18): cria a sessão e **seleciona** a primeira parada.
+            const snip = createSnippetSession(expansion, wordStart);
+            const first = currentStop(snip);
+            if (first !== null && first.index !== 0) {
+              session.snippetSession = snip;
+              session.caret = first.end;
+              session.selection = { anchor: first.start, active: first.end };
             } else {
-              session.caret = wordStart + expansion.text.length;
+              // Sem parada navegável (template só com `$0` ou liso): caret no $0 ou no fim.
+              session.snippetSession = undefined;
+              const zero = snip.fields.find((f) => f.index === 0 && f.isPrimary);
+              session.caret = zero !== undefined ? zero.start : wordStart + expansion.text.length;
+              session.selection = SelectionOps.collapsed(session.caret);
             }
-            session.selection = SelectionOps.collapsed(session.caret);
-            session.selections = SelectionSetOps.singular(session.caret);
+            session.selections = [session.selection] as SelectionSet;
             renderer.setSelection(session.selection);
             renderer.setSelections(session.selections);
             updateCaretStatus(session.source, session.caret);
@@ -3565,7 +3723,10 @@ function attachInputListeners(
         // Auto-pair: insere par e reposiciona cursor no meio
         const at = session.caret;
         void controller.insertText(key + close).then(() => {
-          session.caret = at + 1;
+          // Snippets (P4#18): com sessão ativa o insertText vai por replaceText, que pode
+          // deslocar o caret por espelhos anteriores — deriva do caret final. Sem sessão,
+          // mantém a fórmula histórica (`at + 1`).
+          session.caret = session.snippetSession !== undefined ? session.caret - 1 : at + 1;
           session.selection = SelectionOps.collapsed(session.caret);
           session.selections = SelectionSetOps.singular(session.caret);
           updateCaretStatus(session.source, session.caret);
