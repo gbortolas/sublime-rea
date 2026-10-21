@@ -80,6 +80,14 @@
 - **Clean-room vale para subagentes também:** se o briefing pedir para copiar
   código, assembly ou pseudocódigo do alvo, o subagente **recusa** e devolve o
   motivo.
+- **Receita de janela grande (leia [`docs/PLAYBOOK.md`](docs/PLAYBOOK.md)):** o padrão
+  que provou dar certo no release 0.7.0 (22 agentes em 1 sessão) foi —
+  **implementadores em paralelo com partições disjuntas** → **integradores
+  sequenciais nos "arquivos quentes"** (`main`/`preload`/`renderer/main`/`html`/`css`/
+  `ipc-contract`) → **revisores + security + tester em paralelo** → **fixers em
+  paralelo**. O orquestrador é **dono do contrato IPC**. Todo implementador entrega
+  um bloco **WIRING SPEC** (nomes de método, pontos de fiação, ids de host, classes
+  CSS, degradação) para o integrador só executar.
 - **Digest curto:** o retorno é `file:line` + conclusão, nunca o arquivo.
   Limite prático: **≤ 40 linhas** (≤ 60 para o plano do `oracle`).
 - **Parallelize o discovery, não a escrita:** 2+ frentes independentes → 2

@@ -10,10 +10,15 @@
 
 ## ⚡ COMECE AQUI
 
-> 🚀 **Sessão nova?** O gatilho é a frase do usuário — **“pode continuar os trabalhos!”** (ou
+> 🚀 **Sessão nova?** O gatilho é a frase do usuário — **"pode continuar os trabalhos!"** (ou
 > equivalente) — e o **bootstrap** vive em [`../AGENTS.md`](../AGENTS.md), que manda **ler este
 > HANDOFF primeiro** (ele é o **ponto de entrada**) e então pegar o próximo item aberto do
 > [`BACKLOG.md`](BACKLOG.md). Não peça contexto: ele está todo em `docs/`.
+>
+> 🧭 **Vai abrir uma janela grande (vários itens/feature de uma vez)?** Leia
+> [`PLAYBOOK.md`](PLAYBOOK.md) **antes** de escrever o primeiro prompt: é a receita de
+> multiagente que provou dar certo no release 0.7.0 (22 agentes, 1 sessão) — as ondas,
+> o contrato de prompt, as 10 regras de ouro e a partição de arquivos.
 
 **Estado em uma linha:** ambiente ✅ · binário-alvo **100% analisável** ✅ · Track A (API Python +
 IPC) ✅ · **FASE 1 FECHADA** · **FASE 2 FECHADA** · **FASE 3 FECHADA** · **App 0.7.0 pronto pra uso**

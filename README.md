@@ -403,6 +403,7 @@ Track A (API Python + IPC) ✅ · **Fase 1 FECHADA** (P1.1–P1.6 ✅) · **Fase
 | [`docs/ROADMAP.md`](docs/ROADMAP.md) | **Roadmap de features**: 20 funcionalidades priorizadas em P1–P4, com esforço, dependências e descrição |
 | [`docs/HANDOFF.md`](docs/HANDOFF.md) | **Como retomar**: estado atual, pegadinhas operacionais, timeout do Ghidra, fatos observados do alvo |
 | [`docs/BACKLOG.md`](docs/BACKLOG.md) | **Placar vivo**: itens P0 (destravar), P1 (Fase 1), P2 (Fases 2–3), P3 (housekeeping) |
+| [`docs/PLAYBOOK.md`](docs/PLAYBOOK.md) | **Receita de multiagente** (provada no release 0.7.0): as ondas (implementadores → integradores → revisão/segurança/tester → fixers), o contrato de prompt, as 10 regras de ouro e a partição de arquivos que funcionou |
 | [`setup/README.md`](setup/README.md) | O **instalador reproduzível**: 10 etapas, flags, variáveis, troubleshooting, códigos de saída |
 | [`docs/analysis/api-python.md`](docs/analysis/api-python.md) | Evidência — **API Python de plugins**: superfície pública (3.14), delta vs 3.3, padrões da ponte, ledger `E1–E33` |
 | [`docs/analysis/ipc-plugin-host.md`](docs/analysis/ipc-plugin-host.md) | Evidência — **ponte C++↔Python**: shm POSIX nomeada + semáforos, canais `subl_send`/`subl_recv`/`subl_arecv` |
