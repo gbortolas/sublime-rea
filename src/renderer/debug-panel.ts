@@ -255,21 +255,22 @@ export function createDebugView(): DebugViewBinding {
   toolbar.hidden = true;
   toolbar.style.cssText = [
     "position: absolute;",
-    "top: 8px;",
+    // O `top` vem do CSS (`#debug-toolbar`): a barra desce para debaixo da find bar
+    // quando ela está aberta (aqui ela ficava no mesmo canto e cobria o "×" da busca).
     // Canto direito da área de texto, à direita do minimap (mesma convenção do find bar).
-    "right: calc(var(--s-minimap-w, 72px) + 12px);",
+    "right: calc(var(--s-minimap-w) + 12px);",
     "display: flex;",
     "align-items: center;",
     "gap: 4px;",
     "padding: 4px 6px;",
-    "background: var(--s-statusbar, #1f1f22);",
-    "border: 1px solid var(--s-border, #2b2b2f);",
+    "background: var(--s-statusbar);",
+    "border: 1px solid var(--s-border);",
     "border-radius: 6px;",
-    "box-shadow: 0 4px 16px rgba(0,0,0,.35);",
-    "z-index: 150;",
+    "box-shadow: var(--s-shadow);",
+    "z-index: var(--z-toolbar);",
     "font-family: inherit;",
     "font-size: 12px;",
-    "color: var(--s-fg, #ccc);",
+    "color: var(--s-fg);",
     // O pai (`#ui-overlay`) é `pointer-events:none` — sem isto a barra é inerte.
     "pointer-events: auto;",
   ].join(" ");
@@ -279,7 +280,7 @@ export function createDebugView(): DebugViewBinding {
   stateLabel.style.cssText = [
     "padding: 0 6px;",
     "font-weight: 600;",
-    "color: var(--s-accent, #3794ff);",
+    "color: var(--s-accent);",
     "text-transform: lowercase;",
   ].join(" ");
   toolbar.appendChild(stateLabel);
@@ -329,20 +330,20 @@ export function createDebugView(): DebugViewBinding {
   panel.hidden = true;
   panel.style.cssText = [
     "position: absolute;",
-    // Logo abaixo da barra de ferramentas (top: 8px + ~30px de altura).
-    "top: 44px;",
+    // O `top` vem do CSS (`#debug-panel`): logo abaixo da barra de ferramentas, que por
+    // sua vez desce para debaixo da find bar quando ela está aberta.
     // Canto direito da área de texto, à direita do minimap (mesma convenção do find bar).
-    "right: calc(var(--s-minimap-w, 72px) + 12px);",
+    "right: calc(var(--s-minimap-w) + 12px);",
     "width: 340px;",
     "max-height: 62vh;",
     "display: flex;",
     "flex-direction: column;",
-    "background: var(--s-sidebar, #252526);",
-    "border: 1px solid var(--s-border, #3c3c3c);",
+    "background: var(--s-sidebar);",
+    "border: 1px solid var(--s-border);",
     "border-radius: 6px;",
-    "box-shadow: 0 8px 24px rgba(0,0,0,.4);",
-    "z-index: 145;",
-    "color: var(--s-fg, #ccc);",
+    "box-shadow: var(--s-shadow);",
+    "z-index: var(--z-panel);",
+    "color: var(--s-fg);",
     "font-family: inherit;",
     "font-size: 12px;",
     // O conteúdo grande rola **dentro** do painel (o corpo tem `overflow-y:auto`).
@@ -361,7 +362,7 @@ export function createDebugView(): DebugViewBinding {
    * eles ficam à **direita** dele, como o find bar.
    */
   function applyRightOffset(): void {
-    const offset = isOpenValue ? "12px" : "calc(var(--s-minimap-w, 72px) + 12px)";
+    const offset = isOpenValue ? "12px" : "calc(var(--s-minimap-w) + 12px)";
     toolbar.style.right = offset;
     panel.style.right = offset;
   }
@@ -373,7 +374,7 @@ export function createDebugView(): DebugViewBinding {
     "align-items: center;",
     "justify-content: space-between;",
     "padding: 6px 8px;",
-    "border-bottom: 1px solid var(--s-border, #3c3c3c);",
+    "border-bottom: 1px solid var(--s-border);",
     "font-weight: 600;",
   ].join(" ");
   header.textContent = "Depuração";
@@ -435,15 +436,15 @@ export function createDebugView(): DebugViewBinding {
   valueTip.hidden = true;
   valueTip.style.cssText = [
     "position: fixed;",
-    "z-index: 220;",
+    "z-index: var(--z-tooltip);",
     "max-width: 320px;",
     "padding: 4px 8px;",
-    "background: var(--s-editor, #1e1e1e);",
-    "border: 1px solid var(--s-border, #3c3c3c);",
+    "background: var(--s-editor);",
+    "border: 1px solid var(--s-border);",
     "border-radius: 4px;",
-    "box-shadow: 0 4px 12px rgba(0,0,0,.4);",
-    "color: var(--s-fg, #ccc);",
-    "font-family: ui-monospace, monospace;",
+    "box-shadow: var(--s-shadow);",
+    "color: var(--s-fg);",
+    "font-family: var(--s-font-mono);",
     "font-size: 11px;",
     "pointer-events: none;",
     "white-space: pre-wrap;",
@@ -460,7 +461,7 @@ export function createDebugView(): DebugViewBinding {
       "font-size: 10px;",
       "letter-spacing: .08em;",
       "text-transform: uppercase;",
-      "color: var(--s-fg-muted, #888);",
+      "color: var(--s-fg-muted);",
     ].join(" ");
     return el;
   }
@@ -494,7 +495,7 @@ export function createDebugView(): DebugViewBinding {
       const secSpan = document.createElement("span");
       secSpan.textContent = secondary;
       secSpan.style.cssText = [
-        "color: var(--s-accent, #3794ff);",
+        "color: var(--s-accent);",
         "overflow: hidden;",
         "text-overflow: ellipsis;",
         "flex: 1;",
@@ -613,7 +614,7 @@ export function createDebugView(): DebugViewBinding {
 
     const label = document.createElement("span");
     label.textContent = `linha ${line}`;
-    label.style.cssText = "flex: 0 0 auto; color: var(--s-fg-muted, #999);";
+    label.style.cssText = "flex: 0 0 auto; color: var(--s-fg-muted);";
     head.appendChild(label);
 
     const badge = document.createElement("span");
@@ -627,9 +628,9 @@ export function createDebugView(): DebugViewBinding {
       "gap: 3px;",
       "padding: 0 5px;",
       "height: 15px;",
-      "border: 1px solid var(--s-accent, #3794ff);",
+      "border: 1px solid var(--s-accent);",
       "border-radius: 8px;",
-      "color: var(--s-accent, #3794ff);",
+      "color: var(--s-accent);",
       "font-size: 9px;",
       "letter-spacing: .04em;",
       "line-height: 1;",
@@ -663,7 +664,7 @@ export function createDebugView(): DebugViewBinding {
       "padding: 0;",
       "border: none;",
       "background: transparent;",
-      "color: var(--s-fg-muted, #999);",
+      "color: var(--s-fg-muted);",
       "cursor: pointer;",
       "line-height: 1;",
     ].join(" ");
@@ -725,11 +726,11 @@ export function createDebugView(): DebugViewBinding {
       "min-width: 0;",
       "height: 20px;",
       "padding: 0 6px;",
-      "border: 1px solid var(--s-border, #3c3c3c);",
+      "border: 1px solid var(--s-border);",
       "border-radius: 3px;",
-      "background: var(--s-editor, #1e1e1e);",
-      "color: var(--s-fg, #ccc);",
-      "font-family: ui-monospace, monospace;",
+      "background: var(--s-editor);",
+      "color: var(--s-fg);",
+      "font-family: var(--s-font-mono);",
       "font-size: 11px;",
     ].join(" ");
     input.addEventListener("change", () => {
@@ -787,16 +788,17 @@ export function createDebugView(): DebugViewBinding {
   const watchInput = document.createElement("input");
   watchInput.type = "text";
   watchInput.placeholder = "expressão (ex.: x + 1)";
+  watchInput.setAttribute("aria-label", "Expressão de observação");
   watchInput.style.cssText = [
     "flex: 1 1 auto;",
     "min-width: 0;",
     "height: 20px;",
     "padding: 0 6px;",
-    "border: 1px solid var(--s-border, #3c3c3c);",
+    "border: 1px solid var(--s-border);",
     "border-radius: 3px;",
-    "background: var(--s-editor, #1e1e1e);",
-    "color: var(--s-fg, #ccc);",
-    "font-family: ui-monospace, monospace;",
+    "background: var(--s-editor);",
+    "color: var(--s-fg);",
+    "font-family: var(--s-font-mono);",
     "font-size: 11px;",
   ].join(" ");
 
@@ -813,10 +815,10 @@ export function createDebugView(): DebugViewBinding {
     "height: 20px;",
     "width: 22px;",
     "padding: 0;",
-    "border: 1px solid var(--s-border, #3c3c3c);",
+    "border: 1px solid var(--s-border);",
     "border-radius: 3px;",
     "background: transparent;",
-    "color: var(--s-fg, #ccc);",
+    "color: var(--s-fg);",
     "cursor: pointer;",
     "line-height: 1;",
   ].join(" ");
@@ -849,10 +851,10 @@ export function createDebugView(): DebugViewBinding {
     "height: 20px;",
     "width: 22px;",
     "padding: 0;",
-    "border: 1px solid var(--s-border, #3c3c3c);",
+    "border: 1px solid var(--s-border);",
     "border-radius: 3px;",
     "background: transparent;",
-    "color: var(--s-fg, #ccc);",
+    "color: var(--s-fg);",
     "cursor: pointer;",
     "line-height: 1;",
   ].join(" ");
@@ -892,7 +894,7 @@ export function createDebugView(): DebugViewBinding {
       const name = document.createElement("span");
       name.textContent = expression;
       name.style.cssText = [
-        "font-family: ui-monospace, monospace;",
+        "font-family: var(--s-font-mono);",
         "overflow: hidden;",
         "text-overflow: ellipsis;",
         "white-space: nowrap;",
@@ -918,8 +920,8 @@ export function createDebugView(): DebugViewBinding {
         value.style.cssText = [
           "flex: 1 1 auto;",
           "min-width: 0;",
-          "color: var(--s-accent, #3794ff);",
-          "font-family: ui-monospace, monospace;",
+          "color: var(--s-accent);",
+          "font-family: var(--s-font-mono);",
           "overflow: hidden;",
           "text-overflow: ellipsis;",
           "white-space: nowrap;",
@@ -942,7 +944,7 @@ export function createDebugView(): DebugViewBinding {
         "padding: 0;",
         "border: none;",
         "background: transparent;",
-        "color: var(--s-fg-muted, #999);",
+        "color: var(--s-fg-muted);",
         "cursor: pointer;",
         "line-height: 1;",
       ].join(" ");
@@ -977,7 +979,7 @@ export function createDebugView(): DebugViewBinding {
         const frame = frames[i]!;
         const el = row(0, false, false, `${i + 1}.`, frameLabel(frame));
         if (i === selectedFrameIndex) {
-          el.style.background = "var(--s-highlight, #094771)";
+          el.style.background = "var(--s-highlight)";
         }
         el.addEventListener("click", () => {
           selectedFrameIndex = i;
@@ -1024,7 +1026,7 @@ export function createDebugView(): DebugViewBinding {
     } else if (state === "inactive" || state === "terminated") {
       const empty = document.createElement("div");
       empty.textContent = "Nenhuma sessão de depuração ativa. F5 inicia.";
-      empty.style.cssText = "padding: 10px; color: var(--s-fg-muted, #888);";
+      empty.style.cssText = "padding: 10px; color: var(--s-fg-muted);";
       stackHost.appendChild(empty);
     } else if (breakpointCount > 0) {
       stackHost.appendChild(sectionLabel(`Breakpoints: ${breakpointCount}`));
@@ -1041,8 +1043,8 @@ export function createDebugView(): DebugViewBinding {
         "padding: 4px 10px 8px;",
         "white-space: pre-wrap;",
         "word-break: break-word;",
-        "color: var(--s-fg-muted, #aaa);",
-        "font-family: ui-monospace, monospace;",
+        "color: var(--s-fg-muted);",
+        "font-family: var(--s-font-mono);",
         "font-size: 11px;",
         "max-height: 160px;",
         "overflow-y: auto;",

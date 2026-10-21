@@ -13,9 +13,9 @@
  * Este arquivo é bundleado (esbuild) e executado por `worker_threads`. Importa valor do shared
  * porque o bundler resolve tudo numa única saída CJS.
  */
-import { open, readFile, writeFile, rename, mkdtemp, rm } from "node:fs/promises";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { open, readFile, writeFile, rename, rm, stat, chmod } from "node:fs/promises";
+import { randomBytes } from "node:crypto";
+import { basename, dirname, join } from "node:path";
 import { parentPort, workerData } from "node:worker_threads";
 import type {
   DocumentHandle,
@@ -266,6 +266,32 @@ export function createWorkerRuntime(
   };
 }
 
+/**
+ * Rejeita **arquivos especiais** (FIFO, device, socket, diretório).
+ *
+ * Ler um FIFO **bloqueia para sempre** (sem escritor) ⇒ o worker fica preso e a task
+ * nunca resolve ⇒ a leitura pelo IPC **nunca responde** (achado MÉDIO).
+ */
+async function assertRegularFile(path: string): Promise<void> {
+  const stats = await stat(path);
+  if (!stats.isFile()) {
+    throw new Error(`task: "${path}" não é um arquivo regular (FIFO/device/diretório)`);
+  }
+}
+
+/** Modo (permissões) do arquivo existente — `undefined` se ele ainda não existe. */
+async function fileMode(path: string): Promise<number | undefined> {
+  try {
+    const stats = await stat(path);
+    return stats.mode & 0o777;
+  } catch (error) {
+    const code = (error as { code?: unknown }).code;
+    // Ainda não existe (primeiro save) ⇒ o modo default do SO vale.
+    if (code === "ENOENT") return undefined;
+    throw error;
+  }
+}
+
 async function executeTask(
   request: WorkerRequest,
   texts: Map<DocumentHandle, RegisteredText>,
@@ -274,6 +300,7 @@ async function executeTask(
   switch (payload.kind) {
     case "readFile": {
       const range = payload.range;
+      await assertRegularFile(payload.path);
       if (range) {
         const handle = await open(payload.path, "r");
         try {
@@ -287,14 +314,34 @@ async function executeTask(
       return await readFile(payload.path, "utf8");
     }
     case "writeFile": {
-      // Escrita atômica: tmp + rename para não truncar o arquivo em caso de falha.
-      const tmpDir = await mkdtemp(join(tmpdir(), "scribe-write-"));
-      const tmpPath = join(tmpDir, "tmp");
+      // Escrita atômica: tmp + `rename` **no mesmo diretório do destino**.
+      //
+      // **Achado ALTO (EXDEV):** o tmp vivia em `os.tmpdir()` ⇒ o `rename` cruzava
+      // filesystems (`/tmp` → `$HOME`) ⇒ `EXDEV` ⇒ **o arquivo não era salvo** (o
+      // `document.save` devolvia `Scribe IPC[EXDEV]: cross-device link not permitted`).
+      // Com o tmp no diretório do destino, o `rename` é **local** (mesmo device) e a
+      // escrita continua atômica.
+      const data = new Uint8Array(payload.data);
+      const target = payload.path;
+      const dir = dirname(target);
+      const tmpPath = join(dir, `.${basename(target)}.scribe-${process.pid}-${randomBytes(4).toString("hex")}`);
       try {
-        await writeFile(tmpPath, new Uint8Array(payload.data));
-        await rename(tmpPath, payload.path);
-      } finally {
-        await rm(tmpDir, { recursive: true, force: true }).catch(() => {});
+        const mode = await fileMode(target);
+        await writeFile(tmpPath, data, mode !== undefined ? { mode } : {});
+        if (mode !== undefined) {
+          // O `mode` do `writeFile` é **mascarado pelo umask** ⇒ `chmod` para o modo exato
+          // (um script executável continua executável depois do save).
+          await chmod(tmpPath, mode);
+        }
+        await rename(tmpPath, target);
+      } catch (error) {
+        // Ainda assim deu EXDEV (ou o tmp não pôde ser criado) ⇒ grava **direto** no
+        // destino: perde a atomicidade, mas **salva o arquivo**.
+        console.warn("Scribe: escrita atômica falhou, gravando direto no destino:", error);
+        await rm(tmpPath, { force: true }).catch((rmError: unknown) => {
+          console.warn("Scribe: não foi possível remover o tmp de escrita:", rmError);
+        });
+        await writeFile(target, data);
       }
       return undefined;
     }

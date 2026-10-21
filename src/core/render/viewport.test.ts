@@ -241,3 +241,71 @@ describe("ViewportImpl — modo soft wrap (rows visuais)", () => {
     expect(viewport.scrollOffsetPx()).toBe(20);
   });
 });
+
+describe("ViewportImpl — rolagem em rows (roda do mouse / PageUp-PageDown)", () => {
+  /**
+   * Mapa de exemplo: a linha 0 ocupa 3 rows (0, 1, 2), a linha 1 ocupa 2 rows (3, 4) e a
+   * linha 2 ocupa 1 row (5).
+   */
+  const rowStarts = [0, 3, 5, 6];
+  const mapper: VisualRowMapper = {
+    rowOfLine: (line: number): number => rowStarts[Math.min(Math.max(line, 0), rowStarts.length - 1)] ?? 0,
+    lineOfRow: (row: number): number => {
+      let line = 0;
+      for (let i = 0; i < rowStarts.length; i++) {
+        if ((rowStarts[i] ?? 0) <= row) line = i;
+      }
+      return line;
+    },
+  };
+
+  function wrapSetup(withMapper: boolean): { viewport: ViewportImpl } {
+    const { viewport } = setup({
+      lineCount: 3,
+      lineHeight: 10,
+      viewportHeight: 20,
+      visualLineCount: 8,
+      ...(withMapper ? { visualRowMapper: mapper } : {}),
+    });
+    return { viewport };
+  }
+
+  it("scrollByRows move N rows (não N linhas lógicas) com o mapper ativo", () => {
+    const { viewport } = wrapSetup(true);
+    viewport.scrollByRows(2);
+    expect(viewport.scrollOffsetPx()).toBe(20); // 2 rows × 10px
+    viewport.scrollByRows(-1);
+    expect(viewport.scrollOffsetPx()).toBe(10); // 1 row × 10px
+  });
+
+  it("scrollByRows clampa no fim do documento (em rows)", () => {
+    const { viewport } = wrapSetup(true);
+    // 8 rows no total, viewport de 2 rows ⇒ o offset máximo é a row 6 (60px).
+    viewport.scrollByRows(100);
+    expect(viewport.scrollOffsetPx()).toBe(60);
+  });
+
+  it("sem o mapper, scrollByRows move linhas lógicas (1 row = 1 linha)", () => {
+    const { viewport } = wrapSetup(false);
+    viewport.scrollByRows(3);
+    expect(viewport.scrollOffsetPx()).toBe(30);
+  });
+
+  it("visibleRowRange devolve as rows visíveis (1 tela)", () => {
+    const { viewport } = wrapSetup(true);
+    expect(viewport.visibleRowRange()).toEqual({ first: 0, count: 2 });
+    viewport.scrollByRows(3);
+    expect(viewport.visibleRowRange()).toEqual({ first: 3, count: 2 });
+  });
+
+  it("scrollByRows gera o dano das linhas tocadas", () => {
+    const { viewport } = wrapSetup(true);
+    viewport.scrollByRows(3);
+    const damage = viewport.takeDamage();
+    // Saiu a linha 0 (rows 0..2) e entrou a linha 1 (rows 3..4).
+    expect(damage.map((r) => ({ y: r.y, h: r.h }))).toEqual([
+      { y: 0, h: 30 },
+      { y: 30, h: 20 },
+    ]);
+  });
+});

@@ -5,6 +5,7 @@
  * próximo da posição do mouse. Auto-esconde no próximo mouse move ou keypress.
  * Segue o mesmo padrão de `completions.ts`.
  */
+import { clampPopupElement, POPUP_PADDING } from "./popup-geometry";
 
 export interface HoverTooltipBinding {
   show(contents: readonly string[], x: number, y: number): void;
@@ -69,13 +70,19 @@ export function createHoverTooltip(): HoverTooltipBinding {
       bodyEl.appendChild(p);
     }
 
-    // Posiciona: tenta ficar abaixo/à direita do cursor, mas sem sair da janela
-    const padding = 12;
-    const maxX = window.innerWidth - tooltipEl.offsetWidth - padding;
-    const maxY = window.innerHeight - tooltipEl.offsetHeight - padding;
-    tooltipEl.style.left = `${Math.min(x + padding, Math.max(padding, maxX))}px`;
-    tooltipEl.style.top = `${Math.min(y + padding, Math.max(padding, maxY))}px`;
+    // O tooltip precisa estar **visível** para ser medido (elemento `hidden` mede 0×0 —
+    // era por isso que o clamp antigo não fazia nada).
     tooltipEl.hidden = false;
+
+    // Posiciona: tenta ficar abaixo/à direita do cursor, mas sem sair da janela.
+    // O clamp é o mesmo dos outros popups (`popup-geometry.ts`).
+    const { x: left, y: top } = clampPopupElement(
+      tooltipEl,
+      { x, y },
+      { offset: POPUP_PADDING, padding: POPUP_PADDING },
+    );
+    tooltipEl.style.left = `${left}px`;
+    tooltipEl.style.top = `${top}px`;
     isShown = true;
 
     // Auto-hide depois de 8 segundos

@@ -14,6 +14,7 @@
  * A **lógica** (índice inicial, movimento com setas) é pura e testável sem DOM — o ambiente de
  * teste do projeto roda em Node (`environment: "node"`), sem jsdom.
  */
+import { clampPopupElement } from "./popup-geometry";
 
 /** Opções e callbacks do popup de escolha. */
 export interface SnippetChoicePopupOptions {
@@ -84,7 +85,7 @@ function renderSelection(): void {
     const selected = i === current.selected;
     item.classList.toggle("selected", selected);
     item.setAttribute("aria-selected", String(selected));
-    item.style.background = selected ? "var(--highlight, #094771)" : "";
+    item.style.background = selected ? "var(--highlight)" : "";
   }
 }
 
@@ -123,25 +124,29 @@ export function showSnippetChoice(options: SnippetChoicePopupOptions): void {
   popup.tabIndex = -1;
   popup.style.cssText = [
     "position: fixed;",
-    "z-index: 200;",
+    "z-index: var(--z-popup);",
     "min-width: 160px;",
     "max-width: 420px;",
     "max-height: 240px;",
     "overflow-y: auto;",
     "padding: 4px;",
-    "background: var(--bg-overlay, #252526);",
-    "border: 1px solid var(--border, #3c3c3c);",
+    "background: var(--bg-overlay);",
+    "border: 1px solid var(--border);",
     "border-radius: 6px;",
-    "box-shadow: 0 8px 24px rgba(0,0,0,.45);",
-    "color: var(--fg, #ccc);",
+    "box-shadow: var(--s-shadow);",
+    "color: var(--fg);",
     "font-family: inherit;",
     "font-size: 13px;",
   ].join(" ");
 
-  if (options.x !== undefined && options.y !== undefined) {
-    popup.style.left = `${options.x}px`;
-    popup.style.top = `${options.y}px`;
-  } else {
+  /*
+   * A posição perto do caret é ajustada **depois** de o popup entrar no DOM (é preciso
+   * medir o tamanho real da lista): sem o clamp, o popup saía da janela (290px cortados)
+   * quando o caret estava perto da borda. Sem âncora, o popup fica centralizado.
+   */
+  const anchorX = options.x;
+  const anchorY = options.y;
+  if (anchorX === undefined || anchorY === undefined) {
     popup.style.left = "50%";
     popup.style.top = "80px";
     popup.style.transform = "translateX(-50%)";
@@ -229,6 +234,14 @@ export function showSnippetChoice(options: SnippetChoicePopupOptions): void {
 
   const host = document.getElementById("ui-overlay") ?? document.body;
   host.appendChild(popup);
+
+  // Clamp: agora o popup está no DOM (e com a lista montada) ⇒ o tamanho real é conhecido.
+  if (anchorX !== undefined && anchorY !== undefined) {
+    const { x, y } = clampPopupElement(popup, { x: anchorX, y: anchorY });
+    popup.style.left = `${x}px`;
+    popup.style.top = `${y}px`;
+  }
+
   document.addEventListener("keydown", onKeyDown, true);
   renderSelection();
   popup.focus();

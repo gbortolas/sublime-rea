@@ -7,11 +7,14 @@ import { GlyphAtlas } from "./atlas";
 import {
   buildInstances,
   type CaretPosition,
+  type FoldingState,
   type LineLayout,
   type LineSource,
   type SceneInstances,
   type SearchHighlight,
+  type VisualRowIndexLike,
 } from "./scene";
+import { collapsedLinesOf, VisualRowIndex } from "./soft-wrap";
 
 /** Resolvedor de tema mínimo local ao teste (evita import cruzado entre módulos de `core`). */
 function prefixTheme(rules: Readonly<Record<string, RGBA>>): ThemeResolver {
@@ -86,6 +89,9 @@ function buildWithMeasure(
     readonly search?: SearchHighlight;
     readonly selection?: Selection;
     readonly extraCarets?: readonly CaretPosition[];
+    readonly activeLine?: number;
+    readonly folding?: FoldingState;
+    readonly rowIndex?: VisualRowIndexLike;
   },
 ): SceneInstances {
   return buildInstances(
@@ -102,6 +108,12 @@ function buildWithMeasure(
     undefined, // extraSelections
     undefined, // bracketMatch
     measure,
+    extras?.folding,
+    undefined, // inlayHints
+    undefined, // gitDiffs
+    undefined, // breakpointLines
+    extras?.activeLine,
+    extras?.rowIndex,
   );
 }
 
@@ -449,10 +461,11 @@ describe("buildInstances — soft wrap (caret/seleção/busca na row certa)", ()
       { selection: { anchor: 12, active: 15 } },
     );
     const sel = scene.rects.find((r) => r.color === 0x264f78ff);
-    // Colunas 12..14 → 2º segmento (row 1): X = paddingLeft + 2 colunas, W = 2 colunas.
+    // Colunas 12..15 (3 caracteres) → 2º segmento (row 1): X = paddingLeft + 2 colunas,
+    // W = 3 colunas (o fim da seleção é **após** o último caractere).
     expect(sel?.rect.y).toBe(24);
     expect(sel?.rect.x).toBeCloseTo(8 + 2 * 9.6, 5);
-    expect(sel?.rect.w).toBeCloseTo(2 * 9.6, 5);
+    expect(sel?.rect.w).toBeCloseTo(3 * 9.6, 5);
   });
 
   it("seleção que atravessa segmentos gera um rect por segmento", () => {
@@ -466,13 +479,13 @@ describe("buildInstances — soft wrap (caret/seleção/busca na row certa)", ()
     );
     const sels = scene.rects.filter((r) => r.color === 0x264f78ff);
     expect(sels).toHaveLength(2);
-    // 1º segmento: cols 8..10 (row 0) · 2º segmento: cols 10..12 (row 1).
+    // 1º segmento: cols 8..10 (row 0) · 2º segmento: cols 10..13 (row 1).
     expect(sels[0]?.rect.y).toBe(4);
     expect(sels[0]?.rect.x).toBeCloseTo(8 + 8 * 9.6, 5);
     expect(sels[0]?.rect.w).toBeCloseTo(2 * 9.6, 5);
     expect(sels[1]?.rect.y).toBe(24);
     expect(sels[1]?.rect.x).toBeCloseTo(8, 5);
-    expect(sels[1]?.rect.w).toBeCloseTo(2 * 9.6, 5);
+    expect(sels[1]?.rect.w).toBeCloseTo(3 * 9.6, 5);
   });
 
   it("match da busca fica na row do segmento que o contém", () => {
@@ -571,11 +584,15 @@ describe("buildInstances — regressão sem wrap (wrapWidth = 0)", () => {
       },
     );
     // Snapshot do comportamento legado (antes da malha visual) — congelado.
+    //
+    // ⚠️ **1 mudança deliberada** (achado #5): a seleção agora termina **após** o último
+    // caractere selecionado (antes parava 1 caractere antes) ⇒ a largura da faixa
+    // selecionada é 3 colunas (28.8px) em vez de 2 (19.2px). O resto é idêntico.
     expect(scene.rects.map((r) => ({ ...r.rect, color: r.color }))).toEqual([
       { x: 0, y: 0, w: 400, h: 100, color: 0x1e1f22ff }, // fundo
       { x: 0, y: 24, w: 400, h: 20, color: 0x252629ff }, // destaque da linha atual (linha 1)
       { x: 8, y: 4, w: 28.800000000000004, h: 20, color: 0xff880088 }, // match de busca (atual)
-      { x: 17.6, y: 4, w: 19.200000000000003, h: 20, color: 0x264f78ff }, // seleção (1..4)
+      { x: 17.6, y: 4, w: 28.800000000000004, h: 20, color: 0x264f78ff }, // seleção (1..4) — 3 chars
       { x: 36.8, y: 24, w: 2, h: 20, color: 0xffffffff }, // caret
     ]);
   });
@@ -597,7 +614,200 @@ describe("buildInstances — regressão sem wrap (wrapWidth = 0)", () => {
     // Baseline: caret x = paddingLeft + 3 * advanceDoEspaço; seleção x = paddingLeft + 4 * advance.
     expect(caretRect?.rect.x).toBeCloseTo(8 + 3 * 9.6, 5);
     expect(sel?.rect.x).toBeCloseTo(56, 5);
+    // A seleção cobre 4 colunas (2..6) — o fim é **após** o último caractere (achado #5).
+    expect(sel?.rect.w).toBeCloseTo(4 * 9.6, 5);
+  });
+});
+
+describe("buildInstances — caret real × linha ativa", () => {
+  const atlas = new GlyphAtlas();
+
+  it("o caret é desenhado na posição do cursor (não na 1ª linha visível)", () => {
+    const scene = buildInstances(
+      sourceOf(["aaa", "bbb", "ccc"]),
+      layout(0),
+      atlas,
+      style,
+      { first: 0, count: 3 },
+      { line: 2, column: 1, color: 0xffffffff, width: 2 },
+    );
+    const caretRect = scene.rects.find((r) => r.color === 0xffffffff);
+    // Linha 2 → row 2 → Y = paddingTop(4) + 2 * lineHeight(20) = 44.
+    expect(caretRect?.rect.y).toBe(44);
+    // X = paddingLeft(8) + 1 coluna.
+    expect(caretRect?.rect.x).toBeCloseTo(8 + 9.6, 5);
+    expect(caretRect?.rect.h).toBe(20);
+  });
+
+  it("a linha ativa (activeLine) desenha o destaque separado do caret", () => {
+    const scene = buildWithMeasure(
+      sourceOf(["aaa", "bbb", "ccc"]),
+      layout(0),
+      atlas,
+      { first: 0, count: 3 },
+      (text: string): number => text.length * 10,
+      {
+        caret: { line: 2, column: 1, color: 0xffffffff, width: 2 },
+        activeLine: 1,
+      },
+    );
+    // O destaque de linha atual (fundo 0x252629ff) fica na **linha ativa** (row 1 → Y = 24).
+    const highlight = scene.rects.find((r) => r.color === 0x252629ff);
+    expect(highlight?.rect.y).toBe(24);
+    // E o caret continua na posição real do cursor (linha 2 → Y = 44).
+    const caretRect = scene.rects.find((r) => r.color === 0xffffffff);
+    expect(caretRect?.rect.y).toBe(44);
+  });
+
+  it("sem activeLine, o destaque de linha atual acompanha a linha do caret", () => {
+    const scene = buildWithMeasure(
+      sourceOf(["aaa", "bbb", "ccc"]),
+      layout(0),
+      atlas,
+      { first: 0, count: 3 },
+      (text: string): number => text.length * 10,
+      { caret: { line: 2, column: 1, color: 0xffffffff, width: 2 } },
+    );
+    const highlight = scene.rects.find((r) => r.color === 0x252629ff);
+    expect(highlight?.rect.y).toBe(44);
+  });
+
+  it("a linha ativa é desenhada mesmo sem caret no range", () => {
+    const scene = buildWithMeasure(
+      sourceOf(["aaa", "bbb", "ccc"]),
+      layout(0),
+      atlas,
+      { first: 0, count: 3 },
+      (text: string): number => text.length * 10,
+      { activeLine: 2 },
+    );
+    const highlight = scene.rects.find((r) => r.color === 0x252629ff);
+    expect(highlight?.rect.y).toBe(44);
+    // Sem caret não há barra de cursor.
+    expect(scene.rects.find((r) => r.color === 0xffffffff)).toBeUndefined();
+  });
+});
+
+describe("buildInstances — seleção (fim da faixa)", () => {
+  const atlas = new GlyphAtlas();
+  const measure = (text: string): number => text.length * 10;
+
+  it("a seleção termina na coluna certa (cobre o último caractere)", () => {
+    const scene = buildWithMeasure(
+      sourceOf(["abc def"]),
+      layout(0),
+      atlas,
+      { first: 0, count: 1 },
+      measure,
+      { selection: { anchor: 1, active: 4 } },
+    );
+    const sel = scene.rects.find((r) => r.color === 0x264f78ff);
+    // Colunas 1..4 → 3 caracteres ("bcd"). Antes parava em 3 (1 caractere curto).
+    expect(sel?.rect.x).toBeCloseTo(8 + 1 * 9.6, 5);
     expect(sel?.rect.w).toBeCloseTo(3 * 9.6, 5);
+  });
+
+  it("a seleção que termina no fim da linha cobre a linha inteira", () => {
+    const scene = buildWithMeasure(
+      sourceOf(["abc def", "ghi"]),
+      layout(0),
+      atlas,
+      { first: 0, count: 2 },
+      measure,
+      { selection: { anchor: 0, active: 7 } },
+    );
+    const sel = scene.rects.find((r) => r.color === 0x264f78ff);
+    // 7 caracteres da linha 0 (o fim da linha é a coluna 7).
+    expect(sel?.rect.x).toBeCloseTo(8, 5);
+    expect(sel?.rect.w).toBeCloseTo(7 * 9.6, 5);
+    expect(sel?.rect.y).toBe(4);
+  });
+
+  it("a seleção que termina no fim da linha seguinte não pinta a linha seguinte", () => {
+    const scene = buildWithMeasure(
+      sourceOf(["abc", "def"]),
+      layout(0),
+      atlas,
+      { first: 0, count: 2 },
+      measure,
+      // Seleciona "abc" + o `\n` (offset 4 = início da linha 1).
+      { selection: { anchor: 0, active: 4 } },
+    );
+    const sels = scene.rects.filter((r) => r.color === 0x264f78ff);
+    // Só a linha 0 é pintada (3 caracteres) — a linha 1 está vazia na seleção.
+    expect(sels).toHaveLength(1);
+    expect(sels[0]?.rect.w).toBeCloseTo(3 * 9.6, 5);
+  });
+});
+
+describe("buildInstances — guias de indentação (row visual)", () => {
+  const atlas = new GlyphAtlas();
+  const measure = (text: string): number => text.length * 10;
+
+  it("com wrap, a guia usa a row visual (não sobe N rows)", () => {
+    // A linha 0 é indentada e quebra em várias rows; a linha 1 também; a linha 2 não é
+    // indentada (fecha a guia).
+    const lines = [`    ${"a".repeat(26)}`, "    b", "c"];
+    const scene = buildWithMeasure(
+      sourceOf(lines),
+      wrapLayout(100),
+      atlas,
+      { first: 0, count: 3 },
+      measure,
+    );
+    const guides = scene.indentGuides;
+    expect(guides).toBeDefined();
+    // Topo = row 0 da linha 0 (Y = paddingTop).
+    expect(guides?.[0]?.top).toBe(4);
+    // A guia termina na **row visual** da linha 2 (a que fecha o nível 1) — a mesma row do
+    // texto desenhado (o último glifo).
+    const lastGlyphY = Math.max(...scene.glyphs.map((g) => g.y));
+    expect(guides?.[0]?.bottom).toBe(lastGlyphY - 2);
+    // E ela atravessa as rows da linha quebrada (com o índice lógico, subia N rows e
+    // terminava dentro do texto).
+    expect((guides?.[0]?.bottom ?? 0) - (guides?.[0]?.top ?? 0)).toBeGreaterThanOrEqual(3 * 20);
+  });
+
+  it("sem wrap, a guia acompanha a linha lógica", () => {
+    const lines = ["    a", "    b", "c"];
+    const scene = buildWithMeasure(
+      sourceOf(lines),
+      layout(0),
+      atlas,
+      { first: 0, count: 3 },
+      measure,
+    );
+    const guides = scene.indentGuides;
+    expect(guides?.[0]?.top).toBe(4);
+    expect(guides?.[0]?.bottom).toBe(4 + 2 * 20 - 2);
+  });
+});
+
+describe("buildInstances — folding × wrap (cena × índice)", () => {
+  const atlas = new GlyphAtlas();
+  const measure = (text: string): number => text.length * 10;
+
+  it("a linha colapsada reserva 1 row: o texto abaixo não salta", () => {
+    // A linha 1 (dentro da dobra) quebra em 3 rows — colapsada, reserva **1**.
+    const lines = ["a", "b".repeat(26), "c"];
+    const source = sourceOf(lines);
+    const index = new VisualRowIndex(source, 100, measure);
+    const folding = [{ startLine: 0, endLine: 1, kind: undefined, isCollapsed: true }];
+    index.setCollapsedLines(collapsedLinesOf(folding));
+    // A linha 2 está na row 2 (a colapsada ocupou 1 row, não 3).
+    expect(index.rowOfLine(2)).toBe(2);
+
+    const scene = buildWithMeasure(
+      source,
+      { ...wrapLayout(100), visualRowOffset: index.rowOfLine(2) },
+      atlas,
+      { first: 2, count: 1 },
+      measure,
+      { folding, rowIndex: index },
+    );
+    // O texto da linha 2 é desenhado na row 2 (Y = paddingTop + 2 * lineHeight = 44).
+    expect(scene.glyphs.filter((g) => g.y === 44)).toHaveLength(1);
+    expect(scene.glyphs.every((g) => g.y === 44)).toBe(true);
   });
 });
 

@@ -4,6 +4,8 @@
 import { describe, expect, it } from "vitest";
 import {
   buildVisualRowMap,
+  buildVisualRowMapFromIndex,
+  collapsedLinesOf,
   visualRowOf,
   VisualRowIndex,
   wrapLine,
@@ -258,8 +260,97 @@ describe("VisualRowIndex", () => {
     expect(index.rowOfLine(2)).toBe(4);
   });
 
+  it("invalidate preserva o prefixo (as linhas anteriores ficam em cache)", () => {
+    const index = new VisualRowIndex(sourceOf(lines), 100, measure);
+    const segs0 = index.segmentsOf(0);
+    const segs1 = index.segmentsOf(1);
+    index.invalidate(1);
+    // A linha 0 (o prefixo) continua em cache — a mesma instância (não foi descartada).
+    expect(index.segmentsOf(0)).toBe(segs0);
+    // A linha 1 foi invalidada (o texto dela pode ter mudado) — outra instância.
+    expect(index.segmentsOf(1)).not.toBe(segs1);
+  });
+
   it("linha inexistente não localiza nada", () => {
     const index = new VisualRowIndex(sourceOf(lines), 100, measure);
     expect(index.locate(99, 0)).toBeUndefined();
+  });
+});
+
+/* ─────────────────────────── folding (linhas colapsadas) ─────────────────────────── */
+
+describe("collapsedLinesOf", () => {
+  it("sem folding: nenhuma linha colapsada", () => {
+    expect(collapsedLinesOf(undefined).size).toBe(0);
+    expect(collapsedLinesOf([]).size).toBe(0);
+  });
+
+  it("as linhas internas do bloco dobrado colapsam (a 1ª permanece visível)", () => {
+    const collapsed = collapsedLinesOf([
+      { startLine: 3, endLine: 5, isCollapsed: true },
+      { startLine: 8, endLine: 9, isCollapsed: false },
+    ]);
+    expect([...collapsed].sort((a, b) => a - b)).toEqual([4, 5]);
+  });
+});
+
+describe("VisualRowIndex — linhas colapsadas (folding)", () => {
+  /** A linha 1 quebra em 3 rows (26 chars × 10px = 260px). */
+  const lines = ["a", "b".repeat(26), "c"];
+
+  it("a linha colapsada reserva 1 row (igual à cena)", () => {
+    const index = new VisualRowIndex(sourceOf(lines), 100, measure);
+    index.setCollapsedLines(new Set([1]));
+    // Linha 0 → row 0 · linha 1 (colapsada) → row 1 (1 row) · linha 2 → row 2.
+    expect(index.rowOfLine(1)).toBe(1);
+    expect(index.rowOfLine(2)).toBe(2);
+    expect(index.segmentsOf(1)).toHaveLength(1);
+    expect(index.rowCount).toBe(3);
+  });
+
+  it("sem as colapsadas, a linha quebrada ocupa N rows", () => {
+    const index = new VisualRowIndex(sourceOf(lines), 100, measure);
+    expect(index.rowOfLine(1)).toBe(1);
+    expect(index.rowOfLine(2)).toBe(4);
+    expect(index.rowCount).toBe(5);
+  });
+
+  it("trocar o conjunto de colapsadas invalida a partir da 1ª linha afetada", () => {
+    const index = new VisualRowIndex(sourceOf(lines), 100, measure);
+    expect(index.rowOfLine(2)).toBe(4);
+    index.setCollapsedLines(new Set([1]));
+    expect(index.rowOfLine(2)).toBe(2);
+    // Idempotente: o mesmo conjunto não invalida nada.
+    index.setCollapsedLines(new Set([1]));
+    expect(index.rowOfLine(2)).toBe(2);
+    // Voltar a colapsar nada devolve a contagem original.
+    index.setCollapsedLines(undefined);
+    expect(index.rowOfLine(2)).toBe(4);
+  });
+});
+
+describe("buildVisualRowMapFromIndex", () => {
+  const lines = ["short", "abcdefghijklmnopqrstuvwxyz", "x"];
+
+  it("reusa os segmentos do índice (a row é a do índice)", () => {
+    const index = new VisualRowIndex(sourceOf(lines), 100, measure);
+    const map = buildVisualRowMapFromIndex(index, 0, lines.length);
+    expect(map.segmentsOf(1)).toHaveLength(3);
+    expect(map.segmentsOf(1).map((s) => s.row)).toEqual([1, 2, 3]);
+    expect(map.locate(1, 15)?.row).toBe(2);
+    expect(map.locate(1, 15)?.column).toBe(5);
+  });
+
+  it("a linha colapsada não é desenhada, mas reserva a row do índice", () => {
+    const index = new VisualRowIndex(sourceOf(lines), 100, measure);
+    index.setCollapsedLines(new Set([1]));
+    const map = buildVisualRowMapFromIndex(index, 0, lines.length, new Set([1]));
+    expect(map.segmentsOf(1)).toHaveLength(0);
+    expect(map.rowOfLine(1)).toBe(1);
+    // A linha seguinte pula a row reservada (a colapsada ocuparia 3 rows).
+    expect(map.segmentsOf(2)[0]?.row).toBe(2);
+    // O "paint" (caret/seleção/busca) ainda tem onde desenhar.
+    expect(map.paintSegmentsOf(1)).toHaveLength(1);
+    expect(map.paintSegmentsOf(1)[0]?.row).toBe(1);
   });
 });

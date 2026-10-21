@@ -28,6 +28,17 @@ export interface LineRange {
   readonly count: number;
 }
 
+/**
+ * Range de **rows visuais** (início + contagem) — a unidade da rolagem com soft wrap.
+ *
+ * Mesma forma de `LineRange`, outra unidade: com o `VisualRowMapper` ativo, a row é a
+ * **row visual** (1 por segmento de wrap); sem ele, a row é a linha lógica (1:1).
+ */
+export interface RowRange {
+  readonly first: number;
+  readonly count: number;
+}
+
 export interface ViewportMetrics {
   readonly lineCount: number;
   readonly lineHeight: number;
@@ -179,33 +190,54 @@ export class ViewportImpl implements Viewport {
     const mapper = this.visualRowMapper;
     const targetRow = mapper !== undefined ? mapper.rowOfLine(targetLine) : targetLine;
     const target = clamp(targetRow * lineHeight, 0, this.maxScrollPx());
-    const animate = opts?.animate === true && this.scrollDurationMs > 0;
-    this.cancelAnimation();
+    this.scrollToOffset(target, opts?.animate === true);
+  }
 
-    if (!animate || Math.abs(target - this.offsetPx) < 0.5) {
-      const touched = this.applyOffset(target);
-      this.notify(touched);
-      return;
+  /**
+   * Rola `delta` **rows visuais** (não linhas lógicas).
+   *
+   * ⚠️ **Por que**: com soft wrap, uma linha lógica pode ocupar N rows — rolar "3 linhas"
+   * movia N×3 rows (a roda do mouse pulava o texto). Aqui a unidade é a **row**: `delta = 3`
+   * move 3 rows, sempre.
+   *
+   * Sem o `VisualRowMapper` (modo legado), 1 row = 1 linha lógica ⇒ o comportamento
+   * observado é o de sempre.
+   *
+   * @param delta Nº de rows (positivo = para baixo, negativo = para cima).
+   * @param opts `animate: true` usa a animação de scroll configurada.
+   */
+  scrollByRows(delta: number, opts?: { readonly animate?: boolean }): void {
+    if (this.disposed) return;
+    const { lineHeight } = this.metrics;
+    if (lineHeight <= 0) return;
+    const steps = Math.trunc(delta);
+    if (steps === 0) return;
+    const currentRow = Math.round(this.offsetPx / lineHeight);
+    // Teto em rows (o offset final tem de cair numa fronteira de row).
+    const maxRow = Math.max(0, Math.floor(this.maxScrollPx() / lineHeight));
+    const targetRow = clamp(currentRow + steps, 0, maxRow);
+    this.scrollToOffset(targetRow * lineHeight, opts?.animate === true);
+  }
+
+  /**
+   * Range de **rows visuais** atualmente visível (a mesma unidade do offset de rolagem).
+   *
+   * Com o `VisualRowMapper` ativo, a row é a row visual do soft wrap; sem ele, a row é a
+   * linha lógica (1:1). É a unidade que a roda do mouse e o PageUp/PageDown devem usar.
+   *
+   * ⚠️ Não inclui o `overscan` (a faixa lógica já o aplica) — o `count` é exatamente o
+   * número de rows que cabem na viewport (1 tela).
+   */
+  visibleRowRange(): RowRange {
+    const { lineHeight, viewportHeight, lineCount } = this.metrics;
+    if (lineCount <= 0 || lineHeight <= 0 || viewportHeight <= 0) {
+      return { first: 0, count: 0 };
     }
-
-    const from = this.offsetPx;
-    const start = this.nowFn();
-    const animation: AnimationState = { from, to: target, start };
-    this.animation = animation;
-    const step = (now: number): void => {
-      if (this.animation !== animation) return; // cancelada
-      const t = clamp((now - start) / this.scrollDurationMs, 0, 1);
-      const touched = this.applyOffset(from + (target - from) * easeInOutCubic(t));
-      if (t >= 1) {
-        this.animation = null;
-        this.animationHandle = undefined;
-        this.notify(touched);
-        return;
-      }
-      this.notify(touched);
-      this.animationHandle = this.requestFrameFn(step);
-    };
-    this.animationHandle = this.requestFrameFn(step);
+    const first = Math.floor(this.offsetPx / lineHeight);
+    const visible = Math.ceil(viewportHeight / lineHeight);
+    const totalRows = this.metrics.visualLineCount ?? lineCount;
+    const count = Math.max(0, Math.min(totalRows - first, visible));
+    return { first, count };
   }
 
   /** Damage acumulado (coalescido por linha) desde o último `takeDamage()`. */
@@ -259,6 +291,41 @@ export class ViewportImpl implements Viewport {
     this.animation = null;
     this.animationHandle?.dispose();
     this.animationHandle = undefined;
+  }
+
+  /**
+   * Aplica um novo offset (em px) e notifica o dano — com animação opcional.
+   *
+   * O alvo é sempre um offset **já clampado** pelo chamador.
+   */
+  private scrollToOffset(target: number, animate: boolean): void {
+    const useAnimation = animate && this.scrollDurationMs > 0;
+    this.cancelAnimation();
+
+    if (!useAnimation || Math.abs(target - this.offsetPx) < 0.5) {
+      const touched = this.applyOffset(target);
+      this.notify(touched);
+      return;
+    }
+
+    const from = this.offsetPx;
+    const start = this.nowFn();
+    const animation: AnimationState = { from, to: target, start };
+    this.animation = animation;
+    const step = (now: number): void => {
+      if (this.animation !== animation) return; // cancelada
+      const t = clamp((now - start) / this.scrollDurationMs, 0, 1);
+      const touched = this.applyOffset(from + (target - from) * easeInOutCubic(t));
+      if (t >= 1) {
+        this.animation = null;
+        this.animationHandle = undefined;
+        this.notify(touched);
+        return;
+      }
+      this.notify(touched);
+      this.animationHandle = this.requestFrameFn(step);
+    };
+    this.animationHandle = this.requestFrameFn(step);
   }
 
   /**

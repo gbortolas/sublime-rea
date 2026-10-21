@@ -183,6 +183,71 @@ function findMatchingBracket(text: string, offset: number): number | undefined {
   return undefined;
 }
 
+/**
+ * Nº máximo de linhas varridas (de cada lado) para achar o bracket par.
+ *
+ * ⚠️ **Por que um limite**: o caminho legado materializava o **documento inteiro** a cada
+ * frame (concat de `source.line(i)`) só para procurar o par ⇒ O(documento)/frame (200k linhas
+ * ⇒ 30 FPS ocioso). O par é procurado só na **vizinhança** do caret: o custo passa a ser
+ * O(janela), independente do tamanho do documento.
+ */
+export const BRACKET_SCAN_LINES = 200;
+
+/**
+ * Par do bracket em `offset`, procurado **só na vizinhança** da linha do caret.
+ *
+ * ⚠️ **Por que a janela não muda o resultado**: `findMatchingBracket` só conta o **mesmo**
+ * tipo de bracket (não uma pilha de aninhamento completo) ⇒ a varredura é sempre numa direção
+ * só (aberto → para a frente; fechado → para trás). A janela cobre exatamente essa direção,
+ * então o par encontrado é o mesmo do scan completo — desde que ele esteja na janela.
+ *
+ * @param source A fonte do documento (só a janela é materializada).
+ * @param offset Offset **absoluto** do bracket sob o caret.
+ * @param maxLines Nº de linhas da janela (de cada lado).
+ * @param position Posição **já calculada** de `offset` (evita um segundo `positionAt`).
+ * @returns O offset **absoluto** do par, ou `undefined` (não é bracket / par fora da janela).
+ */
+export function findMatchingBracketNear(
+  source: LineSource,
+  offset: number,
+  maxLines: number = BRACKET_SCAN_LINES,
+  position?: { readonly line: number; readonly column: number },
+): number | undefined {
+  const lineCount = source.lineCount();
+  if (lineCount === 0) return undefined;
+  const pos = position ?? source.positionAt(offset);
+  const line = pos.line;
+  if (line < 0 || line >= lineCount) return undefined;
+  const column = Math.max(0, Math.min(pos.column, source.line(line).length));
+  const char = source.line(line)[column];
+  if (char === undefined) return undefined;
+  const isOpener = char === "(" || char === "[" || char === "{";
+  const isCloser = char === ")" || char === "]" || char === "}";
+  if (!isOpener && !isCloser) return undefined;
+
+  // A janela cobre **a direção da varredura**: para a frente (aberto) ou para trás (fechado).
+  const firstLine = isOpener ? line : Math.max(0, line - maxLines);
+  const lastLine = isOpener ? Math.min(lineCount, line + maxLines + 1) : line + 1;
+  let text = "";
+  for (let i = firstLine; i < lastLine; i++) {
+    if (i > firstLine) text += "\n";
+    text += source.line(i);
+  }
+
+  // O offset **absoluto** do início da janela (evita um `offsetOf` O(documento)).
+  let windowStart: number;
+  if (isOpener) {
+    windowStart = offset - column;
+  } else {
+    let before = 0;
+    for (let i = firstLine; i < line; i++) before += source.line(i).length + 1;
+    windowStart = offset - column - before;
+  }
+
+  const found = findMatchingBracket(text, offset - windowStart);
+  return found === undefined ? undefined : windowStart + found;
+}
+
 const TEXT_STYLE: TextStyle = { family: "monospace", sizePx: 15, weight: 400, italic: false };
 
 const AUTO_PAIRS: Record<string, string> = {
@@ -694,6 +759,14 @@ interface DocumentSession {
   caret: number;
   selection: Selection;
   selections: SelectionSet; // P2#5
+  /**
+   * Última revisão **do servidor** conhecida.
+   *
+   * ⚠️ Não é a `source.revision`: a edição local usa um contador próprio (1, 2, 3…) que
+   * colide com a revisão do servidor — comparar as duas fazia o renderer **ignorar** uma
+   * edição externa (euflorismo: o evento era "velho" e o texto nunca era reconciliado).
+   */
+  serverRevision: number;
   /**
    * Sessão de snippet ativa (P4#18), viva **enquanto o documento ativo** estiver dentro da
    * expansão — `undefined` = fora. Fica na sessão do documento (e não num campo do controller)
@@ -1590,6 +1663,124 @@ export function clampSelections(
   }));
 }
 
+/**
+ * **Delta** de texto: o trecho que sai (`remove`) e o que entra (`insert`).
+ *
+ * É a unidade de reconciliação do renderer: quando o documento muda **por fora** (plugin,
+ * LSP, outra aba), o caret e as seleções precisam andar com a mudança — senão a próxima
+ * digitação entra no lugar errado e o texto sai corrompido.
+ */
+export interface TextDelta {
+  /** Offset do início do trecho trocado. */
+  readonly at: number;
+  /** Trecho removido ("" = inserção pura). */
+  readonly remove: string;
+  /** Texto inserido ("" = remoção pura). */
+  readonly insert: string;
+}
+
+/**
+ * Delta entre dois textos — diff de **prefixo/sufixo** (o mais barato que existe).
+ *
+ * O texto igual no começo e no fim é o contexto; o meio é a troca. É o bastante para mapear
+ * o caret e as seleções através de uma edição externa.
+ */
+export function diffText(before: string, after: string): TextDelta {
+  if (before === after) return { at: 0, remove: "", insert: "" };
+  const maxCommon = Math.min(before.length, after.length);
+  let prefix = 0;
+  while (prefix < maxCommon && before[prefix] === after[prefix]) prefix += 1;
+  let suffix = 0;
+  const maxSuffix = maxCommon - prefix;
+  while (
+    suffix < maxSuffix &&
+    before[before.length - 1 - suffix] === after[after.length - 1 - suffix]
+  ) {
+    suffix += 1;
+  }
+  return {
+    at: prefix,
+    remove: before.slice(prefix, before.length - suffix),
+    insert: after.slice(prefix, after.length - suffix),
+  };
+}
+
+/**
+ * Aplica um **delta** ao conjunto de cursores (a regra única de deslocamento).
+ *
+ * Reusa `advanceSelections` (de `src/shared`): o cursor **antes** do trecho trocado não se
+ * move; o **depois** desloca pelo tamanho da troca; o que está **dentro** do trecho volta
+ * para o fim do texto inserido.
+ */
+export function applyDeltaToSelections(
+  selections: SelectionSet,
+  delta: TextDelta,
+): SelectionSet {
+  if (delta.remove.length === 0 && delta.insert.length === 0) return selections;
+  return advanceSelections(selections, [
+    { at: delta.at, remove: delta.remove, insert: delta.insert },
+  ]);
+}
+
+/**
+ * Posição do **caret** (a barra do cursor) — a mesma que a status bar mostra.
+ *
+ * O caret é o `active` da seleção **primária** (o 1º cursor do conjunto) — o mesmo offset
+ * que a status bar exibe (`session.caret` ≡ `session.selection.active`).
+ *
+ * ⚠️ **Bug corrigido**: o renderer desenhava a barra na **1ª linha visível, coluna 0** (o
+ * comentário dizia ser o "destaque de linha atual") ⇒ a barra ficava colada no topo-esquerdo
+ * da viewport e o cursor real **nunca** chegava ao canvas. A linha do cursor é um conceito
+ * **separado** (o `activeLine` do `buildInstances`).
+ */
+export interface CaretPlacement {
+  /** Offset absoluto do caret no documento. */
+  readonly offset: number;
+  /** Linha (0-based) do caret. */
+  readonly line: number;
+  /** Coluna (0-based) do caret. */
+  readonly column: number;
+}
+
+/**
+ * Calcula a posição do caret a partir do conjunto de seleções (multi-cursor).
+ *
+ * @param source A fonte do documento (para converter o offset em linha/coluna).
+ * @param selections O conjunto de cursores (o 1º é o primário).
+ */
+export function caretPlacement(
+  source: LineSource,
+  selections: SelectionSet | undefined,
+): CaretPlacement {
+  const offset = selections?.[0]?.active ?? 0;
+  const pos = source.positionAt(offset);
+  return { offset, line: pos.line, column: pos.column };
+}
+
+/**
+ * Row **visual** de um Y do canvas (px) — o hit-test do clique do mouse.
+ *
+ * ⚠️ **Correção do off-by-one**: a âncora vertical é o **centro do texto**
+ * (`paddingTop + lineHeight/2`), não `sizePx * 0.7` — com a âncora antiga, clicar nos
+ * primeiros pixels da linha caía na linha **anterior** (o texto ficava ~5px abaixo da
+ * âncora). Ancorar no centro faz o topo da linha pertencer à própria linha.
+ *
+ * @param y Y do canvas (px, relativo ao topo do viewport).
+ * @param scrollOffsetPx Offset de rolagem (px).
+ * @param lineHeight Altura da linha (px).
+ * @param paddingTop Padding vertical acima da 1ª linha (px).
+ */
+export function rowAtCanvasY(
+  y: number,
+  scrollOffsetPx: number,
+  lineHeight: number,
+  paddingTop: number,
+): number {
+  const row = Math.round((y + scrollOffsetPx - paddingTop - lineHeight / 2) / lineHeight);
+  // `Math.round(-0.5)` devolve `-0` — normaliza para `0` (mesmo valor, sem o "negative zero").
+  return row === 0 ? 0 : row;
+}
+
 class DocumentController {
   private sessions: TabSession[] = [];
   private activeIndex = -1;
@@ -1612,6 +1803,14 @@ class DocumentController {
   private batchLocalRevision = 0;
   /** Timer do rAF para flush do lote. */
   private flushTimer: number | null = null;
+  /**
+   * Flush do lote **em voo** (o `flushBatch` é assíncrono).
+   *
+   * Quem precisa do texto do servidor (a reconciliação de uma edição externa) **aguarda**
+   * esta promessa: sem ela, a reconciliação leria o texto **antes** do lote ser aplicado e
+   * o delta sairia ao contrário (o caret voltaria para trás).
+   */
+  private flushInFlight: Promise<void> | null = null;
 
   /**
    * Notificado quando o **documento ativo** muda (abertura, ativação ou fechamento).
@@ -1686,26 +1885,18 @@ class DocumentController {
 
     const unsubscribe = this.bridge.onDocumentChanged((event) => {
       if (event.handle !== handle) return;
-      // Se já temos o texto desta revisão (aplicado via insertText/replaceText com resultado rico),
-      // não precisa reler — elimina roundtrip redundante do evento.
-      if (source.revision >= event.revision) return;
-      void this.bridge.text(handle).then((next) => {
-        source.setText(next, event.revision);
-        // Atualiza estado dirty da sessão
-        const s = this.sessions.find((s) => s.handle === handle);
-        if (s) s.dirty = true;
-        if (this.current?.handle === handle) {
-          this.viewport.setMetrics({ lineCount: source.lineCount() });
-          setDirtyStatus(true);
-          this.renderer.start();
-          // Re-busca inlay hints após alteração do documento
-          const cur = this.current;
-          if (cur !== undefined) {
-            void fetchInlayHints(cur, this.bridge, this.renderer, this.viewport);
-          }
-        }
-        this.renderTabBar();
-      });
+      const s = this.sessions.find((s) => s.handle === handle);
+      if (s === undefined) return;
+      // Se já temos o texto desta revisão (aplicado via insertText/replaceText com resultado
+      // rico), não precisa reler — elimina roundtrip redundante do evento.
+      //
+      // ⚠️ A comparação é com a **revisão do servidor** (`serverRevision`), não com a
+      // `source.revision`: a edição local usa um contador próprio (1, 2, 3…) que colide
+      // com a revisão do servidor — a comparação antiga "envelhecia" o evento e a edição
+      // externa **nunca** era reconciliada (o caret ficava no offset antigo e a próxima
+      // digitação corrompia o texto).
+      if (s.serverRevision >= event.revision) return;
+      void this.reconcileExternalChange(s, event.revision);
     });
 
     const session: TabSession = {
@@ -1717,6 +1908,7 @@ class DocumentController {
       caret: 0,
       selection: SelectionOps.collapsed(0),
       selections: SelectionSetOps.singular(0),
+      serverRevision: revision,
       savedScrollPx: 0,
       dirty: false,
       dispose: unsubscribe,
@@ -1762,7 +1954,15 @@ class DocumentController {
   }
 
   activate(index: number): void {
-    if (index === this.activeIndex || index < 0 || index >= this.sessions.length) return;
+    if (index < 0 || index >= this.sessions.length) return;
+    if (index === this.activeIndex) {
+      // ⚠️ Clicar na aba **já ativa** não pode deixar o editor mudo: sem devolver o foco ao
+      // <canvas>, a digitação não insere nada e o `Ctrl+Z` não desfaz (o foco ficava no
+      // <button> da aba). O `focusEditorSurface()` é chamado **sempre** ao final do
+      // `activate()` — inclusive neste early-return.
+      focusEditorSurface();
+      return;
+    }
     // Flush lote pendente antes de trocar de documento
     void this.flushBatch();
     // Salva estado da sessão atual
@@ -1866,9 +2066,12 @@ class DocumentController {
 
       tab.addEventListener("click", () => this.activate(i));
       tab.addEventListener("mousedown", (e: MouseEvent) => {
+        // O foco do editor vive no <canvas>: sem `preventDefault`, o clique na aba move o
+        // foco para o <button> e o editor fica **mudo** (digitar não insere, Ctrl+Z não
+        // desfaz). O `activate()` devolve o foco ao canvas de qualquer forma.
+        e.preventDefault();
         if (e.button === 1) {
           // Middle click
-          e.preventDefault();
           this.close(i);
         }
       });
@@ -1949,18 +2152,28 @@ class DocumentController {
     try {
       const s = session.selection;
       if (session.snippetSession !== undefined) {
-        // Snippets (P4#18): com sessão ativa o splice local ficaria incoerente com os espelhos
-        // (o lote só chega ao main no rAF, mas o espelho precisa do valor **antes** do próximo
-        // roundtrip). Decisão: usa o caminho IPC imediato — 1 roundtrip por tecla, latência
-        // extra **só** dentro de sessão de snippet.
-        if (!SelectionOps.isCollapsed(s)) {
-          await this.flushBatch();
-          const { start, end } = SelectionOps.normalized(s);
-          await this.replaceText(start, end - start, text);
+        // ⚠️ **Multi-cursor + snippet**: a expansão do snippet é ambígua (ela tem um
+        // único cursor). O ramo do snippet vinha **primeiro** e fazia
+        // `selections = singular(caret)` — destruindo o conjunto de cursores. Aqui a
+        // sessão de snippet é **encerrada explicitamente** (sem colapsar a seleção) e o
+        // fluxo segue pelo caminho multi-cursor, que preserva os N cursores.
+        if (session.selections.length > 1) {
+          session.snippetSession = undefined;
+          hideSnippetChoice();
         } else {
-          await this.replaceText(session.caret, 0, text);
+          // Snippets (P4#18): com sessão ativa o splice local ficaria incoerente com os espelhos
+          // (o lote só chega ao main no rAF, mas o espelho precisa do valor **antes** do próximo
+          // roundtrip). Decisão: usa o caminho IPC imediato — 1 roundtrip por tecla, latência
+          // extra **só** dentro de sessão de snippet.
+          if (!SelectionOps.isCollapsed(s)) {
+            await this.flushBatch();
+            const { start, end } = SelectionOps.normalized(s);
+            await this.replaceText(start, end - start, text);
+          } else {
+            await this.replaceText(session.caret, 0, text);
+          }
+          return;
         }
-        return;
       }
       // Multi-cursor (P2#5): N cursores ⇒ N edições (uma por cursor) num **único** lote —
       // um `Ctrl+Z` desfaz as N edições e restaura os N cursores.
@@ -2128,16 +2341,43 @@ class DocumentController {
     });
   }
 
-  /** Envia o lote acumulado para o main e reconcilia. Chamado externamente antes de operações IPC. */
+  /**
+   * Envia o lote acumulado para o main e reconcilia. Chamado externamente antes de operações IPC.
+   *
+   * ⚠️ **Assíncrono**: quem precisa do texto do servidor (a reconciliação de uma edição
+   * externa) **aguarda** esta promessa — inclusive quando o lote já foi recolhido por um
+   * flush em voo (nesse caso a promessa é a do flush em voo).
+   */
   async flushBatch(): Promise<void> {
     const batch = this.pendingBatch;
     const snapshot = this.pendingBatchSelections;
-    if (batch === null || batch.length === 0) return;
+    if (batch === null || batch.length === 0) {
+      // Nada pendente — mas pode haver um flush **em voo**: o texto do servidor só está
+      // atualizado quando ele termina (a reconciliação depende disso).
+      const inFlight = this.flushInFlight;
+      if (inFlight !== null) await inFlight;
+      return;
+    }
     this.pendingBatch = null;
     this.pendingBatchSelections = null;
     this.batchLocalRevision = 0;
     const session = this.current;
     if (session === undefined) return;
+    const promise = this.sendBatch(session, batch, snapshot);
+    this.flushInFlight = promise;
+    try {
+      await promise;
+    } finally {
+      if (this.flushInFlight === promise) this.flushInFlight = null;
+    }
+  }
+
+  /** Envia o lote ao servidor (o corpo do flush) e reconcilia o texto local. */
+  private async sendBatch(
+    session: TabSession,
+    batch: ReadonlyArray<{ at: number; text: string; remove?: string }>,
+    snapshot: SelectionSet | null,
+  ): Promise<void> {
     try {
       // O snapshot vai junto: o core grava o "before" do lote e o undo devolve os N cursores.
       const result = await session.bridge.batchInsert(
@@ -2145,6 +2385,7 @@ class DocumentController {
       );
       // Reconcilia revisão real do servidor
       session.source.setText(result.text, result.revision);
+      session.serverRevision = result.revision;
       setUndoStatus(result.canUndo, result.canRedo);
     } catch (error) {
       console.error("Scribe: falha ao enviar lote de inserções", error);
@@ -2159,17 +2400,82 @@ class DocumentController {
   }
 
   /**
+   * Reconcilia uma edição **externa** (plugin/LSP/outro cliente) no documento.
+   *
+   * ⚠️ **Por que**: o renderer só recarregava o **texto** ⇒ o caret e as seleções ficavam
+   * nos offsets **antigos** e a próxima digitação entrava no lugar errado (texto
+   * corrompido: "2 cursores + insert externo + digitar" ⇒ "Zoo baZoo").
+   *
+   * A reconciliação é o **delta** entre o texto local e o texto do servidor, aplicado ao
+   * caret e às seleções (a regra única de deslocamento, `advanceSelections`).
+   */
+  private async reconcileExternalChange(
+    session: TabSession,
+    revision: number,
+  ): Promise<void> {
+    // O texto local **antes** do flush: é a base do delta (com o lote já aplicado localmente).
+    const localText = session.source.text;
+    // ⚠️ O lote pendente usa offsets do **texto local**: se uma edição externa entra na
+    // janela do rAF, a tecla cai no lugar errado. O lote sai **antes** da reconciliação —
+    // e a reconciliação **aguarda** o flush (ele é assíncrono).
+    await this.flushBatch();
+    let next: string;
+    try {
+      next = await this.bridge.text(session.handle);
+    } catch (error) {
+      console.error("Scribe: falha ao reconciliar edição externa", error);
+      return;
+    }
+    const delta = diffText(localText, next);
+    if (delta.remove.length > 0 || delta.insert.length > 0) {
+      // O caret e as seleções andam com o delta (a mesma regra de `advanceSelections`).
+      const selections = applyDeltaToSelections(session.selections, delta);
+      const primary = selections[0];
+      session.selections = selections;
+      session.selection = primary ?? SelectionOps.collapsed(session.caret);
+      session.caret = primary !== undefined ? primary.active : session.caret;
+    }
+    session.source.setText(next, revision);
+    session.serverRevision = revision;
+    session.dirty = true;
+    if (this.current?.handle === session.handle) {
+      this.viewport.setMetrics({ lineCount: session.source.lineCount() });
+      this.renderer.setSelection(session.selection);
+      this.renderer.setSelections(session.selections);
+      updateCaretStatus(session.source, session.caret);
+      setDirtyStatus(true);
+      this.renderer.start();
+      // Re-busca inlay hints após alteração do documento
+      void fetchInlayHints(session, this.bridge, this.renderer, this.viewport);
+    }
+    this.renderTabBar();
+  }
+
+  /**
    * Substitui um range do documento: remove `remove` caracteres de `at` e insere `insert`.
    * Atualiza o caret, seleção, viewport e estado dirty — undo status vem no resultado rico.
+   *
+   * ⚠️ O conjunto de cursores **antes** da edição vai junto (`replaceOne(..., selections)`):
+   * sem ele o core grava um cursor único e, ao desfazer, a **seleção não volta** (o caret
+   * colapsava no início do trecho).
    */
   async replaceText(at: number, remove: number, insert: string): Promise<void> {
     // Flush antes de operação que vai direto ao main
     await this.flushBatch();
     const session = this.current;
     if (session === undefined) return;
+    // O "before" do undo: o conjunto de cursores **antes** desta edição.
+    const before = session.selections;
     try {
-      const result = await session.bridge.replaceOne(session.handle, at, remove, insert);
+      const result = await session.bridge.replaceOne(
+        session.handle,
+        at,
+        remove,
+        insert,
+        before,
+      );
       session.source.setText(result.text, result.revision);
+      session.serverRevision = result.revision;
       session.caret = at + insert.length;
       session.selection = SelectionOps.collapsed(session.caret);
       session.selections = SelectionSetOps.singular(session.caret);
@@ -2221,6 +2527,7 @@ class DocumentController {
           update.newText,
         );
         session.source.setText(result.text, result.revision);
+        session.serverRevision = result.revision;
         const delta = update.newText.length - (update.end - update.start);
         if (update.start < session.caret) {
           // Espelho anterior ao caret desloca o caret (e a seleção colapsada) junto.
@@ -2285,6 +2592,7 @@ class DocumentController {
         optionText,
       );
       session.source.setText(primary.text, primary.revision);
+      session.serverRevision = primary.revision;
       session.dirty = true;
       setUndoStatus(primary.canUndo, primary.canRedo);
       // 2) os espelhos/ancestrais re-renderizados, na ordem da lista.
@@ -2296,6 +2604,7 @@ class DocumentController {
           update.newText,
         );
         session.source.setText(applied.text, applied.revision);
+        session.serverRevision = applied.revision;
         session.dirty = true;
         setUndoStatus(applied.canUndo, applied.canRedo);
       }
@@ -2320,6 +2629,18 @@ class DocumentController {
     this.renderer.start();
   }
 
+  /**
+   * Desfaz (ou refaz) a última ação do documento **ativo**.
+   *
+   * ⚠️ **Correção do vazamento de caret**: o `undoState` do core devolve o caret/seleção
+   * **globais** (os do documento que estava ativo no core) — se esta aba **não** tem
+   * histórico, o undo não age nela e o caret da **outra** aba vazava para cá (o cursor
+   * "pula" para a posição do outro documento).
+   *
+   * Por isso o caret/seleção restaurados só são aplicados quando o undo **agiu de fato**
+   * neste documento — o sinal é a **revisão**: o buffer muda quando o undo aplica os
+   * deltas. Sem isso, o caret da sessão é preservado.
+   */
   private async runHistory(action: "undo" | "redo"): Promise<void> {
     await this.flushBatch();
     const session = this.current;
@@ -2328,25 +2649,34 @@ class DocumentController {
     session.snippetSession = undefined;
     hideSnippetChoice();
     try {
+      // O estado **antes** do comando: a revisão do buffer é o sinal de "o undo agiu aqui?".
+      const before = await session.bridge.undoState(session.handle);
       const state =
         action === "undo"
           ? await session.bridge.undo(session.handle)
           : await session.bridge.redo(session.handle);
       const next = await session.bridge.text(session.handle);
       session.source.setText(next, state.revision);
-      // O undo/redo devolve o **conjunto** de cursores (P2#5): restaura os N cursores
-      // (clampados ao tamanho do texto) em vez de colapsar tudo para 1 cursor.
-      const restored = clampSelections(state.selections, next.length);
-      session.caret = clampOffset(state.caret, next.length);
-      const primary =
-        state.selection !== undefined
-          ? {
-              anchor: clampOffset(state.selection.anchor, next.length),
-              active: clampOffset(state.selection.active, next.length),
-            }
-          : SelectionOps.collapsed(session.caret);
-      session.selection = primary;
-      session.selections = restored.length > 0 ? restored : [primary];
+      session.serverRevision = state.revision;
+      // O undo só age no documento **se** o buffer mudou (a revisão subiu).
+      const acted = state.revision !== before.revision;
+      if (acted) {
+        // O undo/redo devolve o **conjunto** de cursores (P2#5): restaura os N cursores
+        // (clampados ao tamanho do texto) em vez de colapsar tudo para 1 cursor.
+        const restored = clampSelections(state.selections, next.length);
+        session.caret = clampOffset(state.caret, next.length);
+        const primary =
+          state.selection !== undefined
+            ? {
+                anchor: clampOffset(state.selection.anchor, next.length),
+                active: clampOffset(state.selection.active, next.length),
+              }
+            : SelectionOps.collapsed(session.caret);
+        session.selection = primary;
+        session.selections = restored.length > 0 ? restored : [primary];
+      }
+      // Sem ação neste documento: o caret/seleção da sessão são **preservados** (o caret
+      // global do core pertencia a outra aba).
       this.renderer.setSelection(session.selection);
       this.renderer.setSelections(session.selections);
       this.viewport.setMetrics({ lineCount: session.source.lineCount() });
@@ -2850,13 +3180,19 @@ class ScribeRenderer {
         : {}),
     };
 
-    // Computa carets e seleções extras para multi-cursor (P2#5)
-    // O "caret primário" marca a **primeira linha visível** (destaque de linha atual): com
-    // soft wrap o offset da rolagem é contado em rows ⇒ a linha é a que contém a 1ª row.
-    const firstVisibleRow = Math.floor(this.viewport.scrollOffsetPx() / layout.lineHeight);
+    // O **caret** (a barra do cursor) e a **seleção** (o retângulo) são coisas diferentes.
+    //
+    // ⚠️ **Bug corrigido**: o `caret` enviado era a **primeira linha visível, coluna 0** (o
+    // comentário dizia ser o "destaque de linha atual") ⇒ a barra do cursor ficava colada no
+    // topo-esquerdo da viewport e o cursor real **nunca** chegava ao canvas. Agora o `caret`
+    // é a **posição real** do cursor e a linha do cursor vai separada, no parâmetro
+    // `activeLine` do `buildInstances` (o destaque de linha atual).
+    const placement = caretPlacement(this.source, this.currentSelections);
+    const caretOffset = placement.offset;
+    const caretPos = { line: placement.line, column: placement.column };
     const primaryCaret = {
-      line: this.visualRows?.lineOfRow(firstVisibleRow) ?? firstVisibleRow,
-      column: 0,
+      line: caretPos.line,
+      column: caretPos.column,
       color: colors.caret,
       width: 2,
     };
@@ -2865,7 +3201,7 @@ class ScribeRenderer {
     if (this.currentSelections !== undefined && this.currentSelections.length > 1) {
       const ec: CaretPosition[] = [];
       const es: Selection[] = [];
-      // Primeira seleção é a primária (já tratada pelo primaryCaret/currentSelection)
+      // A 1ª seleção é a primária (já tratada pelo `primaryCaret`/`currentSelection`).
       for (let si = 1; si < this.currentSelections.length; si++) {
         const sel = this.currentSelections[si]!;
         if (!SelectionOps.isCollapsed(sel)) es.push(sel);
@@ -2877,24 +3213,23 @@ class ScribeRenderer {
     }
 
     // Bracket matching (P3#14): destaca o par quando cursor esta num bracket.
+    //
+    // ⚠️ O par é procurado **só na vizinhança** do caret (`findMatchingBracketNear`): o
+    // caminho legado materializava o **documento inteiro** a cada frame ⇒ O(documento)/frame.
     let bracketMatch: readonly [BracketPos, BracketPos] | undefined;
     if (this.currentSelection && !SelectionOps.isCollapsed(this.currentSelection)) {
       // So match quando cursor nao esta selecionando
     } else {
-      const primaryOffset = this.currentSelection?.active ?? 0;
-      if (this.source.lineCount() > 0) {
-        // Materializa o texto completo da source para o scan
-        let fullText = "";
-        for (let i = 0; i < this.source.lineCount(); i++) {
-          if (i > 0) fullText += "\n";
-          fullText += this.source.line(i);
-        }
-        const matchOffset = findMatchingBracket(fullText, primaryOffset);
-        if (matchOffset !== undefined) {
-          const openPos = this.source.positionAt(Math.min(primaryOffset, matchOffset));
-          const closePos = this.source.positionAt(Math.max(primaryOffset, matchOffset));
-          bracketMatch = [openPos, closePos] as const;
-        }
+      const matchOffset = findMatchingBracketNear(
+        this.source,
+        caretOffset,
+        BRACKET_SCAN_LINES,
+        caretPos,
+      );
+      if (matchOffset !== undefined) {
+        const openPos = this.source.positionAt(Math.min(caretOffset, matchOffset));
+        const closePos = this.source.positionAt(Math.max(caretOffset, matchOffset));
+        bracketMatch = [openPos, closePos] as const;
       }
     }
 
@@ -2918,6 +3253,11 @@ class ScribeRenderer {
       this.currentInlayHints,
       this.gitDiffs,
       this.breakpointLines,
+      // A **linha ativa** (destaque de linha atual) é a linha do cursor — separada do caret.
+      caretPos.line,
+      // O índice de rows: a cena reusa os segmentos já quebrados (não re-quebra a faixa a
+      // cada frame) e passa a contar as linhas colapsadas (folding) como o índice.
+      this.visualRows,
     );
     this.requestHighlight?.(range.first, range.count);
 
@@ -2970,10 +3310,18 @@ class ScribeRenderer {
    *
    * Com soft wrap, o Y do canvas é uma **row visual** ⇒ a linha é a que contém a row
    * (a conta por `lineHeight` daria a row, não a linha). Sem wrap, é a conta de sempre.
+   *
+   * ⚠️ **Correção do off-by-one**: a âncora vertical é o **centro do texto**
+   * (`paddingTop + lineHeight/2`), não `sizePx * 0.7` — com a âncora antiga, clicar nos
+   * primeiros pixels da linha caía na linha **anterior** (o texto ficava ~5px abaixo da
+   * âncora). Ancorar no centro faz o topo da linha pertencer à própria linha.
    */
   lineAtCanvasY(y: number): number {
-    const row = Math.floor(
-      (y + this.viewport.scrollOffsetPx() - this.style.sizePx * 0.7) / this.lineHeight(),
+    const row = rowAtCanvasY(
+      y,
+      this.viewport.scrollOffsetPx(),
+      this.lineHeight(),
+      TEXT_PADDING_TOP_PX,
     );
     return this.visualRows?.lineOfRow(row) ?? row;
   }
@@ -4188,13 +4536,42 @@ export async function bootRenderer(): Promise<boolean> {
     referencesPopup = { isOpen: false, open: () => {}, close: () => {}, dispose: () => {} };
   }
 
-  attachInputListeners(surface, viewport, renderer, controller, findBar, palette, bridge, completion, hoverTooltip, signatureHelpPopup, documentSymbolsPopup, referencesPopup, packageSnippets);
+  // O abridor da paleta (o **mesmo** caminho do atalho `Ctrl+Shift+P`): foca o input e
+  // fecha os popups de contexto.
+  const openPalette = attachInputListeners(surface, viewport, renderer, controller, findBar, palette, bridge, completion, hoverTooltip, signatureHelpPopup, documentSymbolsPopup, referencesPopup, packageSnippets);
 
   // Minimap (P2#9): as cores vêm do tema ativo — sem isso a faixa fica preta no tema claro.
   //
   // O minimap desenha **uma linha por linha do documento** ⇒ ele precisa do offset da
   // rolagem em **linhas**. Com soft wrap, o offset real é contado em rows visuais: o
   // proxy abaixo traduz (o resto — range visível e `scrollTo` — é o do viewport real).
+  //
+  // ⚠️ **ACHADO 11 (pendente em `minimap.ts` — arquivo de outro agente, não editado aqui)**:
+  // a faixa do minimap usa só ~10% da altura (a altura da barra é fixa em 3px ⇒ 34 barras
+  // = 102px numa faixa de 712px). A correção proposta é **escalar o passo vertical** para
+  // a janela preencher a faixa — dentro de `minimap.ts`, em `currentLayout()`:
+  //
+  // ```ts
+  // const currentLayout = (): MinimapLayout => {
+  //   const win = computeWindow();
+  //   const height = container.clientHeight;
+  //   const count = Math.max(1, win.count);
+  //   // A barra escala para a janela preencher a faixa (o passo vertical acompanha).
+  //   const barH = Math.max(MINIMAP_LINE_HEIGHT, Math.floor(height / count));
+  //   return computeMinimapLayout({
+  //     viewportHeight: height,
+  //     lineCount: deps.source.lineCount(),
+  //     lineHeight: barH,          // ← o novo parâmetro (o default é 3px)
+  //     firstLine: win.firstLine,
+  //     maxLines: win.count,
+  //   });
+  // };
+  // ```
+  //
+  // O **clique continua correto sem mexer em mais nada**: `minimapLineAtY` e
+  // `minimapViewportRect` já consomem o `rowPitch`/`firstLine` de `currentLayout()` — a
+  // escala é a mesma para o desenho e para o hit-test (é o `rowPitch` que define a
+  // linha clicada).
   const minimapViewport: Viewport & { scrollOffsetPx(): number } = {
     visibleLineRange: () => viewport.visibleLineRange(),
     subscribe: (observer) => viewport.subscribe(observer),
@@ -4294,7 +4671,9 @@ export async function bootRenderer(): Promise<boolean> {
     surface.focus();
   });
   document.getElementById("activity-palette")?.addEventListener("click", () => {
-    void palette?.model.open();
+    // ⚠️ Pelo **mesmo** caminho do atalho `Ctrl+Shift+P`: a paleta abre **focando o input**
+    // (o botão chamava `palette.model.open()` direto e o input não recebia o foco).
+    openPalette();
   });
 
   // Seção do painel: colapsa/expande a lista de documentos abertos.
@@ -4446,7 +4825,15 @@ export function attachFindBar(deps: FindBarDeps): FindBarBinding | undefined {
   const moveCaretTo = (match: SearchMatch): void => {
     const session = deps.controller.current;
     if (session === undefined) return;
-    session.caret = Math.min(match.index, session.source.text.length);
+    const offset = Math.min(match.index, session.source.text.length);
+    session.caret = offset;
+    // A seleção também anda: é dela que o renderer tira a posição do **caret** desenhado
+    // (sem isto, a barra do cursor ficava no lugar antigo enquanto a status bar mostrava
+    // a linha da ocorrência).
+    session.selection = SelectionOps.collapsed(offset);
+    session.selections = SelectionSetOps.singular(offset);
+    deps.renderer.setSelection(session.selection);
+    deps.renderer.setSelections(session.selections);
     updateCaretStatus(session.source, session.caret);
     deps.viewport.scrollTo(match.line);
     deps.renderer.start();
@@ -4548,6 +4935,13 @@ export function attachFindBar(deps: FindBarDeps): FindBarBinding | undefined {
   };
 }
 
+/**
+ * Liga os listeners de entrada (teclado, mouse, roda) do editor.
+ *
+ * Devolve o **abridor da command palette** (`openPalette`): o botão da rail de atividades
+ * usa o **mesmo** caminho do atalho `Ctrl+Shift+P` — abrir por ele também foca o input (e
+ * fecha os popups de contexto, que se sobrepunham à paleta).
+ */
 function attachInputListeners(
   surface: HTMLCanvasElement,
   viewport: ViewportImpl,
@@ -4563,11 +4957,8 @@ function attachInputListeners(
   referencesPopup: ReferencesPopupBinding,
   /** Snippets de pacote por trigger (lowercased) — cacheados no boot (ver `bootRenderer`). */
   packageSnippets: PackageSnippetIndex,
-): void {
+): (() => void) {
   const lineHeight = Math.ceil(TEXT_STYLE.sizePx * 1.4);
-  // A 1ª linha **visível** (o `scrollTo` do viewport é em linhas): com soft wrap o offset
-  // da rolagem é contado em rows visuais ⇒ a linha é a que contém a 1ª row.
-  const currentLine = (): number => renderer.firstVisibleLine();
 
   // Os popups de contexto num lugar só — para garantir exclusividade (um por vez).
   const popups: ContextPopups = {
@@ -4582,7 +4973,9 @@ function attachInputListeners(
     "wheel",
     (event: WheelEvent) => {
       event.preventDefault();
-      viewport.scrollTo(currentLine() + Math.sign(event.deltaY) * 3, { animate: true });
+      // ⚠️ A rolagem é contada em **rows visuais**, não em linhas lógicas: com soft wrap,
+      // 1 tick da roda movia N rows (o texto "p pulava"). `scrollByRows` move 3 rows.
+      viewport.scrollByRows(Math.sign(event.deltaY) * 3, { animate: true });
       scheduleInlayHintRefresh();
     },
     { passive: false },
@@ -4611,6 +5004,9 @@ function attachInputListeners(
     if (findBar !== undefined && findBar.model.isOpen) {
       findBar.model.close();
     }
+    // ⚠️ Os popups de **contexto** (símbolos × paleta se sobrepunham) são fechados antes
+    // de a paleta abrir — a exclusividade é a mesma dos popups entre si.
+    closeContextPopups(popups);
     void palette.model.open().then(() => {
       const input = document.getElementById("palette-input");
       if (input instanceof HTMLInputElement) input.focus();
@@ -5382,7 +5778,7 @@ function attachInputListeners(
       if (session === undefined) {
         // Sem sessão: scroll
         const delta = event.key === "ArrowDown" ? 1 : event.key === "ArrowUp" ? -1 : 0;
-        if (delta !== 0) { viewport.scrollTo(currentLine() + delta); scheduleInlayHintRefresh(); }
+        if (delta !== 0) { viewport.scrollByRows(delta); scheduleInlayHintRefresh(); }
         return;
       }
       const source = session.source;
@@ -5435,8 +5831,11 @@ function attachInputListeners(
       return;
     }
 
-    if (event.key === "PageDown") { viewport.scrollTo(currentLine() + page, { animate: true }); scheduleInlayHintRefresh(); }
-    else if (event.key === "PageUp") { viewport.scrollTo(currentLine() - page, { animate: true }); scheduleInlayHintRefresh(); }
+    // ⚠️ PageUp/PageDown rolam em **rows visuais** (a unidade da rolagem): com soft wrap,
+    // `scrollTo(linha + page)` pulava N× a tela (a "page" é medida em linhas, mas a linha
+    // lógica ocupa N rows).
+    if (event.key === "PageDown") { viewport.scrollByRows(page, { animate: true }); scheduleInlayHintRefresh(); }
+    else if (event.key === "PageUp") { viewport.scrollByRows(-page, { animate: true }); scheduleInlayHintRefresh(); }
     else if (event.key === "Home") { viewport.scrollTo(0, { animate: true }); scheduleInlayHintRefresh(); }
     else if (event.key === "End") { viewport.scrollTo(line.first + 1_000_000, { animate: true }); scheduleInlayHintRefresh(); }
     else if (controller !== undefined && controller.current !== undefined && isPrintable(event)) {
@@ -5512,6 +5911,10 @@ function attachInputListeners(
       findBar?.syncDocument();
     }
   });
+
+  // O **mesmo** caminho do atalho `Ctrl+Shift+P`: o botão da rail abre a paleta **focando o
+  // input** (o botão chamava `palette.model.open()` direto e o input não recebia o foco).
+  return openPalette;
 }
 
 /** Tecla imprimível (um code point, sem modificadores) — a porta da digitação mínima. */
@@ -5622,21 +6025,24 @@ function showCodeActionsPopup(
 
   const popup = document.createElement("div");
   popup.id = "code-actions-popup";
+  // ⚠️ Os tokens são os do **shell** (`--s-*`): os antigos (`--bg`, `--font`) não existiam
+  // ⇒ no tema claro o texto ficava ilegível (o popup saía com o fundo escuro e a cor
+  // errada). `--z-popup` é a camada dos popups de contexto.
   popup.style.cssText = `
     position: fixed;
-    background: var(--bg, #1e1e1e);
-    border: 1px solid var(--border, #3c3c3c);
+    background: var(--s-sidebar);
+    border: 1px solid var(--s-border);
     border-radius: 6px;
     padding: 4px 0;
     min-width: 200px;
     max-width: 400px;
     max-height: 300px;
     overflow-y: auto;
-    z-index: 1000;
+    z-index: var(--z-popup);
     box-shadow: 0 4px 12px rgba(0,0,0,0.4);
-    font-family: var(--font, "Cascadia Code", "JetBrains Mono", "Fira Code", monospace);
+    font-family: var(--s-font-ui);
     font-size: 13px;
-    color: var(--fg, #d4d4d4);
+    color: var(--s-fg);
   `;
 
   const rect = (document.getElementById("editor-surface") as HTMLElement | null);
@@ -5669,7 +6075,7 @@ function showCodeActionsPopup(
       text-overflow: ellipsis;
     `;
     item.addEventListener("mouseenter", () => {
-      item.style.background = "var(--hover-bg, #2a2d2e)";
+      item.style.background = "var(--s-hover)";
     });
     item.addEventListener("mouseleave", () => {
       item.style.background = "transparent";

@@ -11,10 +11,11 @@
  * **dinâmico**, dentro de `startMainProcess()`, que só roda quando o processo é o Electron
  * (`process.versions.electron`) — por isso este módulo é importável em `node`/vitest.
  */
-import { execFileSync } from "node:child_process";
+import { execFile } from "node:child_process";
 import { existsSync, readdirSync, statSync } from "node:fs";
 import { homedir } from "node:os";
-import { join, resolve } from "node:path";
+import { dirname, join, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
 import type { BrowserWindow as ElectronBrowserWindow } from "electron";
 
 import { createNodeFileSystem } from "../core/buffer";
@@ -183,6 +184,55 @@ function toAbsoluteDocumentPath(path: string | undefined): string | undefined {
 }
 
 /**
+ * A URL é a **casca do próprio app**? (bloqueio de navegação — achado BAIXO)
+ *
+ * Só a própria casca (`file://…/renderer/index.html`) pode ser navegada: qualquer outra URL
+ * (http/https, outro `file://`) é **bloqueada** pelo `will-navigate` — sem isso, o renderer
+ * conseguia navegar o app para uma página remota.
+ */
+export function isOwnRendererUrl(url: string, rendererIndexPath: string): boolean {
+  try {
+    const parsed = new URL(url);
+    if (parsed.protocol !== "file:") return false;
+    return resolve(fileURLToPath(parsed)) === resolve(rendererIndexPath);
+  } catch (error) {
+    // URL inválida ⇒ não é a casca ⇒ bloqueia (o motivo vai para o log).
+    console.warn("Scribe: URL de navegação inválida:", error);
+    return false;
+  }
+}
+
+/** Subconjunto de `BrowserWindow` usado pelo broadcaster (o suficiente para o teste). */
+export interface BroadcastWindow {
+  isDestroyed(): boolean;
+  readonly webContents: {
+    isDestroyed(): boolean;
+    send(channel: string, payload: unknown): void;
+  };
+}
+
+/**
+ * Broadcaster de eventos do IPC: envia para todas as janelas **vivas**.
+ *
+ * Janela (ou `webContents`) destruída ⇒ `send` **lança** ⇒ o evento (ex.:
+ * `document.changed`) se perdia (achado BAIXO). Aqui a janela morta é **ignorada**.
+ */
+export function createEventBroadcaster(
+  windows: () => readonly BroadcastWindow[],
+): IpcEventBroadcaster {
+  return {
+    broadcast: (channel, payload) => {
+      for (const window of windows()) {
+        if (window.isDestroyed()) continue;
+        const contents = window.webContents;
+        if (contents.isDestroyed()) continue;
+        contents.send(channel, payload);
+      }
+    },
+  };
+}
+
+/**
  * Cria o `EditorCore` do processo principal, injetando o `FileSystem` de produção
  * (`node:fs/promises`). Continua utilizável sem Electron (o `FileSystem` é a única I/O).
  */
@@ -282,6 +332,92 @@ export async function handleIpcRequest(
   } finally {
     if (signalId !== undefined) deps.signals?.release(signalId);
   }
+}
+
+// ── git: execução isolada (sem config do usuário ⇒ sem `diff.external`/`core.pager`) ───────
+
+/** "Dispositivo nulo" do SO — alvo de `GIT_CONFIG_GLOBAL`/`core.hooksPath` (config vazia). */
+const NULL_DEVICE: string = process.platform === "win32" ? "NUL" : "/dev/null";
+
+/** Timeout dos comandos `git` (o app não pode ficar pendurado por um repo lento). */
+const GIT_TIMEOUT_MS = 5_000;
+
+/** Teto de saída do `git blame --porcelain` (1 KB era apertado ⇒ `null` silencioso). */
+const GIT_BLAME_MAX_BUFFER = 64 * 1024;
+
+/** Teto de saída do `git diff` (64 KB cortava diffs médios ⇒ gutter sem faixas). */
+const GIT_DIFF_MAX_BUFFER = 1024 * 1024;
+
+/**
+ * Ambiente **mínimo** para o `git`.
+ *
+ * **Por que sanitizar (achado ALTO — RCE):** o `git` roda **dentro do repositório do
+ * documento** e o `.git/config` desse repo é **controlado por quem tem o arquivo na mão**.
+ * Com o ambiente do usuário, o `git diff` honra `diff.external` ⇒ **executa um comando
+ * arbitrário** só por abrir um arquivo. As mitigações:
+ * - `GIT_CONFIG_NOSYSTEM=1` ⇒ ignora `/etc/gitconfig`;
+ * - `GIT_CONFIG_GLOBAL=/dev/null` ⇒ ignora `~/.gitconfig` **e** o `XDG_CONFIG_HOME`;
+ * - `GIT_CONFIG_COUNT=0` ⇒ descarta configs vindos de `GIT_CONFIG_KEY_*` do ambiente;
+ * - `GIT_TERMINAL_PROMPT=0` ⇒ nunca pede credencial (nada de prompt travar o app).
+ *
+ * Toda outra variável `GIT_*` herdada (incluindo `GIT_EXTERNAL_DIFF` e `GIT_DIR`) é
+ * **descartada**: o `git` só enxerga o que o app decide.
+ */
+function sanitizedGitEnv(): NodeJS.ProcessEnv {
+  const env: NodeJS.ProcessEnv = {};
+  for (const [key, value] of Object.entries(process.env)) {
+    if (value === undefined) continue;
+    if (key.startsWith("GIT_")) continue;
+    env[key] = value;
+  }
+  env["GIT_CONFIG_NOSYSTEM"] = "1";
+  env["GIT_CONFIG_GLOBAL"] = NULL_DEVICE;
+  env["GIT_CONFIG_COUNT"] = "0";
+  env["GIT_TERMINAL_PROMPT"] = "0";
+  return env;
+}
+
+/**
+ * Config que o `git` **não** pode deixar de obedecer (vai **antes** do subcomando):
+ * - `core.pager=cat` ⇒ a saída vem inteira, sem pager;
+ * - `core.hooksPath=<nulo>` ⇒ nenhum hook do repo é executado.
+ */
+const GIT_HARDENED_CONFIG: readonly string[] = [
+  "-c",
+  "core.pager=cat",
+  "-c",
+  `core.hooksPath=${NULL_DEVICE}`,
+];
+
+/**
+ * Executa o `git` **sem shell** (o path do documento é **argumento**, nunca string de
+ * comando) e devolve a stdout. Erro ⇒ rejeição (o chamador decide o fallback).
+ *
+ * **Assíncrono de propósito (achado MÉDIO):** `execFileSync` bloqueava o *event loop* do
+ * processo principal por até 5 s ⇒ o app "não respondia" durante o diff.
+ */
+function runGit(
+  args: readonly string[],
+  options: { readonly cwd?: string; readonly maxBuffer: number },
+): Promise<string> {
+  return new Promise<string>((resolvePromise, rejectPromise) => {
+    execFile(
+      "git",
+      [...args],
+      {
+        ...(options.cwd !== undefined ? { cwd: options.cwd } : {}),
+        env: sanitizedGitEnv(),
+        timeout: GIT_TIMEOUT_MS,
+        encoding: "utf-8",
+        maxBuffer: options.maxBuffer,
+        windowsHide: true,
+      },
+      (error, stdout) => {
+        if (error !== null) rejectPromise(error);
+        else resolvePromise(stdout);
+      },
+    );
+  });
 }
 
 async function dispatchIpc(
@@ -459,13 +595,24 @@ async function dispatchIpc(
         // **Sem shell**: o path vem do renderer (`document.open`) e, dentro de uma
         // string de shell, `$(...)`/backticks expandem ⇒ execução de código. O path vai
         // como **argumento** (o `--` separa as opções do path).
-        const result = execFileSync(
-          "git",
-          ["blame", "-L", `${blameLine + 1},${blameLine + 1}`, "--porcelain", "--", path],
-          { stdio: ["ignore", "pipe", "ignore"], timeout: 5000, encoding: "utf-8", maxBuffer: 1024 },
+        //
+        // **`cwd` = o diretório do documento (achado MÉDIO):** sem ele, o `git` roda no
+        // repo do **app** ⇒ o arquivo do documento está "outside repository" ⇒ o blame
+        // devolvia `null` **sempre**.
+        const result = await runGit(
+          [
+            ...GIT_HARDENED_CONFIG,
+            "blame",
+            "-L",
+            `${blameLine + 1},${blameLine + 1}`,
+            "--porcelain",
+            "--",
+            path,
+          ],
+          { cwd: dirname(path), maxBuffer: GIT_BLAME_MAX_BUFFER },
         );
         if (!result) return null;
-        const lines = (result as string).split("\n");
+        const lines = result.split("\n");
         const firstLine = lines[0];
         if (!firstLine) return null;
         const parts = firstLine.split(" ");
@@ -480,6 +627,7 @@ async function dispatchIpc(
         const timeAgo = date ? timeAgoStr(date) : "";
         return { commitHash: commitHash.slice(0, 8), author, timeAgo };
       } catch {
+        // `blame` sem repo/commit/linha ⇒ `null` (o contrato manda `null`, não erro).
         return null;
       }
     }
@@ -488,23 +636,31 @@ async function dispatchIpc(
       const path = core.registry.get(handle)?.uri;
       if (path === undefined) return [];
       try {
-        const dir = path.substring(0, path.lastIndexOf("/"));
+        // `dirname` (e não `substring(0, lastIndexOf("/"))`): path sem "/" dava `cwd: ""`
+        // e path Windows dava `""` — o `git` caía no cwd do app (achado BAIXO).
+        const dir = dirname(path);
         // **Sem shell** (mesma razão do `git.blame`): o path é argumento, não string.
-        const result = execFileSync(
-          "git",
-          ["diff", "HEAD", "--unified=0", "--", path],
-          {
-            cwd: dir,
-            stdio: ["ignore", "pipe", "ignore"],
-            timeout: 5000,
-            encoding: "utf-8",
-            maxBuffer: 65536,
-          },
+        //
+        // `--no-ext-diff --no-textconv` + `core.pager=cat` + ambiente sanitizado
+        // (achado ALTO — RCE): o `.git/config` do repo do documento é **do usuário** e
+        // `diff.external` manda um comando **arbitrário** para o `git diff` executá-lo.
+        const result = await runGit(
+          [
+            ...GIT_HARDENED_CONFIG,
+            "diff",
+            "HEAD",
+            "--unified=0",
+            "--no-ext-diff",
+            "--no-textconv",
+            "--",
+            path,
+          ],
+          { cwd: dir, maxBuffer: GIT_DIFF_MAX_BUFFER },
         );
         if (!result) return [];
         // Parse unified diff: @@ -start,count +start,count @@
         const ranges: { startLine: number; lineCount: number; kind: string }[] = [];
-        for (const line of (result as string).split("\n")) {
+        for (const line of result.split("\n")) {
           const match = line.match(/^@@ -\d+(?:,\d+)? \+(\d+)(?:,(\d+))? @@/);
           if (match) {
             const start = parseInt(match[1]!, 10) - 1;
@@ -514,6 +670,7 @@ async function dispatchIpc(
         }
         return ranges;
       } catch {
+        // Sem repo/commit (ou `git` falhou) ⇒ **nenhum** range (o contrato manda lista vazia).
         return [];
       }
     }
@@ -903,13 +1060,7 @@ export async function startMainProcess(): Promise<void> {
     extractDocumentPath(process.argv, isExistingFile, ignoredArgv),
   );
 
-  const events: IpcEventBroadcaster = {
-    broadcast: (channel, payload) => {
-      for (const window of BrowserWindow.getAllWindows()) {
-        window.webContents.send(channel, payload);
-      }
-    },
-  };
+  const events: IpcEventBroadcaster = createEventBroadcaster(() => BrowserWindow.getAllWindows());
 
   const signals = createIpcSignalRegistry();
   const fileDialog: FileDialogPort = {
@@ -923,13 +1074,15 @@ export async function startMainProcess(): Promise<void> {
     },
   };
 
+  /** Caminho da casca do renderer — a **única** URL que o renderer pode navegar. */
+  const rendererIndexPath = resolve(join(__dirname, "../renderer/index.html"));
+
   /** Carrega o `index.html` da casca, injetando o documento como query `file` quando houver. */
   const loadRenderer = (window: ElectronBrowserWindow, documentPath?: string): void => {
-    const indexHtml = join(__dirname, "../renderer/index.html");
     if (documentPath === undefined) {
-      void window.loadFile(indexHtml);
+      void window.loadFile(rendererIndexPath);
     } else {
-      void window.loadFile(indexHtml, { query: { file: documentPath } });
+      void window.loadFile(rendererIndexPath, { query: { file: documentPath } });
     }
   };
 
@@ -950,6 +1103,16 @@ export async function startMainProcess(): Promise<void> {
         nodeIntegration: false,
         sandbox: true,
       },
+    });
+    // **`window.open` não abre janela remota** (achado BAIXO): sem handler, o
+    // `window.open("https://…")` do renderer abria uma page nova **dentro do app**
+    // (ela não herda o preload, mas mesmo assim é uma navegação remota dentro do app).
+    window.webContents.setWindowOpenHandler(() => ({ action: "deny" }));
+    // **Navegação externa bloqueada**: só a casca do próprio app é permitido navegar.
+    window.webContents.on("will-navigate", (event, url) => {
+      if (isOwnRendererUrl(url, rendererIndexPath)) return;
+      event.preventDefault();
+      console.warn(`Scribe: navegação bloqueada: ${url}`);
     });
     // Menu in-window (rápido no Linux, sem D-Bus lag)
     window.setMenu(createAppMenu(window));
@@ -1050,6 +1213,17 @@ export async function startMainProcess(): Promise<void> {
         label: "View",
         submenu: [
           { label: "Toggle Theme", accelerator: "CmdOrCtrl+Shift+T", click: () => sendMenuAction(win, "view.toggleTheme") },
+          { type: "separator" },
+          // Itens padrão do Electron: reload, devtools, zoom e tela cheia. Sem eles o
+          // `Ctrl+W` não fechava a janela e não havia forma de recarregar a casca.
+          { role: "reload" },
+          { role: "toggleDevTools" },
+          { type: "separator" },
+          { role: "resetZoom" },
+          { role: "zoomIn" },
+          { role: "zoomOut" },
+          { type: "separator" },
+          { role: "togglefullscreen" },
         ],
       },
       {
@@ -1064,6 +1238,17 @@ export async function startMainProcess(): Promise<void> {
           { label: "Step Over", accelerator: "F10", click: () => sendMenuAction(win, "debug.stepOver") },
           { label: "Step Into", accelerator: "F11", click: () => sendMenuAction(win, "debug.stepInto") },
           { label: "Step Out", accelerator: "Shift+F11", click: () => sendMenuAction(win, "debug.stepOut") },
+        ],
+      },
+      {
+        // Menu de janela: sem ele o `Ctrl+W` **não** fechava a janela (o atalho padrão do
+        // Electron vive no papel `close`).
+        label: "Window",
+        submenu: [
+          { role: "minimize" },
+          { role: "zoom" },
+          { type: "separator" },
+          { role: "close" },
         ],
       },
     ];

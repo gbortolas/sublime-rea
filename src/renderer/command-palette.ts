@@ -168,6 +168,17 @@ export interface CommandPaletteBindingDeps {
 }
 
 /**
+ * Devolve o foco ao canvas do editor.
+ *
+ * O teclado do editor vive no `<canvas>` (`#editor-surface`): um `blur()` no input da
+ * palette jogava o foco no `<body>` e — como o editor só ouve teclado no canvas — **nada**
+ * era digitado no documento depois de fechar a palette.
+ */
+function focusEditorSurface(): void {
+  document.getElementById("editor-surface")?.focus();
+}
+
+/**
  * Liga o `CommandPaletteModel` ao DOM. Devolve `undefined` se o markup necessário
  * não existir (degradação explícita, DEC-TR-7).
  */
@@ -183,7 +194,17 @@ export function attachCommandPalette(deps: CommandPaletteBindingDeps): CommandPa
 
   const renderState = (state: CommandPaletteState): void => {
     paletteEl.hidden = !state.visible;
-    if (!state.visible) return;
+    if (!state.visible) {
+      // Fechou: o foco volta para o canvas do editor (é lá que o teclado é lido).
+      focusEditorSurface();
+      return;
+    }
+
+    // Abriu: o foco vai para o input — sem isto, abrir pela rail deixava a digitação ir
+    // para o `<body>` e o `Esc` não fechava a palette.
+    if (document.activeElement !== input) {
+      input.focus();
+    }
 
     // Sincroniza o input só se o valor do modelo for diferente (evita loop)
     if (input.value !== state.query) {
@@ -245,8 +266,10 @@ export function attachCommandPalette(deps: CommandPaletteBindingDeps): CommandPa
   input.addEventListener("keydown", (event: KeyboardEvent) => {
     if (event.key === "Escape") {
       event.preventDefault();
+      // `close()` emite o estado → o `renderState` devolve o foco ao canvas do editor.
+      // (NÃO usar `input.blur()`: o foco iria para o `<body>` e o editor pararia de
+      // receber o teclado.)
       model.close();
-      input.blur();
       return;
     }
     if (event.key === "Enter") {

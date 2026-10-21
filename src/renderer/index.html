@@ -162,7 +162,7 @@
               </div>
               <!-- Command Palette: overlay de busca de comandos (Ctrl+Shift+P). -->
               <div id="command-palette" hidden>
-                <input id="palette-input" type="text" placeholder="Digite um comando…" autocomplete="off" spellcheck="false" />
+                <input id="palette-input" type="text" placeholder="Digite um comando…" aria-label="Paleta de comandos" autocomplete="off" spellcheck="false" />
                 <div id="palette-results"></div>
               </div>
               <!-- Completion popup: lista de sugestões LSP (Ctrl+Space). -->
@@ -179,7 +179,7 @@
               </div>
               <!-- Document symbols popup: navegação por símbolos (Ctrl+Shift+O). -->
               <div id="document-symbols-popup" role="dialog" aria-label="Símbolos do documento" hidden>
-                <input class="symbols-input" type="text" placeholder="Filtrar símbolos…" autocomplete="off" spellcheck="false" />
+                <input class="symbols-input" type="text" placeholder="Filtrar símbolos…" aria-label="Filtrar símbolos do documento" autocomplete="off" spellcheck="false" />
                 <div class="symbols-list" role="listbox"></div>
               </div>
             </div>

@@ -49,6 +49,36 @@
   --s-dur: 120ms;
   --s-ease: cubic-bezier(0.2, 0.8, 0.2, 1);
 
+  /*
+   * ── Escala de z-index (fonte ÚNICA) ────────────────────────────────────
+   *
+   * Antes cada overlay inventava seu número (find 3, paleta 5, completion 6, hover 7,
+   * toolbar de depuração 150, popup de referências 140...) e a ordem saía do controle: a
+   * paleta (5) ficava **abaixo** do popup de símbolos (6) e a find bar (3) ficava abaixo
+   * da paleta — a paleta cobria o input da busca.
+   *
+   * Agora a ordem é explícita:
+   *   superfície → overlay → minimapa → find bar → painéis → popups → barra de depuração
+   *   → modais (paleta/símbolos) → tooltip passageiro.
+   */
+  --z-surface: 0; /* canvas do documento */
+  --z-overlay: 2; /* #ui-overlay (camada de UI) */
+  --z-minimap: 3; /* minimapa */
+  --z-findbar: 10; /* find bar (busca e substituir) */
+  --z-panel: 20; /* painéis flutuantes (depuração, referências) */
+  --z-popup: 30; /* popups de contexto (completação, assinatura, hover, snippet) */
+  --z-toolbar: 40; /* barra de depuração */
+  --z-modal: 50; /* paleta de comandos, popup de símbolos */
+  --z-tooltip: 60; /* tooltip passageiro (valor de depuração) */
+
+  /* ── Geometria da depuração (abaixo da find bar) ───────────────────────── */
+  /* Altura reservada pela find bar (2 linhas: busca + substituir) — medida em runtime: 76px. */
+  --s-findbar-h: 76px;
+  /* Topo da barra de depuração (8px com a find bar fechada; abaixo dela quando aberta). */
+  --s-debug-top: 8px;
+  /* Altura da barra de depuração (30) + folga (6) ⇒ topo do painel. */
+  --s-debug-gap: 36px;
+
   /* ── Cores: fallback (dark) — sobrescritas pelo renderer ──────────────── */
   --s-bg: #1e1f22;
   --s-fg: #d4d4d4;
@@ -63,14 +93,30 @@
   --s-tabactive: #1e1f22;
   --s-tabinactive: #18191b;
 
-  /* Alias de ponte: overlays criados em RUNTIME (popup de referências) ainda referenciam
-     `--fg`/`--border`/`--bg-overlay`/`--bg-input`. Sem estes aliases o `var()` cai no
-     fallback cru e o overlay fica fora do tema. (Ponte temporária: o overlay deve migrar
-     para os tokens `--s-*`.) */
+  /* Alias de ponte: overlays criados em RUNTIME (popup de referências, popup de escolha de
+     snippet, popup de code actions) ainda referenciam `--fg`/`--border`/`--bg-overlay`/
+     `--bg-input`/`--bg`/`--font`/`--hover-bg`/`--highlight`. Sem estes aliases o `var()`
+     cai no fallback cru e o overlay fica fora do tema — no tema claro isso deixava o texto
+     **ilegível** (fundo #1e1e1e sobre texto #3b3b3b = 1,06:1 de contraste).
+     (Ponte temporária: os overlays devem migrar para os tokens `--s-*`.) */
   --fg: var(--s-fg);
   --border: var(--s-border);
   --bg-overlay: var(--s-sidebar);
   --bg-input: var(--s-bg);
+  /* Superfície base (fundo do editor) — usada pelos popups de runtime. */
+  --bg: var(--s-bg);
+  /* Tipografia da casca (o fallback antigo era monoespaçado e quebrava a tipografia única). */
+  --font: var(--s-font-ui);
+  /* Fundo de hover. */
+  --hover-bg: var(--s-hover);
+  /* Item selecionado (listas de runtime: referências, snippet, pilha de depuração). */
+  --highlight: var(--s-selected);
+  --s-highlight: var(--s-selected);
+  /* Fundo da superfície do editor (áreas de texto dos painéis de depuração). */
+  --s-editor: var(--s-bg);
+  /* Texto secundário de runtime. */
+  --fg-secondary: var(--s-muted);
+  --fg-tertiary: var(--s-subtle);
 
   /* ── Derivados (translúcidos, agnósticos de tema) ─────────────────────── */
   --s-muted: color-mix(in srgb, var(--s-fg) 62%, transparent);
@@ -79,6 +125,12 @@
   --s-pressed: color-mix(in srgb, var(--s-fg) 15%, transparent);
   --s-selected: color-mix(in srgb, var(--s-accent) 26%, transparent);
   --s-ring: color-mix(in srgb, var(--s-accent) 70%, transparent);
+  /*
+   * Texto secundário com **contraste AA** (rótulos de 10-11px dos painéis de runtime).
+   * `--s-muted` (62%) rendia ~3,6:1 no tema claro (abaixo de AA); 80% rende ~5,8:1 sobre
+   * `--s-sidebar` (#f8f8f8). Derivado de `--s-fg` (nunca cor crua) ⇒ segue o tema.
+   */
+  --s-fg-muted: color-mix(in srgb, var(--s-fg) 80%, transparent);
   --s-warn: #e0a44a;
 
   /* ── Sombras (por tema: `[data-theme="light"]` abaixo) ────────────────── */
@@ -512,7 +564,7 @@ textarea {
 #ui-overlay {
   position: absolute;
   inset: 0;
-  z-index: 2;
+  z-index: var(--z-overlay);
   pointer-events: none;
 }
 
@@ -530,7 +582,7 @@ textarea {
  */
 .scribe-panel {
   position: absolute;
-  z-index: 3;
+  z-index: var(--z-panel);
   border: 1px solid var(--s-border);
   border-radius: var(--s-radius-lg);
   background: var(--s-sidebar);
@@ -547,7 +599,7 @@ textarea {
   pointer-events: auto;
   position: absolute;
   inset: 0;
-  z-index: 2;
+  z-index: var(--z-overlay);
   display: grid;
   place-items: center;
   background: var(--s-bg);
@@ -630,7 +682,7 @@ textarea {
   top: 0;
   right: 0;
   bottom: 0;
-  z-index: 1;
+  z-index: var(--z-minimap);
   width: var(--s-minimap-w);
   background: var(--s-bg);
   border-left: 1px solid var(--s-border);
@@ -651,7 +703,7 @@ textarea {
   position: absolute;
   top: var(--s-space-2);
   right: calc(var(--s-minimap-w) + var(--s-space-3));
-  z-index: 3;
+  z-index: var(--z-findbar);
   display: flex;
   flex-direction: column;
   gap: 6px;
@@ -767,6 +819,33 @@ textarea {
   color: var(--s-fg) !important;
 }
 
+/* ══ Barra e painel de depuração (posição) ═══════════════════════════════ */
+
+/*
+ * A find bar ocupa o canto superior **direito** do editor (2 linhas, `--s-findbar-h`).
+ * A barra de depuração ficava no MESMO canto (`top: 8px`) e cobria o "×" da busca e os
+ * toggles de case/regex/word (overlap 176×32); o painel de depuração cobria a 2ª linha
+ * (overlap 268×40).
+ *
+ * A correção é **geométrica** (posição), não só de z-index: a barra e o painel descem para
+ * debaixo da find bar; com a find bar fechada, voltam para o topo (o `--s-debug-top` padrão).
+ *
+ * A folga é feita pela pseudo-classe `:has()` (o renderer é Chromium): quando a find bar
+ * está ABERTA, `--s-debug-top` passa a valer `findbar + 12px` dentro de `#ui-overlay`.
+ */
+#debug-toolbar {
+  top: var(--s-debug-top);
+}
+
+#debug-panel {
+  top: calc(var(--s-debug-top) + var(--s-debug-gap));
+}
+
+/* Com a find bar ABERTA, a barra/painel de depuração descem para debaixo dela. */
+#ui-overlay:has(#find-bar:not([hidden])) {
+  --s-debug-top: calc(var(--s-findbar-h) + var(--s-space-4));
+}
+
 /* ══ Command palette ══════════════════════════════════════════════════════ */
 
 #command-palette {
@@ -774,7 +853,7 @@ textarea {
   position: absolute;
   top: var(--s-space-4);
   left: 50%;
-  z-index: 5;
+  z-index: var(--z-modal);
   width: min(560px, calc(100% - 2 * var(--s-space-4)));
   transform: translateX(-50%);
   border: 1px solid var(--s-border);
@@ -855,7 +934,7 @@ textarea {
 #completion-popup {
   pointer-events: auto;
   position: absolute;
-  z-index: 6;
+  z-index: var(--z-popup);
   min-width: 280px;
   max-width: 480px;
   max-height: 320px;
@@ -942,7 +1021,7 @@ textarea {
 #hover-tooltip {
   pointer-events: none;
   position: fixed;
-  z-index: 7;
+  z-index: var(--z-popup);
   max-width: 400px;
   max-height: 300px;
   padding: var(--s-space-2) var(--s-space-3);
@@ -959,11 +1038,11 @@ textarea {
 /* Minimap Hover Preview — tooltip com código real ao passar mouse no minimap */
 .minimap-hover-tooltip {
   position: fixed;
-  z-index: 10000;
+  z-index: var(--z-tooltip);
   background: var(--s-bg);
-  border: 1px solid var(--s-border, #555);
+  border: 1px solid var(--s-border);
   border-radius: 6px;
-  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.4);
+  box-shadow: var(--s-shadow);
   padding: 6px 10px;
   line-height: 1.5;
   white-space: pre;
@@ -1007,7 +1086,7 @@ textarea {
 #signature-popup {
   pointer-events: auto;
   position: absolute;
-  z-index: 6;
+  z-index: var(--z-popup);
   min-width: 240px;
   max-width: 480px;
   max-height: 300px;
@@ -1083,7 +1162,7 @@ textarea {
 #document-symbols-popup {
   pointer-events: auto;
   position: absolute;
-  z-index: 6;
+  z-index: var(--z-modal);
   min-width: 300px;
   max-width: 480px;
   max-height: 360px;

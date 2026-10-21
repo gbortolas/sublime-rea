@@ -70,6 +70,40 @@ export interface VisualRowInfo {
   readonly segmentIndex: number;
 }
 
+/**
+ * Range **dobrável** (forma estrutural) — o `FoldRange` do `scene.ts` é compatível com esta
+ * forma (tem campos a mais, que são ignorados aqui).
+ *
+ * Vive no `soft-wrap` (e não no `scene`) para o `soft-wrap` **não** depender do `scene`
+ * (import circular: `scene` → `soft-wrap`).
+ */
+export interface CollapsibleRange {
+  /** 1ª linha do bloco dobrável (0-based) — a linha que **permanece** visível. */
+  readonly startLine: number;
+  /** Última linha do bloco dobrável (0-based, inclusive). */
+  readonly endLine: number;
+  /** `true` quando o bloco está dobrado (as linhas internas não são desenhadas). */
+  readonly isCollapsed: boolean;
+}
+
+/**
+ * Linhas **colapsadas** (folding) a partir dos ranges dobráveis.
+ *
+ * Uma linha colapsada **não é desenhada**, mas **reserva 1 row** — a mesma regra vale para
+ * a cena (`scene.ts`) e para o índice (`VisualRowIndex`). Sem essa regra única, a contagem
+ * de rows diverge entre os dois e o texto abaixo da dobra "salta" rows.
+ */
+export function collapsedLinesOf(folding: readonly CollapsibleRange[] | undefined): ReadonlySet<number> {
+  const collapsed = new Set<number>();
+  if (folding === undefined) return collapsed;
+  for (const fr of folding) {
+    if (!fr.isCollapsed) continue;
+    // A 1ª linha do bloco permanece visível (com o indicador ▸) — as **internas** somem.
+    for (let line = fr.startLine + 1; line <= fr.endLine; line++) collapsed.add(line);
+  }
+  return collapsed;
+}
+
 /** Opções de `buildVisualRowMap`. */
 export interface VisualRowMapOptions {
   /**
@@ -113,6 +147,16 @@ export interface VisualRowMap {
 }
 
 const EMPTY_SEGMENTS: readonly VisualRowSegment[] = [];
+
+/** Conjunto vazio de linhas colapsadas (sentinela — nunca mutado). */
+const EMPTY_COLLAPSED: ReadonlySet<number> = new Set<number>();
+
+/** `true` se os dois conjuntos de linhas colapsadas têm o mesmo conteúdo. */
+function sameCollapsedSet(a: ReadonlySet<number>, b: ReadonlySet<number>): boolean {
+  if (a.size !== b.size) return false;
+  for (const line of a) if (!b.has(line)) return false;
+  return true;
+}
 
 /**
  * Constrói a malha visual de uma faixa de linhas lógicas.
@@ -182,6 +226,90 @@ export function buildVisualRowMap(
       if (segs !== undefined) return segs[0]?.row;
       return collapsedSegments.get(line)?.[0]?.row;
     },
+    locate: (line: number, column: number): VisualRowInfo | undefined => {
+      const segs = byLine.get(line);
+      if (segs === undefined || segs.length === 0) return undefined;
+      return locateInSegments(segs, column);
+    },
+  };
+}
+
+/**
+ * Índice de **rows visuais** (forma mínima) — a classe `VisualRowIndex` implementa esta forma.
+ *
+ * A cena (`scene.ts`) usa esta forma para reusar os segmentos já quebrados (e em cache)
+ * sem depender da classe concreta.
+ */
+export interface VisualRowIndexLike {
+  /** Row visual da 1ª row da linha lógica `line`. */
+  rowOfLine(line: number): number;
+  /** Segmentos de uma linha (1 por row; a row de cada um é relativa à linha). */
+  segmentsOf(line: number): readonly VisualRowSegment[];
+  /**
+   * Declara as linhas colapsadas (folding) — o índice passa a reservar **1 row** para cada
+   * uma (a mesma regra da cena). Opcional: um índice que não sabe de folding funciona
+   * (a cena usa a contagem dele mesmo assim).
+   */
+  setCollapsedLines?(lines: ReadonlySet<number> | undefined): void;
+}
+
+/**
+ * Constrói a malha visual de uma faixa **reusando** os segmentos já quebrados (e em cache)
+ * de um `VisualRowIndex`.
+ *
+ * ⚠️ **Por quê**: `buildVisualRowMap` **re-quebra** as linhas da faixa a cada frame (custo
+ * O(faixa)) — mas o índice já guardou os mesmos segmentos. Reusá-los tira a quebra do
+ * caminho por frame (o índice só re-quebra quando o texto ou a largura muda).
+ *
+ * A contagem de rows é a do **índice** (que conhece as linhas colapsadas) ⇒ a cena e o
+ * índice concordam sobre onde cada linha está.
+ *
+ * @param index Índice de rows (a fonte da contagem).
+ * @param firstLine Primeira linha lógica da faixa.
+ * @param count Nº de linhas da faixa.
+ * @param collapsedLines Linhas colapsadas (folding) — reservam 1 row e não são desenhadas.
+ */
+export function buildVisualRowMapFromIndex(
+  index: VisualRowIndexLike,
+  firstLine: number,
+  count: number,
+  collapsedLines?: ReadonlySet<number>,
+): VisualRowMap {
+  const first = Math.max(0, firstLine);
+  const last = first + Math.max(0, count);
+  const byLine = new Map<number, VisualRowSegment[]>();
+  const collapsedSegments = new Map<number, VisualRowSegment[]>();
+
+  for (let line = first; line < last; line++) {
+    const base = index.rowOfLine(line);
+    const segs = index.segmentsOf(line);
+    if (collapsedLines !== undefined && collapsedLines.has(line)) {
+      // Linha colapsada: não é desenhada, mas reserva a row do índice.
+      const text = segs[0]?.text ?? "";
+      collapsedSegments.set(line, [{ row: base, segmentIndex: 0, start: 0, end: text.length, text }]);
+      continue;
+    }
+    const mapped: VisualRowSegment[] = [];
+    for (const seg of segs) {
+      mapped.push({
+        row: base + seg.segmentIndex,
+        segmentIndex: seg.segmentIndex,
+        start: seg.start,
+        end: seg.end,
+        text: seg.text,
+      });
+    }
+    byLine.set(line, mapped);
+  }
+
+  return {
+    firstLine: first,
+    firstRow: index.rowOfLine(first),
+    segmentsOf: (line: number): readonly VisualRowSegment[] => byLine.get(line) ?? EMPTY_SEGMENTS,
+    paintSegmentsOf: (line: number): readonly VisualRowSegment[] =>
+      byLine.get(line) ?? collapsedSegments.get(line) ?? EMPTY_SEGMENTS,
+    rowOfLine: (line: number): number | undefined =>
+      byLine.get(line)?.[0]?.row ?? collapsedSegments.get(line)?.[0]?.row,
     locate: (line: number, column: number): VisualRowInfo | undefined => {
       const segs = byLine.get(line);
       if (segs === undefined || segs.length === 0) return undefined;
@@ -269,6 +397,8 @@ export class VisualRowIndex {
   private readonly rowStarts: number[] = [0];
   /** Segmentos por linha (cacheados; no máximo `segmentCacheLimit` linhas). */
   private readonly segmentCache = new Map<number, readonly VisualRowSegment[]>();
+  /** Linhas colapsadas (folding) — reservam **1 row** (a mesma regra da cena). */
+  private collapsedLines: ReadonlySet<number> | undefined;
 
   /** Nº máximo de linhas com segmentos em cache (memória × simplicity). */
   static readonly segmentCacheLimit = 512;
@@ -281,6 +411,27 @@ export class VisualRowIndex {
     this.source = source;
     this.wrapWidth = wrapWidth;
     this.measure = measure;
+  }
+
+  /**
+   * Declara as linhas **colapsadas** (folding) — cada uma delas passa a reservar **1 row**
+   * (a mesma regra do `scene.ts`).
+   *
+   * Sem isso, a contagem de rows do índice diverge da cena quando há dobra: o texto abaixo
+   * da dobra "sobe" (ou desce) rows e a barra de rolagem deixa de bater com o texto.
+   *
+   * Trocar o conjunto invalida o cache a partir da **primeira linha afetada** (as rows
+   * antes dela continuam válidas).
+   */
+  setCollapsedLines(lines: ReadonlySet<number> | undefined): void {
+    const next = lines ?? EMPTY_COLLAPSED;
+    const prev = this.collapsedLines ?? EMPTY_COLLAPSED;
+    if (sameCollapsedSet(prev, next)) return;
+    let first = Number.POSITIVE_INFINITY;
+    for (const line of next) if (!prev.has(line) && line < first) first = line;
+    for (const line of prev) if (!next.has(line) && line < first) first = line;
+    this.collapsedLines = lines === undefined ? undefined : next;
+    if (Number.isFinite(first)) this.invalidate(first);
   }
 
   /** Row visual da **primeira** row da linha lógica `line` (absolute no documento). */
@@ -316,8 +467,11 @@ export class VisualRowIndex {
     const cached = this.segmentCache.get(line);
     if (cached !== undefined) return cached;
     const text = this.source.line(line);
+    // Linha **colapsada** (folding): não é desenhada, mas reserva **1 row** — a mesma
+    // regra do `scene.ts` (é o que mantém a contagem de rows em acordo entre os dois).
+    const collapsed = this.collapsedLines !== undefined && this.collapsedLines.has(line);
     const segs: VisualRowSegment[] =
-      this.wrapWidth > 0
+      this.wrapWidth > 0 && !collapsed
         ? wrapLine(text, this.wrapWidth, this.measure).map((seg, i) => ({
             row: 0,
             segmentIndex: i,
@@ -344,11 +498,17 @@ export class VisualRowIndex {
   /**
    * Invalida o cache a partir de `fromLine` (use quando o texto muda).
    * Sem argumento, invalida tudo.
+   *
+   * ⚠️ O **prefixo** é preservado: as linhas `0..fromLine-1` não mudaram (o texto delas é
+   * o mesmo) e suas rows continuam válidas — só as linhas `>= fromLine` são descartadas.
    */
   invalidate(fromLine = 0): void {
     const keep = Math.max(0, Math.min(fromLine, this.rowStarts.length - 1));
     this.rowStarts.length = keep + 1;
-    this.segmentCache.clear();
+    // Só as linhas `>= fromLine` podem ter segmentos obsoletos — o prefixo fica em cache.
+    for (const line of [...this.segmentCache.keys()]) {
+      if (line >= fromLine) this.segmentCache.delete(line);
+    }
   }
 
   /** Garante que `rowStarts` cobre as linhas `0..upto`. */

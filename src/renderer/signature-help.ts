@@ -5,6 +5,7 @@
  * Navegação entre assinaturas com setas, fecha com Escape.
  */
 import type { LspSignatureHelp } from "../shared";
+import { clampPopupElement } from "./popup-geometry";
 
 export interface SignatureHelpBinding {
   readonly isOpen: boolean;
@@ -86,9 +87,15 @@ export function createSignatureHelp(): SignatureHelpBinding {
       bodyEl.appendChild(countEl);
     }
 
-    popupEl.style.left = `${x}px`;
-    popupEl.style.top = `${y}px`;
     popupEl.hidden = false;
+    /*
+     * Clamp: o popup nasce perto do caret, mas não pode sair da área do editor (na borda
+     * ele era cortado). A medição só vale **depois** de `hidden = false` (elemento `hidden`
+     * mede 0×0) e do corpo montado.
+     */
+    const { x: left, y: top } = clampPopupElement(popupEl, { x, y });
+    popupEl.style.left = `${left}px`;
+    popupEl.style.top = `${top}px`;
   }
 
   function close(): void {

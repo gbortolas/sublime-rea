@@ -39,6 +39,20 @@ import { LocalTextStore } from "./store";
 export interface FileSystem {
   readFile(path: string): Promise<string>;
   writeFile(path: string, data: string): Promise<void>;
+  /**
+   * Diz se o path é um **arquivo regular** (opcional no port).
+   *
+   * Existe por causa do **FIFO** (achado MÉDIO): o `readFile` de um FIFO **bloqueia**
+   * para sempre (sem escritor) ⇒ o `document.open` ficava **pendurado** e o IPC nunca
+   * respondia. Com o `stat`, o registry rejeita o path **antes** de ler.
+   */
+  stat?(path: string): Promise<FileStat>;
+}
+
+/** Resultado do `stat` que o registry precisa (só o `isFile` importa). */
+export interface FileStat {
+  /** `true` **só** para arquivo regular (FIFO, device, socket e diretório são `false`). */
+  readonly isFile: boolean;
 }
 
 /** Erro alto: não se abre documento sem port de I/O injetado (DEC-TR-5). */
@@ -59,6 +73,24 @@ export class DocumentIoError extends Error {
     this.name = "DocumentIoError";
     this.path = path;
     this.causeError = cause;
+  }
+}
+
+/**
+ * Erro alto: o path **não é um arquivo regular** (FIFO, device, socket, diretório).
+ *
+ * Ler um FIFO **bloqueia para sempre** ⇒ o `document.open` ficava pendurado (o IPC
+ * nunca respondia). O registry rejeita o path **antes** de ler.
+ */
+export class NotARegularFileError extends Error {
+  readonly path: string;
+  /** Código estável (sobrevive ao IPC — o `main` o usa como `error.code`). */
+  readonly code = "not-a-regular-file";
+
+  constructor(path: string) {
+    super(`NotARegularFileError: "${path}" não é um arquivo regular (FIFO/device/diretório)`);
+    this.name = "NotARegularFileError";
+    this.path = path;
   }
 }
 
@@ -123,6 +155,19 @@ export class DocumentRegistryImpl implements DocumentRegistry {
 
     const fileSystem = this.fileSystem;
     if (fileSystem === undefined) throw new FileSystemUnavailableError();
+
+    // **Rejeita arquivos especiais ANTES de ler** (achado MÉDIO): o `readFile` de um FIFO
+    // (ou de um device) **bloqueia** ⇒ o `document.open` ficava pendurado e o IPC nunca
+    // respondia. O `stat` é opcional no port (fakes em memória não o têm).
+    if (fileSystem.stat !== undefined) {
+      let stats: FileStat;
+      try {
+        stats = await fileSystem.stat(path);
+      } catch (err) {
+        throw new DocumentIoError(path, toError(err));
+      }
+      if (!stats.isFile) throw new NotARegularFileError(path);
+    }
 
     let text: string;
     try {
@@ -247,5 +292,10 @@ export async function createNodeFileSystem(): Promise<FileSystem> {
   return {
     readFile: (path: string): Promise<string> => fs.readFile(path, "utf8"),
     writeFile: (path: string, data: string): Promise<void> => fs.writeFile(path, data, "utf8"),
+    // O `stat` **antes** da leitura: FIFO/device travam o `readFile` para sempre.
+    stat: async (path: string): Promise<FileStat> => {
+      const stats = await fs.stat(path);
+      return { isFile: stats.isFile() };
+    },
   };
 }

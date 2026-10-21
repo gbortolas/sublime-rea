@@ -7,6 +7,7 @@
  * posicionado absolutamente dentro de `#ui-overlay`).
  */
 import type { LspCompletionItem } from "../shared";
+import { clampPopupElement } from "./popup-geometry";
 
 // ── Ícones SVG inline por kind ──────────────────────────────────────────────────────────────────
 
@@ -188,10 +189,16 @@ export function createCompletionPopup(): CompletionPopupBinding {
     selectedIndex = 0;
     onSelect = callback;
     isOpenValue = true;
-    popupEl.style.left = `${x}px`;
-    popupEl.style.top = `${y}px`;
     popupEl.hidden = false;
     render();
+    /*
+     * Clamp: o popup é posicionado perto do caret, mas não pode sair da área do editor
+     * (na borda, ele era cortado). A medição só é válida **depois** de `hidden = false`
+     * (um elemento `hidden` mede 0×0) e da renderização da lista.
+     */
+    const { x: left, y: top } = clampPopupElement(popupEl, { x, y });
+    popupEl.style.left = `${left}px`;
+    popupEl.style.top = `${top}px`;
     document.addEventListener("keydown", boundKeyDown);
   }
 

@@ -44,16 +44,17 @@ export function createReferencesPopup(): ReferencesPopupBinding {
     "top: 80px;",
     "left: 50%;",
     "transform: translateX(-50%);",
-    "width: 480px;",
+    // `min()` ⇒ o popup não ultrapassa a borda em janelas estreitas.
+    "width: min(480px, calc(100% - 32px));",
     "max-height: 320px;",
-    "background: var(--bg-overlay, #252526);",
-    "border: 1px solid var(--border, #3c3c3c);",
+    "background: var(--bg-overlay);",
+    "border: 1px solid var(--border);",
     "border-radius: 6px;",
-    "box-shadow: 0 8px 24px rgba(0,0,0,.4);",
+    "box-shadow: var(--s-shadow);",
     "display: flex;",
     "flex-direction: column;",
-    "z-index: 140;",
-    "color: var(--fg, #ccc);",
+    "z-index: var(--z-panel);",
+    "color: var(--fg);",
     "font-family: inherit;",
     "font-size: 13px;",
     // O pai (`#ui-overlay`) é `pointer-events:none` — sem isto o popup é inerte
@@ -65,15 +66,16 @@ export function createReferencesPopup(): ReferencesPopupBinding {
   const input = document.createElement("input");
   input.type = "text";
   input.placeholder = "Filtrar referências\u2026";
+  input.setAttribute("aria-label", "Filtrar referências");
   input.autocomplete = "off";
   input.spellcheck = false;
   input.style.cssText = [
     "margin: 8px;",
     "padding: 6px 8px;",
-    "border: 1px solid var(--border, #3c3c3c);",
+    "border: 1px solid var(--border);",
     "border-radius: 4px;",
-    "background: var(--bg-input, #3c3c3c);",
-    "color: var(--fg, #ccc);",
+    "background: var(--bg-input);",
+    "color: var(--fg);",
     "font-family: inherit;",
     "font-size: 13px;",
     "outline: none;",
@@ -122,7 +124,7 @@ export function createReferencesPopup(): ReferencesPopupBinding {
         "display: flex;",
         "align-items: center;",
         "gap: 6px;",
-        i === selectedIndex ? "background: var(--highlight, #094771);" : "",
+        i === selectedIndex ? "background: var(--highlight);" : "",
       ].join(" ");
 
       // Ícone de referência (seta de retorno)
@@ -150,7 +152,7 @@ export function createReferencesPopup(): ReferencesPopupBinding {
       // Linha : coluna
       const posSpan = document.createElement("span");
       posSpan.textContent = `${loc.range.startLine + 1}:${loc.range.startCol + 1}`;
-      posSpan.style.cssText = "color: var(--fg-secondary, #888); flex-shrink: 0;";
+      posSpan.style.cssText = "color: var(--fg-secondary); flex-shrink: 0;";
       el.appendChild(posSpan);
 
       // Path (para desambiguar arquivos com mesmo nome)
@@ -158,7 +160,7 @@ export function createReferencesPopup(): ReferencesPopupBinding {
       const dirPart = loc.uri.slice(0, loc.uri.lastIndexOf("/"));
       pathSpan.textContent = dirPart;
       pathSpan.style.cssText = [
-        "color: var(--fg-tertiary, #666);",
+        "color: var(--fg-tertiary);",
         "font-size: 11px;",
         "overflow: hidden;",
         "text-overflow: ellipsis;",
@@ -184,7 +186,7 @@ export function createReferencesPopup(): ReferencesPopupBinding {
 
     if (filtered.length === 0) {
       const emptyEl = document.createElement("div");
-      emptyEl.style.cssText = "padding: 16px 8px; text-align: center; color: var(--fg-secondary, #888);";
+      emptyEl.style.cssText = "padding: 16px 8px; text-align: center; color: var(--fg-secondary);";
       emptyEl.textContent = "Nenhuma referência encontrada";
       list.appendChild(emptyEl);
     }
@@ -197,7 +199,7 @@ export function createReferencesPopup(): ReferencesPopupBinding {
     for (let i = 0; i < children.length; i++) {
       const child = children[i] as HTMLElement;
       if (i === selectedIndex) {
-        child.style.background = "var(--highlight, #094771)";
+        child.style.background = "var(--highlight)";
         child.setAttribute("aria-selected", "true");
       } else {
         child.style.background = "";

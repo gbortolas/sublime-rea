@@ -280,8 +280,14 @@ const api: ScribePreloadApi = {
       };
     },
   },
-  open: (path: string, signalId?: number): Promise<DocumentHandle> =>
-    call<DocumentHandle>("document.open", [path], signalId),
+  open: (path: string, signalId?: number): Promise<DocumentHandle> => {
+    // Validação **no preload**: o path vem do renderer (não confiável). Path vazio ou com
+    // NUL faria o `fs` do main lançar uma exceção opaca; aqui o erro é tipado e local.
+    if (typeof path !== "string" || path.length === 0 || path.includes("\0")) {
+      return Promise.reject(new Error("Scribe: path de documento inválido"));
+    }
+    return call<DocumentHandle>("document.open", [path], signalId);
+  },
   openDialog: (): Promise<string | null> => call<string | null>("document.openDialog", []),
   text: (handle: DocumentHandle): Promise<string> => call<string>("document.text", [handle]),
   revision: (handle: DocumentHandle): Promise<number> =>

@@ -15,7 +15,13 @@ import type { GlyphInstance, LineInstance, Rect, RectInstance, RGBA, SearchMatch
 import type { HighlightSpan, Scope, ThemeResolver } from "../../shared";
 import { SelectionOps, type Selection } from "../../shared";
 import type { GlyphAtlas } from "./atlas";
-import { buildVisualRowMap, type VisualRowMap } from "./soft-wrap";
+import {
+  buildVisualRowMap,
+  buildVisualRowMapFromIndex,
+  collapsedLinesOf,
+  type VisualRowIndexLike,
+  type VisualRowMap,
+} from "./soft-wrap";
 import type { LineRange } from "./viewport";
 
 /** Fonte de linhas — a costura que o documento real implementará depois. */
@@ -90,6 +96,10 @@ export interface LineLayout {
    * fica desalinhado em relação à barra de rolagem. O par completo é:
    * `visualRowOffset` = row visual da 1ª linha visível + `scrollOffsetPx` em rows visuais
    * (o `ViewportImpl` faz isso quando recebe um `VisualRowMapper` — ver `viewport.ts`).
+   *
+   * ⚠️ Com o **índice de rows** informado em `buildInstances` (`rowIndex`), este campo é
+   * **ignorado**: a malha visual (e a row base da faixa) vem do índice, que é a fonte
+   * única da contagem de rows.
    */
   readonly visualRowOffset?: number;
   /**
@@ -106,6 +116,21 @@ export interface CaretPosition {
   readonly color: RGBA;
   readonly width: number;
 }
+
+/**
+ * Índice de **rows visuais** (o `VisualRowIndex` do core) — a fonte da malha visual.
+ *
+ * Quando a cena recebe um índice, ela **reusa** os segmentos já quebrados (e em cache):
+ * sem ele, a faixa visível é re-quebrada a cada frame (O(faixa), nunca O(documento)).
+ *
+ * A contagem de rows é a do **índice** — que conhece as linhas colapsadas (folding) — ⇒ a
+ * cena e o índice concordam sobre a posição de cada linha (sem isso, o texto abaixo de uma
+ * dobra "salta" rows).
+ *
+ * A forma é definida em `soft-wrap.ts` (`VisualRowIndexLike`) — o renderer pode passar o
+ * `VisualRowIndex` diretamente.
+ */
+export type { VisualRowIndexLike } from "./soft-wrap";
 
 /** Posição de um bracket (linha/coluna, 0-based). */
 export interface BracketPos {
@@ -214,6 +239,23 @@ export function buildInstances(
   gitDiffs?: readonly GitDiffRange[],
   /** Linhas com breakpoint (1-based) — bolinha vermelha à esquerda do número. */
   breakpointLines?: readonly number[],
+  /**
+   * Linha **ativa** (a linha do cursor) para o **destaque de linha atual** — conceito
+   * separado do caret desenhado.
+   *
+   * O `caret` é a **posição** do cursor (a barra); a linha ativa é a **linha** do cursor
+   * (o fundo sutil + o destaque do gutter). São coisas diferentes: passar a 1ª linha
+   * visível como `caret` desenhava a barra do cursor no canto da viewport.
+   *
+   * `undefined` (default) = usa a linha do caret (comportamento legado).
+   */
+  activeLine?: number,
+  /**
+   * Índice de rows visuais (o `VisualRowIndex` do renderer) — a cena **reusa** os
+   * segmentos já quebrados em cache (não re-quebra a faixa a cada frame) e passa a usar a
+   * contagem de rows do índice (que conhece as linhas colapsadas).
+   */
+  rowIndex?: VisualRowIndexLike,
 ): SceneInstances {
   const rects: RectInstance[] = [
     { rect: layout.viewport, color: layout.background },
@@ -233,17 +275,8 @@ export function buildInstances(
   const mw = measureWidth;
   const wrap = layout.wrapWidth > 0 && mw !== undefined;
 
-  // Preenche linhas colapsadas
-  const collapsedLines = new Set<number>();
-  if (folding !== undefined) {
-    for (const fr of folding) {
-      if (fr.isCollapsed) {
-        for (let l = fr.startLine + 1; l <= fr.endLine; l++) {
-          collapsedLines.add(l);
-        }
-      }
-    }
-  }
+  // Preenche linhas colapsadas — a **mesma** regra do `VisualRowIndex` (1 row reservada).
+  const collapsedLines = collapsedLinesOf(folding);
 
   // `wrapLine` (soft-wrap.ts) é a implementação canônica da quebra: tem o early-exit "cabe
   // tudo" — linhas que cabem na largura **não** são quebradas.
@@ -252,16 +285,34 @@ export function buildInstances(
   // ancoragem atual (o scroll continua em linhas lógicas). `layout.visualRowOffset` permite
   // ao renderizador informar a row visual absoluta (quando a rolagem passa a ser contada em
   // rows visuais).
-  const rowMap = buildVisualRowMap(source, first, end - first, layout.wrapWidth, mw, {
-    ...(wrap && layout.visualRowOffset !== undefined ? { firstRow: layout.visualRowOffset } : {}),
-    ...(collapsedLines.size > 0 ? { collapsedLines } : {}),
-  });
+  //
+  // Com o **índice** informado, a malha é montada a partir dos segmentos **já em cache**
+  // dele (a faixa não é re-quebrada a cada frame) e a contagem de rows é a do índice — que
+  // conhece as linhas colapsadas (a cena e o índice concordam sobre a posição de cada linha).
+  if (rowIndex !== undefined) rowIndex.setCollapsedLines?.(collapsedLines);
+  const rowMap: VisualRowMap =
+    rowIndex !== undefined
+      ? buildVisualRowMapFromIndex(rowIndex, first, end - first, collapsedLines)
+      : buildVisualRowMap(source, first, end - first, layout.wrapWidth, mw, {
+          ...(wrap && layout.visualRowOffset !== undefined ? { firstRow: layout.visualRowOffset } : {}),
+          ...(collapsedLines.size > 0 ? { collapsedLines } : {}),
+        });
 
-  // Row visual do caret: é ela que ancora o caret, a seleção, a busca e o destaque de linha
-  // atual. Sem wrap, a row visual de uma linha é o seu índice lógico (comportamento atual).
+  // ── Caret (posição do cursor) e linha ativa (destaque de linha atual) ──────────────────────
+  // São **dois** conceitos: o caret é a **posição** (a barra desenhada); a linha ativa é a
+  // **linha** do cursor (fundo sutil no texto + destaque no gutter).
+  //
+  // Row visual do caret: é ela que ancora o caret, a seleção e a busca. Sem wrap, a row
+  // visual de uma linha é o seu índice lógico (comportamento atual).
   const caretVisible = caret !== undefined && caret.line >= first && caret.line < end;
   const caretLoc = caretVisible ? rowMap.locate(caret.line, caret.column) : undefined;
   const caretRow = caretVisible ? (caretLoc?.row ?? rowMap.rowOfLine(caret.line)) : undefined;
+
+  // Linha ativa: `activeLine` (explícito) ou, por compatibilidade, a linha do caret.
+  const activeLineNumber = activeLine ?? caret?.line;
+  const activeVisible =
+    activeLineNumber !== undefined && activeLineNumber >= first && activeLineNumber < end;
+  const activeRow = activeVisible ? activeRowOf(rowMap, activeLineNumber, caret) : undefined;
 
   // Gutter: fundo + linha atual destacada + separador.
   if (layout.gutterWidth > 0) {
@@ -269,12 +320,12 @@ export function buildInstances(
       rect: { x: 0, y: 0, w: layout.gutterWidth, h: layout.viewport.h },
       color: layout.gutterBackground,
     });
-    // Highlight da linha atual no gutter (se o caret estiver no range visível).
-    if (caretRow !== undefined) {
+    // Highlight da linha atual no gutter (se a linha ativa estiver no range visível).
+    if (activeRow !== undefined) {
       rects.push({
         rect: {
           x: 0,
-          y: layout.paddingTop + caretRow * layout.lineHeight - layout.scrollOffsetPx,
+          y: layout.paddingTop + activeRow * layout.lineHeight - layout.scrollOffsetPx,
           w: layout.gutterWidth,
           h: layout.lineHeight,
         },
@@ -315,12 +366,13 @@ export function buildInstances(
     }
   }
 
-  // Cursor line highlight (P1#1): fundo sutil na linha do cursor no text area.
-  if (caretRow !== undefined) {
+  // Cursor line highlight (P1#1): fundo sutil na **linha ativa** (a linha do cursor) no
+  // text area — independente de onde o caret está desenhado.
+  if (activeRow !== undefined) {
     rects.push({
       rect: {
         x: layout.gutterWidth,
-        y: layout.paddingTop + caretRow * layout.lineHeight - layout.scrollOffsetPx,
+        y: layout.paddingTop + activeRow * layout.lineHeight - layout.scrollOffsetPx,
         w: layout.viewport.w - layout.gutterWidth - layout.scrollbarWidth,
         h: layout.lineHeight,
       },
@@ -566,27 +618,25 @@ export function buildInstances(
     pushSelectionRects(rects, source, layout, atlas, style, rowMap, selection, first, end, spaceAdvance);
   }
 
-  if (caret && caret.line >= first && caret.line < end) {
-    const loc = rowMap.locate(caret.line, caret.column);
-    const row = loc !== undefined ? loc.row : rowMap.rowOfLine(caret.line);
-    if (row !== undefined) {
-      // Com wrap, o caret vive no **segmento** que contém a coluna: o x é medido dentro do
-      // segmento (a row do segmento, não a da linha lógica).
-      const seg = loc !== undefined ? rowMap.segmentsOf(caret.line)[loc.segmentIndex] : undefined;
-      const x =
-        loc !== undefined && seg !== undefined && wrap
-          ? advanceWithin(atlas, style, seg.text, loc.column, layout.paddingLeft, spaceAdvance, layout.tabWidth)
-          : layout.paddingLeft + caretAdvance(atlas, style, caret.column, spaceAdvance);
-      rects.push({
-        rect: {
-          x,
-          y: layout.paddingTop + row * layout.lineHeight - layout.scrollOffsetPx,
-          w: caret.width,
-          h: layout.lineHeight,
-        },
-        color: caret.color,
-      });
-    }
+  // Caret: a **posição real** do cursor (a barra). É independente da linha ativa (o
+  // destaque de linha atual) — os dois são conceitos separados.
+  if (caret !== undefined && caretVisible && caretRow !== undefined) {
+    // Com wrap, o caret vive no **segmento** que contém a coluna: o x é medido dentro do
+    // segmento (a row do segmento, não a da linha lógica).
+    const seg = caretLoc !== undefined ? rowMap.segmentsOf(caret.line)[caretLoc.segmentIndex] : undefined;
+    const x =
+      caretLoc !== undefined && seg !== undefined && wrap
+        ? advanceWithin(atlas, style, seg.text, caretLoc.column, layout.paddingLeft, spaceAdvance, layout.tabWidth)
+        : layout.paddingLeft + caretAdvance(atlas, style, caret.column, spaceAdvance);
+    rects.push({
+      rect: {
+        x,
+        y: layout.paddingTop + caretRow * layout.lineHeight - layout.scrollOffsetPx,
+        w: caret.width,
+        h: layout.lineHeight,
+      },
+      color: caret.color,
+    });
   }
 
   // Cuidados extras para múltiplos cursores (P2#5)
@@ -622,8 +672,9 @@ export function buildInstances(
     }
   }
 
-  // Indentation guides (P3.15)
-  const indentGuides = calcIndentGuides(source, layout, range);
+  // Indentation guides (P3.15) — as guias usam a **row visual** (a mesma do texto
+  // desenhado): com wrap, o índice lógico subiria as guias N rows e elas cruzariam o texto.
+  const indentGuides = calcIndentGuides(source, layout, range, rowMap);
 
   return { rects, glyphs, lines, ...(indentGuides !== undefined ? { indentGuides } : {}) };
 }
@@ -632,6 +683,25 @@ function caretAdvance(atlas: GlyphAtlas, style: TextStyle, column: number, space
   if (column <= 0) return 0;
   const metrics = atlas.measure(" ".repeat(column), atlas.registerStyle(style));
   return metrics.advance === 0 ? column * spaceAdvance : metrics.advance;
+}
+
+/**
+ * Row visual da **linha ativa** (o destaque de linha atual).
+ *
+ * Quando o caret está na própria linha ativa, o destaque acompanha a row do caret (o
+ * comportamento histórico: com wrap, a row do segmento onde o cursor está); senão, é a
+ * 1ª row da linha ativa.
+ */
+function activeRowOf(
+  rowMap: VisualRowMap,
+  line: number,
+  caret: CaretPosition | undefined,
+): number | undefined {
+  if (caret !== undefined && caret.line === line) {
+    const loc = rowMap.locate(line, caret.column);
+    if (loc !== undefined) return loc.row;
+  }
+  return rowMap.rowOfLine(line);
 }
 
 /**
@@ -676,6 +746,22 @@ function advanceWithin(
 }
 
 /**
+ * Posição (linha/coluna) do **fim** de uma seleção (o offset `selEnd` é **exclusivo**).
+ *
+ * `positionAt(selEnd)` pode devolver a linha **seguinte** com coluna 0 quando a seleção
+ * termina exatamente no fim de uma linha (o offset aponta para depois do `\n`) — nesse caso
+ * o fim da seleção é o **fim da linha anterior** (a última coluna dela).
+ */
+function selectionEndPos(source: LineSource, selEnd: number): { line: number; column: number } {
+  const pos = source.positionAt(selEnd);
+  if (pos.column === 0 && pos.line > 0) {
+    const prev = pos.line - 1;
+    return { line: prev, column: source.line(prev).length };
+  }
+  return pos;
+}
+
+/**
  * Pinta a seleção (rects de fundo) entre `anchor` e `active` — **um rect por segmento** de wrap
  * atravessado (sem wrap: um rect por linha, como sempre).
  *
@@ -696,7 +782,9 @@ function pushSelectionRects(
 ): void {
   const { start, end: selEnd } = SelectionOps.normalized(selection);
   const startPos = source.positionAt(start);
-  const endPos = source.positionAt(Math.max(0, selEnd - 1));
+  // O fim da seleção é o offset **após** o último caractere selecionado (`selEnd`), não o
+  // do último caractere — senão a faixa pintada ficaria 1 caractere curta.
+  const endPos = selectionEndPos(source, selEnd);
   // Linhas afetadas pela seleção (dentro do range visível).
   const selFirst = Math.max(first, startPos.line);
   const selLast = Math.min(endPos.line, end - 1, source.lineCount() - 1);
@@ -750,11 +838,16 @@ function pushSelectionRects(
  * Calcula as guias de indentação (linhas verticais semi-transparentes) para o range visível.
  * Cada nível de indentação ganha uma linha vertical contínua enquanto o código permanece
  * naquele nível. V1 usa espaçamento monospace fixo (~8px por nível).
+ *
+ * ⚠️ As guias são posicionadas pela **row visual** da linha (`rowMap.rowOfLine`) — a mesma
+ * unidade do texto desenhado. Com soft wrap, a row visual ≠ índice lógico (a linha pode
+ * ocupar N rows) e as guias cruzariam o texto.
  */
 function calcIndentGuides(
   source: LineSource,
   layout: LineLayout,
   range: { first: number; count: number },
+  rowMap: VisualRowMap,
 ): IndentGuide[] | undefined {
   if (range.count <= 0) return undefined;
 
@@ -762,6 +855,16 @@ function calcIndentGuides(
   const visited = new Map<number, number>(); // indentLevel -> startLine
   const tabSize = layout.tabWidth;
   const { paddingLeft, lineHeight, paddingTop, scrollOffsetPx } = layout;
+
+  /** Row visual (absoluta) da 1ª row de uma linha. */
+  const rowOf = (line: number): number => rowMap.rowOfLine(line) ?? line - range.first;
+  /** Row visual (absoluta) da **última** row de uma linha. */
+  const lastRowOf = (line: number): number => {
+    const segs = rowMap.paintSegmentsOf(line);
+    return rowOf(line) + Math.max(1, segs.length) - 1;
+  };
+  /** Y do topo da row visual `row`. */
+  const yOf = (row: number): number => paddingTop + row * lineHeight - scrollOffsetPx;
 
   for (let i = range.first; i < range.first + range.count && i < source.lineCount(); i++) {
     const text = source.line(i);
@@ -784,8 +887,8 @@ function calcIndentGuides(
         const x = paddingLeft + level * tabSize * 8; // ~8px por indent (monospace)
         guides.push({
           x,
-          top: paddingTop + (startLine - range.first) * lineHeight - scrollOffsetPx,
-          bottom: paddingTop + (i - range.first) * lineHeight - scrollOffsetPx - 2,
+          top: yOf(rowOf(startLine)),
+          bottom: yOf(rowOf(i)) - 2,
         });
         visited.delete(level);
       }
@@ -793,12 +896,14 @@ function calcIndentGuides(
   }
 
   // Fecha guias pendentes no fim do range
+  const lastLine = Math.min(source.lineCount() - 1, range.first + range.count - 1);
+  const bandEnd = yOf(lastRowOf(lastLine) + 1) - 2;
   for (const [level, startLine] of visited) {
     const x = paddingLeft + level * tabSize * 8;
     guides.push({
       x,
-      top: paddingTop + (startLine - range.first) * lineHeight - scrollOffsetPx,
-      bottom: paddingTop + range.count * lineHeight - scrollOffsetPx - 2,
+      top: yOf(rowOf(startLine)),
+      bottom: bandEnd,
     });
   }
 

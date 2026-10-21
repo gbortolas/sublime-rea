@@ -4,7 +4,9 @@ import {
   DocumentIoError,
   DocumentRegistryImpl,
   FileSystemUnavailableError,
+  NotARegularFileError,
   UnknownDocumentError,
+  type FileStat,
   type FileSystem,
 } from "./registry";
 
@@ -96,6 +98,36 @@ describe("DocumentRegistryImpl", () => {
     await expect(withoutPort.open("/tmp/x")).rejects.toBeInstanceOf(FileSystemUnavailableError);
 
     const registry = new DocumentRegistryImpl(new FakeFileSystem());
+    await expect(registry.open("/tmp/ausente")).rejects.toBeInstanceOf(DocumentIoError);
+  });
+
+  it("rejeita path que não é arquivo regular **sem** tentar ler (FIFO trava o readFile)", async () => {
+    let reads = 0;
+    const special: FileSystem = {
+      // Um FIFO **bloqueia** o `readFile` para sempre ⇒ a promise nunca resolve.
+      readFile: () => {
+        reads += 1;
+        return new Promise<string>(() => undefined);
+      },
+      writeFile: async (): Promise<void> => undefined,
+      stat: async (): Promise<FileStat> => ({ isFile: false }),
+    };
+    const registry = new DocumentRegistryImpl(special);
+
+    await expect(registry.open("/tmp/canal")).rejects.toBeInstanceOf(NotARegularFileError);
+    // A leitura **não** chegou a acontecer (é ela que trava).
+    expect(reads).toBe(0);
+  });
+
+  it("propaga erro de I/O quando o `stat` falha (arquivo inexistente)", async () => {
+    const failing: FileSystem = {
+      readFile: async (): Promise<string> => "nunca",
+      writeFile: async (): Promise<void> => undefined,
+      stat: async (): Promise<FileStat> => {
+        throw new Error("ENOENT: /tmp/ausente");
+      },
+    };
+    const registry = new DocumentRegistryImpl(failing);
     await expect(registry.open("/tmp/ausente")).rejects.toBeInstanceOf(DocumentIoError);
   });
 

@@ -1210,6 +1210,48 @@ export function createEditorCore(options: EditorCoreOptions = {}): EditorCore {
   }
 
   /**
+   * Contador de sequência dos **grupos de undo únicos** (o apagamento e o insert de extensão
+   * não fundem ⇒ cada operação precisa do seu próprio grupo).
+   */
+  let undoGroupSeq = 0;
+
+  /**
+   * **Grupo de undo** de uma edição — decide *o que* um `Ctrl+Z` desfaz.
+   *
+   * ⚠️ **Por que 3 grupos (e não 1)**: com um grupo único (`type:`), a **digitação**, o
+   * **backspace/delete** e o **insert de extensão** fundiam no mesmo passo de undo — um
+   * `Ctrl+Z` desfazia coisas diferentes do que o usuário esperava (p.ex.: digitar "abc", apagar
+   * um caractere ⇒ o `Ctrl+Z` tirava o "abc" inteiro).
+   *
+   * Agora a coalescência (a "fusão" de passos consecutivos com o mesmo `groupId`) só acontece
+   * **dentro do mesmo tipo de ação**:
+   *
+   * - `type:<handle>` — **digitação**: é a **única** que funde com ela mesma (as teclas
+   *   consecutivas viram 1 passo de undo);
+   * - `delete:<handle>:<n>` — backspace/delete: grupo **único** por operação (dois
+   *   apagamentos consecutivos são 2 `Ctrl+Z`);
+   * - `plugin:<handle>:<n>` — insert de extensão: grupo **único** por operação (nunca funde
+   *   com a digitação nem com o apagamento).
+   *
+   * @param handle Documento dono da edição (o grupo é **por documento**).
+   * @param origin Origem da edição (`"user"` = digitação/apagamento, `"plugin"` = extensão).
+   * @param edits Os deltas da edição (o `remove` é o texto apagado, o `insert` o inserido).
+   */
+  function undoGroupFor(
+    handle: DocumentHandle,
+    origin: "plugin" | "user",
+    edits: readonly { readonly insert: string; readonly remove: string }[],
+  ): string {
+    // Os grupos que **não** fundem precisam ser únicos ⇒ um contador de sequência.
+    undoGroupSeq += 1;
+    if (origin === "plugin") return `plugin:${handle}:${undoGroupSeq}`;
+    // Apagamento puro (remove texto e não insere nada) — backspace/delete.
+    const isDeletion =
+      edits.length > 0 && edits.every((e) => e.insert.length === 0 && e.remove.length > 0);
+    return isDeletion ? `delete:${handle}:${undoGroupSeq}` : `type:${handle}`;
+  }
+
+  /**
    * Insere `text` em `at` do documento.
    *
    * `selections` (opcional) é o conjunto de cursores **antes** da edição: é o "before" que o
@@ -1247,7 +1289,7 @@ export function createEditorCore(options: EditorCoreOptions = {}): EditorCore {
       const result = await commands.run(
         INSERT_COMMAND_ID,
         { handle, at: actualAt, text, ...(removeText !== undefined ? { remove: removeText } : {}) },
-        { origin, group: `type:${handle}` },
+        { origin, group: undoGroupFor(handle, origin, [{ insert: text, remove: removeText ?? "" }]) },
       );
       if (!result.handled) {
         throw new EditorArgumentError(
@@ -1305,7 +1347,10 @@ export function createEditorCore(options: EditorCoreOptions = {}): EditorCore {
       const result = await commands.run(
         INSERT_COMMAND_ID,
         { handle, at, text: insert, remove: removeText },
-        { origin: "user", group: `type:${handle}` },
+        {
+          origin: "user",
+          group: undoGroupFor(handle, "user", [{ insert, remove: removeText }]),
+        },
       );
       if (!result.handled) {
         throw new EditorArgumentError(
@@ -1338,8 +1383,8 @@ export function createEditorCore(options: EditorCoreOptions = {}): EditorCore {
   /**
    * Lote de inserções atômicas: aplica cada `{at, text, remove?}` em sequência, tudo
    * dentro de um único `coalesceDocumentChanges` (1 evento `document.changed`) e num
-   * **único** passo de undo (o grupo `type:<handle>` funde os N comandos).
-   *
+   * **único** passo de undo (o grupo do lote funde os N comandos — `type:` na digitação,
+   * `delete:` no apagamento multi-cursor, `plugin:` no insert de extensão).   *
    * O `at` de cada entrada é absoluto **no estado do buffer após as entradas anteriores** ⇒
    * um lote multi-cursor deve entrar em ordem **descendente**.
    *
@@ -1365,6 +1410,14 @@ export function createEditorCore(options: EditorCoreOptions = {}): EditorCore {
     state.pendingHandle = handle;
     // O "antes": o conjunto de cursores que o undo vai restaurar.
     applySelectionSet(selections ?? SelectionSetOps.singular(inserts[0]!.at));
+    // O grupo do undo é do **lote inteiro** (as N edições são 1 passo de undo): um lote
+    // misto (digitação + apagamento) cai no grupo da digitação — o que importa é que ele
+    // **não** funda com o lote anterior (que pode ser de outro tipo).
+    const group = undoGroupFor(
+      handle,
+      origin,
+      inserts.map((entry) => ({ insert: entry.text, remove: entry.remove ?? "" })),
+    );
     try {
       return await coalesceDocumentChanges(handle, async () => {
         for (const { at, text, remove } of inserts) {
@@ -1376,7 +1429,7 @@ export function createEditorCore(options: EditorCoreOptions = {}): EditorCore {
               text,
               ...(remove !== undefined && remove.length > 0 ? { remove } : {}),
             },
-            { origin, group: `type:${handle}` },
+            { origin, group },
           );
           if (!result.handled) {
             throw new EditorArgumentError(
