@@ -11,6 +11,12 @@
  * Determinismo: `now()` e `requestFrame()` são **injetados** — nada de `setInterval`, nada de relógio
  * implícito. O *damage* é **coalescido** por índice de linha: N passos de scroll geram **uma** região
  * por linha tocada (em coordenadas de conteúdo: `y = linha * lineHeight`).
+ *
+ * ⚠️ **Soft wrap — a deriva declarada**: o `offsetPx` é contado em **linhas lógicas**, mas o
+ * desenho usa **rows visuais** (1 row por segmento de wrap). Para alinhar, injete um
+ * `VisualRowMapper` (`setVisualRowMapper`): com ele o viewport passa a contar em rows visuais
+ * (o `offsetPx` = rows × `lineHeight`) e `visibleLineRange()` devolve as linhas lógicas que
+ * cobrem as rows visíveis. Sem o mapper, o comportamento legado (linhas lógicas) é preservado.
  */
 
 import type { DamageRects, Rect, Viewport, ViewportObserver } from "../../shared";
@@ -39,6 +45,25 @@ export interface ViewportMetrics {
   readonly visualLineCount?: number;
 }
 
+/**
+ * Mapa **row visual ↔ linha lógica** (injetado pelo renderer quando o soft wrap está ativo).
+ *
+ * ⚠️ **A deriva declarada**: sem este mapa, o viewport conta a rolagem em **linhas lógicas**
+ * (`offsetPx = linha * lineHeight`) enquanto o desenho usa **rows visuais** (1 row por segmento
+ * de wrap) ⇒ o texto e a barra de rolagem não batem. Com o mapa, o viewport passa a contar em
+ * **rows visuais** de forma coerente:
+ *
+ * - `offsetPx` = nº de rows visuais × `lineHeight`;
+ * - `visibleLineRange()` devolve as **linhas lógicas** que cobrem as rows visíveis;
+ * - `scrollTo(linha)` rola até a **1ª row** da linha lógica.
+ */
+export interface VisualRowMapper {
+  /** Row visual da primeira row da linha lógica `line`. */
+  rowOfLine(line: number): number;
+  /** Linha lógica que contém a row visual `row`. */
+  lineOfRow(row: number): number;
+}
+
 export interface ViewportOptions extends ViewportMetrics {
   /** Relógio injetado (determinismo; em produção: `performance.now`). */
   readonly now: () => number;
@@ -46,6 +71,11 @@ export interface ViewportOptions extends ViewportMetrics {
   readonly requestFrame: (cb: (now: number) => void) => Disposable;
   /** Duração da animação de scroll (ms). `0`/ausente = salto imediato. */
   readonly scrollDurationMs?: number;
+  /**
+   * Modo **soft wrap**: mapa row visual ↔ linha lógica. Quando presente (e `visualLineCount`
+   * informado), o viewport conta a rolagem em **rows visuais** — ver `VisualRowMapper`.
+   */
+  readonly visualRowMapper?: VisualRowMapper;
 }
 
 type ResolvedMetrics = Required<Omit<ViewportMetrics, "visualLineCount">> & { visualLineCount?: number };
@@ -71,6 +101,8 @@ export class ViewportImpl implements Viewport {
   private readonly nowFn: () => number;
   private readonly requestFrameFn: (cb: (now: number) => void) => Disposable;
   private readonly scrollDurationMs: number;
+  /** Mapa row visual ↔ linha lógica (modo soft wrap). `undefined` = modo linhas lógicas. */
+  private visualRowMapper: VisualRowMapper | undefined;
 
   private readonly observers = new Set<ViewportObserver>();
   private readonly damageLines = new Set<number>();
@@ -91,6 +123,18 @@ export class ViewportImpl implements Viewport {
     this.nowFn = options.now;
     this.requestFrameFn = options.requestFrame;
     this.scrollDurationMs = options.scrollDurationMs ?? 0;
+    this.visualRowMapper = options.visualRowMapper;
+  }
+
+  /**
+   * Ativa/desativa o modo **soft wrap** (rows visuais).
+   *
+   * Com o mapa informado, o `offsetPx` passa a ser contado em **rows visuais**
+   * (`row * lineHeight`) e `visibleLineRange()` devolve as linhas lógicas que cobrem as rows
+   * visíveis — é o que elimina a deriva entre o texto desenhado e a barra de rolagem.
+   */
+  setVisualRowMapper(mapper: VisualRowMapper | undefined): void {
+    this.visualRowMapper = mapper;
   }
 
   /** Range visível (virtualização): só estas linhas geram instâncias. */
@@ -100,6 +144,16 @@ export class ViewportImpl implements Viewport {
       return { first: 0, count: 0 };
     }
     const visible = Math.ceil(viewportHeight / lineHeight);
+    const mapper = this.visualRowMapper;
+    if (mapper !== undefined) {
+      // Modo soft wrap: o offset é contado em ROWS VISUAIS — as linhas lógicas a materializar
+      // são as que cobrem as rows visíveis.
+      const firstRow = Math.floor(this.offsetPx / lineHeight);
+      const lastRow = firstRow + visible - 1;
+      const first = Math.max(0, mapper.lineOfRow(firstRow) - overscan);
+      const end = Math.min(lineCount, mapper.lineOfRow(lastRow) + 1 + overscan);
+      return { first, count: Math.max(0, end - first) };
+    }
     const firstVisible = Math.floor(this.offsetPx / lineHeight);
     const first = Math.max(0, firstVisible - overscan);
     const end = Math.min(lineCount, firstVisible + visible + overscan);
@@ -121,7 +175,10 @@ export class ViewportImpl implements Viewport {
     if (this.disposed) return;
     const { lineHeight, lineCount } = this.metrics;
     const targetLine = clamp(Math.round(line), 0, Math.max(0, lineCount - 1));
-    const target = clamp(targetLine * lineHeight, 0, this.maxScrollPx());
+    // Modo soft wrap: a linha lógica `targetLine` pode ocupar várias rows — rola até a 1ª.
+    const mapper = this.visualRowMapper;
+    const targetRow = mapper !== undefined ? mapper.rowOfLine(targetLine) : targetLine;
+    const target = clamp(targetRow * lineHeight, 0, this.maxScrollPx());
     const animate = opts?.animate === true && this.scrollDurationMs > 0;
     this.cancelAnimation();
 
@@ -187,6 +244,12 @@ export class ViewportImpl implements Viewport {
     this.damageLines.clear();
   }
 
+  /**
+   * Teto de rolagem (px).
+   *
+   * Com soft wrap, `visualLineCount` é o total de **rows visuais** ⇒ o teto é contado em rows
+   * visuais (coerente com o `offsetPx` quando o `VisualRowMapper` está ativo).
+   */
   private maxScrollPx(): number {
     const totalLines = this.metrics.visualLineCount ?? this.metrics.lineCount;
     return Math.max(0, totalLines * this.metrics.lineHeight - this.metrics.viewportHeight);
@@ -225,11 +288,24 @@ export class ViewportImpl implements Viewport {
   }
 
   private rectForLine(index: number): Rect {
+    const { lineHeight, viewportWidth } = this.metrics;
+    const mapper = this.visualRowMapper;
+    if (mapper !== undefined) {
+      // Modo soft wrap: a linha lógica ocupa 1..N rows — o dano cobre todas elas.
+      const firstRow = mapper.rowOfLine(index);
+      const lastRow = Math.max(firstRow + 1, mapper.rowOfLine(index + 1));
+      return {
+        x: 0,
+        y: firstRow * lineHeight,
+        w: viewportWidth,
+        h: (lastRow - firstRow) * lineHeight,
+      };
+    }
     return {
       x: 0,
-      y: index * this.metrics.lineHeight,
-      w: this.metrics.viewportWidth,
-      h: this.metrics.lineHeight,
+      y: index * lineHeight,
+      w: viewportWidth,
+      h: lineHeight,
     };
   }
 

@@ -222,8 +222,9 @@ export function normalizeBreakpointList(raw: unknown): DapBreakpointSpec[] {
  * - a linha continua sendo a fonte da verdade do espelho (um breakpoint não verificado
  *   **não** pode desaparecer — senão o próximo envio o apagaria do main, condição junto);
  * - a condição confirmada pelo main tem precedência sobre a desejada;
- * - `hitCondition` e `logMessage` são **preservados** (o evento do main não os carrega —
- *   perdê-los faria o próximo envio apagá-los no adaptador);
+ * - `hitCondition` e `logMessage` são **preservados** (o evento do main pode não os
+ *   carregar — perdê-los faria o próximo envio apagá-los no adaptador); quando o evento
+ *   **traz** os campos, eles valem (o main devolve a spec que aplicou);
  * - linhas que o main conhece e o espelho não entram na lista.
  */
 export function mergeBreakpointSpecs(
@@ -233,11 +234,13 @@ export function mergeBreakpointSpecs(
   const merged: DapBreakpointSpec[] = current.map((spec) => {
     const found = returned.find((bp) => bp.line === spec.line);
     const condition = found?.condition ?? spec.condition;
+    const hitCondition = found?.hitCondition ?? spec.hitCondition;
+    const logMessage = found?.logMessage ?? spec.logMessage;
     return {
       line: spec.line,
       ...(condition !== undefined ? { condition } : {}),
-      ...(spec.hitCondition !== undefined ? { hitCondition: spec.hitCondition } : {}),
-      ...(spec.logMessage !== undefined ? { logMessage: spec.logMessage } : {}),
+      ...(hitCondition !== undefined ? { hitCondition } : {}),
+      ...(logMessage !== undefined ? { logMessage } : {}),
     };
   });
   for (const bp of returned) {
@@ -245,6 +248,8 @@ export function mergeBreakpointSpecs(
     merged.push({
       line: bp.line,
       ...(bp.condition !== undefined ? { condition: bp.condition } : {}),
+      ...(bp.hitCondition !== undefined ? { hitCondition: bp.hitCondition } : {}),
+      ...(bp.logMessage !== undefined ? { logMessage: bp.logMessage } : {}),
     });
   }
   merged.sort((a, b) => a.line - b.line);

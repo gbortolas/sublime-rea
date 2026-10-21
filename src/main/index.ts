@@ -35,6 +35,7 @@ import type {
   IpcRequest,
   IpcResponse,
   MainThreadBusy,
+  PackageSnippetDefinition,
   ResourceLayer,
   SearchQuery,
   Selection,
@@ -42,6 +43,7 @@ import type {
 } from "../shared";
 import { LspManager } from "../core/lsp/lsp-manager";
 import { BUILTIN_LSP_SERVERS } from "../shared/lsp-contract";
+import { collectPackageSnippets } from "../core/packages/package-snippets";
 import { DapManager } from "../core/dap/dap-manager";
 import { normalizeBreakpointSpecs } from "../core/dap/dap-breakpoints";
 import { BUILTIN_DAP_SERVERS, MAX_EVALUATION_LENGTH, truncateEvaluation, type DapEvaluationContext } from "../shared/dap-contract";
@@ -636,10 +638,41 @@ async function dispatchIpc(
         return null;
       }
     }
+    case "snippets.list": {
+      const snippets = await packageSnippetsFor(core);
+      return { snippets };
+    }
     default:
       // Inalcançável: `parseIpcRequest` já validou o método; guarda contra regressão.
       throw new IpcProtocolError("unknown-method", "método desconhecido");
   }
+}
+
+/**
+ * Cache dos snippets de pacote por core (o `snippets.list` é **global ao app**).
+ *
+ * A lista é lida do `PackageResolver` (I/O) — sem cache, cada chamada releria os arquivos
+ * do pacote. O cache é invalidado quando o índice de pacotes é **reconstruído**
+ * (`onDidBuild`).
+ */
+const snippetCache = new WeakMap<EditorCore, Promise<readonly PackageSnippetDefinition[]>>();
+
+/** Lê (e cacheia) os snippets de pacote do core. */
+async function packageSnippetsFor(core: EditorCore): Promise<readonly PackageSnippetDefinition[]> {
+  const cached = snippetCache.get(core);
+  if (cached !== undefined) return cached;
+  const pending = (async (): Promise<readonly PackageSnippetDefinition[]> => {
+    // O índice de pacotes é construído no boot: espera (senão a 1ª chamada devolveria vazio).
+    await core.packagesReady.catch(() => undefined);
+    return collectPackageSnippets(core.packages);
+  })();
+  snippetCache.set(core, pending);
+  // Índice reconstruído ⇒ a lista cacheada não vale mais.
+  const subscription = core.packages.onDidBuild(() => {
+    snippetCache.delete(core);
+    subscription.dispose();
+  });
+  return pending;
 }
 
 function requireDap(deps: IpcHandlerDeps): DapManager {

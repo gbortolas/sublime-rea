@@ -28,6 +28,7 @@ import type { ReplaceAllResult, SearchDocumentResult, SearchQuery } from "./sear
 import type { Selection, SelectionSet } from "./selection-contract";
 import type { LspCompletionItem, LspDiagnostic, LspHoverResult, LspLocation, LspRenameResult, LspSignatureHelp, LspDocumentSymbol, LspCodeAction, LspTextEdit, LspFoldingRange, LspInlayHint } from "./lsp-contract";
 import type { DapBreakpoint, DapBreakpointSpec, DapEvaluation, DapEvaluationRequestContext, DapOutputEvent, DapScope, DapSessionState, DapStackFrame, DapStoppedEvent, DapThread, DapVariable } from "./dap-contract";
+import type { SnippetsListResult } from "./snippet-contract";
 
 /** Versão do contrato do canal — `"<major>.<minor>"` (DEC-IPC-11: handshake negocia). */
 export type IpcVersion = `${number}.${number}`;
@@ -214,6 +215,14 @@ export interface IpcMethods {
    * Devolve `null` quando o adaptador não consegue avaliar (ex.: contexto sem frame válido).
    */
   "dap.evaluate"(expression: string, frameId: number, context?: DapEvaluationRequestContext): DapEvaluation | null;
+  /**
+   * Snippets de pacote (`.sublime-snippet` dentro de `Packages/<Nome>/…`).
+   *
+   * É **global ao app** (não é por documento): sem handle, a lista vem do `PackageResolver`
+   * do `main` (camadas `user > app > os`). O renderer mescla a lista com os snippets
+   * **embutidos** na busca do trigger — a expansão usa o mesmo pipeline dos embutidos.
+   */
+  "snippets.list"(): SnippetsListResult;
 }
 
 export type IpcMethodName = keyof IpcMethods & string;
@@ -283,6 +292,7 @@ export const IPC_METHODS = [
   "dap.stepInto",
   "dap.stepOut",
   "dap.evaluate",
+  "snippets.list",
 ] as const satisfies readonly IpcMethodName[];
 
 export const IPC_EVENT_NAMES = [

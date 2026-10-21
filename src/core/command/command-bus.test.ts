@@ -64,6 +64,18 @@ class AdvancingTarget implements UndoTarget {
   }
 }
 
+/**
+ * Alvo com **escopo mutável** — simula a troca de aba do `EditorCore`: cada `scope` é um
+ * documento, e o `UndoStack` só desfaz/refaz os passos do escopo do alvo.
+ */
+class ScopedTarget extends FakeTarget {
+  scope = "doc-1";
+
+  scopeId(): string {
+    return this.scope;
+  }
+}
+
 function makeBus(): { bus: CommandBusImpl; target: FakeTarget } {
   const target = new FakeTarget();
   const bus = new CommandBusImpl({
@@ -357,5 +369,49 @@ describe("CommandBus — soft undo/redo", () => {
     expect(() => bus.softRedo()).not.toThrow();
     expect(bus.undo()).toBe(false);
     expect(bus.redo()).toBe(false);
+  });
+});
+
+describe("CommandBus — escopo por documento", () => {
+  it("grava o scopeId do passo a partir do alvo", async () => {
+    const target = new ScopedTarget();
+    const bus = new CommandBusImpl({
+      registry: new FakeRegistry(),
+      scheduler: new FakeScheduler(),
+      target: () => target,
+    });
+    bus.register("ins", "Insert", () => [{ at: target.text.length, remove: "", insert: "x" }]);
+
+    await bus.run("ins");
+
+    // O passo pertence ao escopo do alvo (o documento), não a uma pilha "sem dono".
+    expect(bus.undoStack.undoDepthFor("doc-1")).toBe(1);
+    expect(bus.undoStack.undoDepthFor("doc-2")).toBe(0);
+    expect(bus.undoStack.lastLabelFor("doc-1")).toBe("Insert");
+  });
+
+  it("o undo do bus só desfaz o passo do documento do alvo", async () => {
+    const target = new ScopedTarget();
+    const bus = new CommandBusImpl({
+      registry: new FakeRegistry(),
+      scheduler: new FakeScheduler(),
+      target: () => target,
+    });
+    bus.register("ins", "Insert", () => [{ at: target.text.length, remove: "", insert: "x" }]);
+
+    await bus.run("ins"); // doc-1
+    target.scope = "doc-2";
+    await bus.run("ins"); // doc-2
+
+    expect(target.text).toBe("xx");
+    expect(bus.undoStack.undoDepth).toBe(2);
+
+    // O alvo é de doc-2 ⇒ o topo global (doc-1) não é tocado.
+    expect(bus.undo()).toBe(true);
+    expect(target.text).toBe("x");
+    expect(bus.undoStack.undoDepthFor("doc-1")).toBe(1);
+    expect(bus.undoStack.undoDepthFor("doc-2")).toBe(0);
+    expect(bus.undoStack.redoDepthFor("doc-2")).toBe(1);
+    expect(bus.undoStack.redoDepthFor("doc-1")).toBe(0);
   });
 });

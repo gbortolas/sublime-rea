@@ -24,3 +24,4 @@ export * from "./themes";
 export * from "./command-contract";
 export * from "./lsp-contract";
 export * from "./dap-contract";
+export * from "./snippet-contract";

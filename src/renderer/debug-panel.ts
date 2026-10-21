@@ -5,21 +5,47 @@
  * **painel** com a pilha de chamadas, escopos e variáveis, além do log de saída do programa.
  *
  * Desde o P4#27 o painel gained mais três partes:
- * - **Breakpoints** com **condição** editável por breakpoint (breakpoint condicional);
+ * - **Breakpoints** com **condição**, **condição de paradas** (`hitCondition`) e
+ *   **mensagem de log** (`logMessage`) editáveis por breakpoint (breakpoint condicional,
+ *   logpoint — o badge "log" marca os que só registram);
  * - **Observação** (watch): expressões reavaliadas a cada parada;
  * - **tooltip de valor**: mostra o valor de uma variável sob o mouse durante a parada.
  *
  * O widget é "burro": não fala com a ponte. Ele expõe uma API (`DebugViewBinding`) e emite
  * intenções (`onAction`, `onFrameSelect`, `onScopeToggle`, `onVariableToggle`,
- * `onBreakpointConditionChange`, `onWatchAdd`, …) que o `main.ts` traduz para chamadas IPC.
+ * `onBreakpointSpecChange`, `onWatchAdd`, …) que o `main.ts` traduz para chamadas IPC.
  */
-import type {
-  DapBreakpointSpec,
-  DapScope,
-  DapSessionState,
-  DapStackFrame,
-  DapVariable,
+import {
+  applyBreakpointFieldToList,
+  isLogpointSpec,
+  MAX_BREAKPOINT_FIELD_LENGTH,
+  type DapBreakpointField,
+  type DapBreakpointSpec,
+  type DapScope,
+  type DapSessionState,
+  type DapStackFrame,
+  type DapVariable,
 } from "../shared";
+
+/**
+ * Uma linha de breakpoint do painel.
+ *
+ * A linha é **persistente**: os três campos (condição, condição de paradas e mensagem de
+ * log) nascem uma vez e são reaproveitados — é o que impede a perda de foco (e do cursor)
+ * a cada `render()`.
+ */
+interface BreakpointRow {
+  /** Contêiner da linha (cabeçalho + campos). */
+  readonly element: HTMLElement;
+  /** Badge de logpoint (visível só quando o breakpoint é um logpoint). */
+  readonly badge: HTMLElement;
+  /** Campo da condição (o breakpoint só para quando ela é verdadeira). */
+  readonly conditionInput: HTMLInputElement;
+  /** Campo da condição de paradas (só para na Nª ocorrência). */
+  readonly hitConditionInput: HTMLInputElement;
+  /** Campo da mensagem de log (logpoint: registra em vez de parar). */
+  readonly logMessageInput: HTMLInputElement;
+}
 
 /** Ações da barra de ferramentas de depuração. */
 export type DebugAction =
@@ -49,7 +75,19 @@ export interface DebugViewBinding {
   setBreakpointCount(count: number): void;
   /** Lista os breakpoints do arquivo (com a condição de cada um). */
   setBreakpointSpecs(specs: readonly DapBreakpointSpec[], documentKey?: string): void;
-  /** A condição de um breakpoint foi editada pelo usuário. */
+  /**
+   * Um campo do breakpoint foi editado (condição, condição de paradas ou log).
+   *
+   * O painel entrega a spec **inteira** (o campo editado + os demais, preservados): o
+   * `main.ts` é a fonte da verdade e reenvia a lista completa ao adaptador.
+   */
+  onBreakpointSpecChange(callback: (line: number, spec: DapBreakpointSpec) => void): void;
+  /**
+   * A condição de um breakpoint foi editada pelo usuário.
+   *
+   * @deprecated Use {@link DebugViewBinding.onBreakpointSpecChange} — este gancho só
+   * carrega a `condition` (e só é chamado quando o gancho novo **não** está registrado).
+   */
   onBreakpointConditionChange(callback: (line: number, condition: string) => void): void;
   /** O usuário pediu a remoção de um breakpoint. */
   onBreakpointRemove(callback: (line: number) => void): void;
@@ -145,6 +183,13 @@ const ICON_REFRESH = icon(
 );
 /** Separador / valor ausente. */
 const ICON_DASH = icon('<path d="M4 8h8"/>', 12);
+/**
+ * Logpoint: balão de fala (o badge "log" da linha do breakpoint).
+ *
+ * Ícone **SVG inline** (nada de glifo Unicode): o balão diz "isto aqui é uma mensagem",
+ * não uma parada.
+ */
+const ICON_LOG = icon('<path d="M3 4.4h10v5.3H7.5L4.3 12.3V9.7H3z"/>', 11);
 
 /**
  * Alterna a visibilidade de um painel.
@@ -169,14 +214,14 @@ export function createDebugView(): DebugViewBinding {
   const variablesByRef = new Map<number, readonly DapVariable[]>();
   const expandedRefs = new Set<number>();
 
-  /** Breakpoints do arquivo exibido (com condição). */
+  /** Breakpoints do arquivo exibido (com condição, condição de paradas e log). */
   let breakpointSpecs: readonly DapBreakpointSpec[] = [];
-  /** Assinatura dos specs — evita re-render (e perda de foco) a cada evento. */
-  let breakpointSignature = "";
   /** Documento cuja lista de breakpoints está no painel (o painel segue o documento ativo). */
   let breakpointDocumentKey: string | undefined;
-  /** Campos de condição persistentes por linha (recriados só quando a linha muda). */
-  const conditionInputs = new Map<number, HTMLInputElement>();
+  /** Linhas de breakpoint → linha da UI (**persistentes**: os inputs não perdem o foco). */
+  const breakpointRows = new Map<number, BreakpointRow>();
+  /** Linhas na ordem em que estão no DOM (evita mexer no DOM quando nada mudou). */
+  let renderedBreakpointLines: number[] = [];
 
   /** Expressões de observação e seus últimos valores avaliados. */
   let watchExpressions: readonly string[] = [];
@@ -192,6 +237,7 @@ export function createDebugView(): DebugViewBinding {
   }
   let onScopesRequest: ((frame: DapStackFrame) => void) | undefined;
   let onVariablesRequest: ((reference: number) => void) | undefined;
+  let onBreakpointSpecChange: ((line: number, spec: DapBreakpointSpec) => void) | undefined;
   let onBreakpointConditionChange: ((line: number, condition: string) => void) | undefined;
   let onBreakpointRemove: ((line: number) => void) | undefined;
   let onWatchAdd: ((expression: string) => void) | undefined;
@@ -367,6 +413,15 @@ export function createDebugView(): DebugViewBinding {
   const watchControlsHost = document.createElement("div");
   const watchListHost = document.createElement("div");
   const bpHost = document.createElement("div");
+  /**
+   * Rótulo da seção de breakpoints (**persistente** — só o texto muda).
+   */
+  const bpSectionLabel = sectionLabel("Breakpoints");
+  /**
+   * Container das linhas de breakpoint (**persistente** — as linhas é que entram/saem).
+   */
+  const bpRowsHost = document.createElement("div");
+  bpHost.append(bpSectionLabel, bpRowsHost);
   const outHost = document.createElement("div");
   body.append(stackHost, varsHost, watchControlsHost, watchListHost, bpHost, outHost);
   panel.appendChild(body);
@@ -485,79 +540,186 @@ export function createDebugView(): DebugViewBinding {
     }
   }
 
-  // ── Breakpoints condicionais ──────────────────────────────────────────────────────────────
+  // ── Breakpoints (condição · condição de paradas · log) ───────────────────────────────────
 
   /**
-   * Reconstrói a lista de breakpoints **só quando a assinatura muda** — do contrário, um
-   * `render()` (disparado por qualquer evento) derrubaria o foco do campo de condição que o
-   * usuário está editando.
+   * Desenha a lista de breakpoints.
+   *
+   * O DOM só é mexido quando o **conjunto de linhas** muda (um breakpoint foi
+   * adicionado/removido) — nesse caso, reordenar é inevitável. Quando só os **valores**
+   * mudam (o usuário editou um campo), os inputs são atualizados no lugar: o campo em
+   * edição **não** é tocado (o cursor não salta) e o foco não se perde.
    */
   function renderBreakpoints(): void {
-    const signature = breakpointSpecs
-      .map((spec) => `${spec.line}:${spec.condition ?? ""}`)
-      .join("|");
-    if (signature === breakpointSignature) return;
-    breakpointSignature = signature;
+    const lines = breakpointSpecs.map((spec) => spec.line);
+    const orderChanged =
+      lines.length !== renderedBreakpointLines.length ||
+      lines.some((line, index) => line !== renderedBreakpointLines[index]);
 
-    bpHost.replaceChildren();
-    if (breakpointSpecs.length === 0) return;
+    if (orderChanged) {
+      renderedBreakpointLines = lines;
+      // Linhas que sumiram: a row (e seus inputs) saem do mapa — sem isso o input velho
+      // (com a condição antiga) seria reusado quando a mesma linha voltasse a ter
+      // breakpoint.
+      const live = new Set(lines);
+      for (const [line, row] of [...breakpointRows]) {
+        if (live.has(line)) continue;
+        row.element.remove();
+        breakpointRows.delete(line);
+      }
+      // Coloca as linhas na ordem das specs (reaproveitando as rows existentes).
+      lines.forEach((line, index) => {
+        const row = getBreakpointRow(line);
+        const current = bpRowsHost.children[index];
+        if (current === row.element) return;
+        bpRowsHost.insertBefore(row.element, current ?? null);
+      });
+    }
 
-    bpHost.appendChild(sectionLabel(`Breakpoints (${breakpointSpecs.length})`));
+    bpSectionLabel.textContent = `Breakpoints (${breakpointSpecs.length})`;
+    setVisible(bpSectionLabel, breakpointSpecs.length > 0);
 
     for (const spec of breakpointSpecs) {
-      const el = document.createElement("div");
-      el.style.cssText = [
-        "display: flex;",
-        "align-items: center;",
-        "gap: 6px;",
-        "padding: 2px 10px;",
-      ].join(" ");
-
-      const label = document.createElement("span");
-      label.textContent = `linha ${spec.line}`;
-      label.style.cssText = "flex: 0 0 auto; color: var(--s-fg-muted, #999);";
-      el.appendChild(label);
-
-      const input = getConditionInput(spec.line);
-      el.appendChild(input);
-
-      const remove = document.createElement("button");
-      remove.type = "button";
-      remove.innerHTML = ICON_CLOSE_SMALL;
-      remove.title = "Remover breakpoint";
-      remove.setAttribute("aria-label", "Remover breakpoint");
-      remove.style.cssText = [
-        "flex: 0 0 auto;",
-        "display: inline-flex;",
-        "align-items: center;",
-        "justify-content: center;",
-        "width: 18px;",
-        "height: 18px;",
-        "padding: 0;",
-        "border: none;",
-        "background: transparent;",
-        "color: var(--s-fg-muted, #999);",
-        "cursor: pointer;",
-        "line-height: 1;",
-      ].join(" ");
-      remove.addEventListener("click", () => onBreakpointRemove?.(spec.line));
-      el.appendChild(remove);
-
-      bpHost.appendChild(el);
+      const row = breakpointRows.get(spec.line);
+      if (row === undefined) continue;
+      setFieldValue(row.conditionInput, spec.condition ?? "");
+      setFieldValue(row.hitConditionInput, spec.hitCondition ?? "");
+      setFieldValue(row.logMessageInput, spec.logMessage ?? "");
+      // Logpoint = tem mensagem de log **e** não tem condição.
+      setVisible(row.badge, isLogpointSpec(spec));
     }
   }
 
-  /** Campo de condição de uma linha (persistente: mantém o foco durante a edição). */
-  function getConditionInput(line: number): HTMLInputElement {
-    const existing = conditionInputs.get(line);
+  /**
+   * Linha de breakpoint da UI — **persistente**: os três campos nascem uma vez e são
+   * reaproveitados (é o que impede a perda de foco a cada `render()`).
+   */
+  function getBreakpointRow(line: number): BreakpointRow {
+    const existing = breakpointRows.get(line);
     if (existing !== undefined) return existing;
 
+    const element = document.createElement("div");
+    element.className = "debug-breakpoint";
+    element.style.cssText = [
+      "display: flex;",
+      "flex-direction: column;",
+      "gap: 3px;",
+      "padding: 3px 10px 5px;",
+    ].join(" ");
+
+    // ── Cabeçalho: linha · badge de logpoint · remover ─────────────────────────────────────
+    const head = document.createElement("div");
+    head.style.cssText = "display: flex; align-items: center; gap: 6px;";
+
+    const label = document.createElement("span");
+    label.textContent = `linha ${line}`;
+    label.style.cssText = "flex: 0 0 auto; color: var(--s-fg-muted, #999);";
+    head.appendChild(label);
+
+    const badge = document.createElement("span");
+    badge.className = "debug-logpoint-badge";
+    badge.title = "logpoint — registra a mensagem em vez de parar";
+    badge.setAttribute("aria-label", "logpoint");
+    badge.style.cssText = [
+      "flex: 0 0 auto;",
+      "display: inline-flex;",
+      "align-items: center;",
+      "gap: 3px;",
+      "padding: 0 5px;",
+      "height: 15px;",
+      "border: 1px solid var(--s-accent, #3794ff);",
+      "border-radius: 8px;",
+      "color: var(--s-accent, #3794ff);",
+      "font-size: 9px;",
+      "letter-spacing: .04em;",
+      "line-height: 1;",
+    ].join(" ");
+    const badgeIcon = document.createElement("span");
+    badgeIcon.innerHTML = ICON_LOG;
+    badgeIcon.style.cssText = "display: inline-flex; align-items: center;";
+    badge.appendChild(badgeIcon);
+    const badgeText = document.createElement("span");
+    badgeText.textContent = "log";
+    badge.appendChild(badgeText);
+    setVisible(badge, false);
+    head.appendChild(badge);
+
+    const spacer = document.createElement("span");
+    spacer.style.cssText = "flex: 1 1 auto;";
+    head.appendChild(spacer);
+
+    const remove = document.createElement("button");
+    remove.type = "button";
+    remove.innerHTML = ICON_CLOSE_SMALL;
+    remove.title = "Remover breakpoint";
+    remove.setAttribute("aria-label", "Remover breakpoint");
+    remove.style.cssText = [
+      "flex: 0 0 auto;",
+      "display: inline-flex;",
+      "align-items: center;",
+      "justify-content: center;",
+      "width: 18px;",
+      "height: 18px;",
+      "padding: 0;",
+      "border: none;",
+      "background: transparent;",
+      "color: var(--s-fg-muted, #999);",
+      "cursor: pointer;",
+      "line-height: 1;",
+    ].join(" ");
+    remove.addEventListener("click", () => onBreakpointRemove?.(line));
+    head.appendChild(remove);
+
+    element.appendChild(head);
+
+    // ── Campos: condição · condição de paradas · mensagem de log ───────────────────────────
+    const conditionInput = createFieldInput("condição (ex.: x > 3)", line, "condition");
+    const hitConditionInput = createFieldInput("hitCondition (ex.: 3)", line, "hitCondition");
+    const logMessageInput = createFieldInput(
+      "mensagem de log (ex.: i = ${i})",
+      line,
+      "logMessage",
+    );
+
+    const fields = document.createElement("div");
+    fields.style.cssText = "display: flex; align-items: center; gap: 4px;";
+    fields.appendChild(conditionInput);
+    element.appendChild(fields);
+
+    const extras = document.createElement("div");
+    extras.style.cssText = "display: flex; align-items: center; gap: 4px;";
+    extras.appendChild(hitConditionInput);
+    extras.appendChild(logMessageInput);
+    element.appendChild(extras);
+
+    const row: BreakpointRow = {
+      element,
+      badge,
+      conditionInput,
+      hitConditionInput,
+      logMessageInput,
+    };
+    breakpointRows.set(line, row);
+    return row;
+  }
+
+  /**
+   * Campo editável de um breakpoint (condição, condição de paradas ou mensagem de log).
+   *
+   * O `maxLength` é o **teto do contrato** — o navegador recusa o excedente, e a
+   * notificação trunca de novo (defesa em profundidade: o `value` pode vir colado).
+   */
+  function createFieldInput(
+    placeholder: string,
+    line: number,
+    field: DapBreakpointField,
+  ): HTMLInputElement {
     const input = document.createElement("input");
     input.type = "text";
-    input.className = "debug-condition";
-    input.placeholder = "condição (ex.: x > 3)";
-    // A condição vigente entra no campo — um input novo não pode nascer vazio.
-    input.value = breakpointSpecs.find((spec) => spec.line === line)?.condition ?? "";
+    input.className = "debug-breakpoint-field";
+    input.placeholder = placeholder;
+    input.maxLength = MAX_BREAKPOINT_FIELD_LENGTH[field];
+    input.setAttribute("aria-label", `${field} do breakpoint na linha ${line}`);
     input.style.cssText = [
       "flex: 1 1 auto;",
       "min-width: 0;",
@@ -571,7 +733,7 @@ export function createDebugView(): DebugViewBinding {
       "font-size: 11px;",
     ].join(" ");
     input.addEventListener("change", () => {
-      onBreakpointConditionChange?.(line, input.value.trim());
+      notifyBreakpointFieldChange(line, field, input.value);
     });
     input.addEventListener("keydown", (event) => {
       if (event.key === "Enter") {
@@ -579,8 +741,45 @@ export function createDebugView(): DebugViewBinding {
         input.blur();
       }
     });
-    conditionInputs.set(line, input);
     return input;
+  }
+
+  /**
+   * Notifica a edição de um campo do breakpoint.
+   *
+   * O painel é "burro": não decide o que fazer com a spec — entrega a spec **nova**
+   * (campo limpo ⇒ o campo **some** da spec; valor longo ⇒ truncado no teto do
+   * contrato). O `main.ts` é a fonte da verdade e reenvia a lista ao adaptador.
+   */
+  function notifyBreakpointFieldChange(
+    line: number,
+    field: DapBreakpointField,
+    rawValue: string,
+  ): void {
+    // A lista local passa a refletir a edição **na hora**: uma segunda edição (noutro
+    // campo) não pode partir de uma spec velha e apagar a primeira edição.
+    const nextList = applyBreakpointFieldToList(breakpointSpecs, line, field, rawValue);
+    const next = nextList.find((candidate) => candidate.line === line);
+    if (next === undefined) return;
+    breakpointSpecs = nextList;
+    // Redesenha (o badge de logpoint aparece já, sem esperar o `main` responder).
+    renderBreakpoints();
+    if (onBreakpointSpecChange !== undefined) {
+      onBreakpointSpecChange(line, next);
+      return;
+    }
+    // Compatibilidade: sem o gancho novo, só a `condition` chega ao `main.ts`.
+    if (field === "condition") onBreakpointConditionChange?.(line, next.condition ?? "");
+  }
+
+  /**
+   * Escreve no campo **sem** mexer no campo em edição — o cursor não pode saltar (e o
+   * foco não pode se perder) enquanto o usuário digita.
+   */
+  function setFieldValue(input: HTMLInputElement, value: string): void {
+    if (document.activeElement === input) return;
+    if (input.value === value) return;
+    input.value = value;
   }
 
   // ── Expressões de observação (watch) ───────────────────────────────────────────────────────
@@ -962,30 +1161,22 @@ export function createDebugView(): DebugViewBinding {
       render();
     },
     setBreakpointSpecs(specs: readonly DapBreakpointSpec[], documentKey?: string): void {
-      // Documento **diferente**: os inputs da lista anterior não podem ser reusados (a
-      // condição antiga voltaria no campo) — a lista é recriada do zero.
+      // Documento **diferente**: os campos da lista anterior não podem ser reusados (a
+      // condição/log antiga voltaria no campo) — a lista é recriada do zero.
       if (documentKey !== undefined && documentKey !== breakpointDocumentKey) {
         breakpointDocumentKey = documentKey;
-        conditionInputs.clear();
-        breakpointSignature = ""; // força a reconstrução da lista
+        for (const row of breakpointRows.values()) row.element.remove();
+        breakpointRows.clear();
+        renderedBreakpointLines = []; // força a reconstrução da lista
       }
       breakpointSpecs = specs;
-      // As entradas das linhas que **sumiram** são descartadas: sem isso o mapa cresceria
-      // sem limite e o input velho (com a condição antiga) seria reusado quando a mesma
-      // linha voltasse a ter breakpoint.
-      const lines = new Set(specs.map((spec) => spec.line));
-      for (const line of [...conditionInputs.keys()]) {
-        if (lines.has(line)) continue;
-        conditionInputs.delete(line);
-      }
-      // O valor do campo só é aplicado quando o usuário **não** está editando-o.
-      for (const spec of specs) {
-        const input = conditionInputs.get(spec.line);
-        if (input === undefined) continue;
-        if (document.activeElement === input) continue;
-        input.value = spec.condition ?? "";
-      }
+      // As linhas que **sumiram** são descartadas (acontece em `renderBreakpoints`): sem
+      // isso o mapa cresceria sem limite e o input velho (com a condição antiga) seria
+      // reusado quando a mesma linha voltasse a ter breakpoint.
       renderBreakpoints();
+    },
+    onBreakpointSpecChange(callback: (line: number, spec: DapBreakpointSpec) => void): void {
+      onBreakpointSpecChange = callback;
     },
     onBreakpointConditionChange(callback: (line: number, condition: string) => void): void {
       onBreakpointConditionChange = callback;
@@ -1048,7 +1239,8 @@ export function createDebugView(): DebugViewBinding {
       toolbar.remove();
       panel.remove();
       valueTip.remove();
-      conditionInputs.clear();
+      breakpointRows.clear();
+      renderedBreakpointLines = [];
     },
   };
 }

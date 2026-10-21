@@ -15,7 +15,7 @@ import type { GlyphInstance, LineInstance, Rect, RectInstance, RGBA, SearchMatch
 import type { HighlightSpan, Scope, ThemeResolver } from "../../shared";
 import { SelectionOps, type Selection } from "../../shared";
 import type { GlyphAtlas } from "./atlas";
-import { wrapLine } from "./soft-wrap";
+import { buildVisualRowMap, type VisualRowMap } from "./soft-wrap";
 import type { LineRange } from "./viewport";
 
 /** Fonte de linhas — a costura que o documento real implementará depois. */
@@ -83,13 +83,20 @@ export interface LineLayout {
    *
    * `undefined` (default) = comportamento atual: a row base da primeira linha visível é o
    * seu índice de linha **lógica** (`range.first`) — a ancoragem no `first` visível é
-   * preservada e o `scrollOffsetPx` continua contado em linhas lógicas.
+   * preservada e o `scrollOffsetPx` continua contado em linhas lógicas (a *deriva*).
    *
    * Quando informado, o renderizador passa a contar a rolagem em **linhas visuais**: nesse
    * caso `scrollOffsetPx` deve estar na mesma unidade (row visual), senão o texto quebrado
-   * fica desalinhado em relação à barra de rolagem.
+   * fica desalinhado em relação à barra de rolagem. O par completo é:
+   * `visualRowOffset` = row visual da 1ª linha visível + `scrollOffsetPx` em rows visuais
+   * (o `ViewportImpl` faz isso quando recebe um `VisualRowMapper` — ver `viewport.ts`).
    */
   readonly visualRowOffset?: number;
+  /**
+   * Total de **rows visuais** do documento (com soft wrap) — usado para a proporção do
+   * thumb da scrollbar. `undefined` (default) = `source.lineCount()` (1 row por linha lógica).
+   */
+  readonly totalVisualRows?: number;
 }
 
 /** Cursor opcional desenhado como `RectInstance`. */
@@ -220,6 +227,42 @@ export function buildInstances(
   const first = Math.max(0, range.first);
   const end = Math.min(total, first + Math.max(0, range.count));
 
+  // ── Soft wrap: malha visual da faixa visível ───────────────────────────────────────────────
+  // 1 row por segmento de wrap. A malha é calculada **uma vez** por frame (O(faixa visível),
+  // nunca O(documento)) e reusada pelo texto, o gutter, o caret, a seleção e a busca.
+  const mw = measureWidth;
+  const wrap = layout.wrapWidth > 0 && mw !== undefined;
+
+  // Preenche linhas colapsadas
+  const collapsedLines = new Set<number>();
+  if (folding !== undefined) {
+    for (const fr of folding) {
+      if (fr.isCollapsed) {
+        for (let l = fr.startLine + 1; l <= fr.endLine; l++) {
+          collapsedLines.add(l);
+        }
+      }
+    }
+  }
+
+  // `wrapLine` (soft-wrap.ts) é a implementação canônica da quebra: tem o early-exit "cabe
+  // tudo" — linhas que cabem na largura **não** são quebradas.
+  //
+  // Row base da faixa: por padrão o índice da linha **lógica** (`first`) — preserva a
+  // ancoragem atual (o scroll continua em linhas lógicas). `layout.visualRowOffset` permite
+  // ao renderizador informar a row visual absoluta (quando a rolagem passa a ser contada em
+  // rows visuais).
+  const rowMap = buildVisualRowMap(source, first, end - first, layout.wrapWidth, mw, {
+    ...(wrap && layout.visualRowOffset !== undefined ? { firstRow: layout.visualRowOffset } : {}),
+    ...(collapsedLines.size > 0 ? { collapsedLines } : {}),
+  });
+
+  // Row visual do caret: é ela que ancora o caret, a seleção, a busca e o destaque de linha
+  // atual. Sem wrap, a row visual de uma linha é o seu índice lógico (comportamento atual).
+  const caretVisible = caret !== undefined && caret.line >= first && caret.line < end;
+  const caretLoc = caretVisible ? rowMap.locate(caret.line, caret.column) : undefined;
+  const caretRow = caretVisible ? (caretLoc?.row ?? rowMap.rowOfLine(caret.line)) : undefined;
+
   // Gutter: fundo + linha atual destacada + separador.
   if (layout.gutterWidth > 0) {
     rects.push({
@@ -227,11 +270,11 @@ export function buildInstances(
       color: layout.gutterBackground,
     });
     // Highlight da linha atual no gutter (se o caret estiver no range visível).
-    if (caret && caret.line >= first && caret.line < end) {
+    if (caretRow !== undefined) {
       rects.push({
         rect: {
           x: 0,
-          y: layout.paddingTop + caret.line * layout.lineHeight - layout.scrollOffsetPx,
+          y: layout.paddingTop + caretRow * layout.lineHeight - layout.scrollOffsetPx,
           w: layout.gutterWidth,
           h: layout.lineHeight,
         },
@@ -257,8 +300,9 @@ export function buildInstances(
       rect: { x: sbx, y: 0, w: layout.scrollbarWidth, h: layout.viewport.h },
       color: layout.scrollbarTrack,
     });
-    // Thumb: proporcional ao conteúdo
-    const totalPx = source.lineCount() * layout.lineHeight;
+    // Thumb: proporcional ao conteúdo (rows visuais quando o soft wrap está ativo).
+    const totalRows = layout.totalVisualRows ?? source.lineCount();
+    const totalPx = totalRows * layout.lineHeight;
     if (totalPx > 0 && layout.viewport.h < totalPx) {
       const thumbH = Math.max(20, layout.viewport.h * (layout.viewport.h / totalPx));
       const maxScroll = totalPx - layout.viewport.h;
@@ -272,11 +316,11 @@ export function buildInstances(
   }
 
   // Cursor line highlight (P1#1): fundo sutil na linha do cursor no text area.
-  if (caret && caret.line >= first && caret.line < end) {
+  if (caretRow !== undefined) {
     rects.push({
       rect: {
         x: layout.gutterWidth,
-        y: layout.paddingTop + caret.line * layout.lineHeight - layout.scrollOffsetPx,
+        y: layout.paddingTop + caretRow * layout.lineHeight - layout.scrollOffsetPx,
         w: layout.viewport.w - layout.gutterWidth - layout.scrollbarWidth,
         h: layout.lineHeight,
       },
@@ -284,212 +328,146 @@ export function buildInstances(
     });
   }
 
-  // ── Soft wrap: resolve linhas visuais ───────────────────────────────────────────────────────
-  const mw = measureWidth;
-  const wrap = layout.wrapWidth > 0 && mw !== undefined;
+  for (let line = first; line < end; line++) {
+    const segments = rowMap.segmentsOf(line);
+    for (let si = 0; si < segments.length; si++) {
+      const seg = segments[si]!;
+      const index = line;
+      const text = seg.text;
+      // Y = row visual (acumulada: 1 row por segmento de wrap) — nunca colide com a
+      // linha lógica seguinte, porque a row avança pelo nº de segmentos da linha anterior.
+      const y = layout.paddingTop + seg.row * layout.lineHeight - layout.scrollOffsetPx;
+      const spans = highlight?.spansFor(index);
 
-  // Preenche linhas colapsadas
-  const collapsedLines = new Set<number>();
-  if (folding !== undefined) {
-    for (const fr of folding) {
-      if (fr.isCollapsed) {
-        for (let l = fr.startLine + 1; l <= fr.endLine; l++) {
-          collapsedLines.add(l);
-        }
-      }
-    }
-  }
-
-  interface VisualLine {
-    readonly docLine: number;
-    readonly row: number;          // row visual (base do Y) — 1 row por segmento de wrap
-    readonly segmentOffset: number;  // offset do segmento no texto original (code units)
-    readonly segmentText: string;    // texto do segmento (substring)
-  }
-  const visualLines: VisualLine[] = [];
-  if (wrap) {
-    // Row base da primeira linha do range: por padrão o índice da linha **lógica**
-    // (`first`) — preserva a ancoragem atual (o scroll continua em linhas lógicas).
-    // `layout.visualRowOffset` permite ao renderizador informar a row visual absoluta
-    // (quando a rolagem passa a ser contada em linhas visuais).
-    let row = layout.visualRowOffset ?? first;
-    for (let di = first; di < end; di++) {
-      if (collapsedLines.has(di)) {
-        // Linha colapsada: não desenha, mas continua ocupando 1 row (compatível com
-        // o caminho sem wrap, onde a row de uma linha é o seu índice lógico).
-        row += 1;
-        continue;
-      }
-      // `wrapLine` (soft-wrap.ts) é a implementação canônica: tem o early-exit
-      // "cabe tudo" — linhas que cabem na largura **não** são quebradas.
-      const segs = wrapLine(source.line(di), layout.wrapWidth, mw);
-      for (let si = 0; si < segs.length; si++) {
-        const seg = segs[si]!;
-        visualLines.push({
-          docLine: di,
-          row: row + si,
-          segmentOffset: seg.start,
-          segmentText: seg.text,
-        });
-      }
-      // A próxima linha lógica começa **depois** das rows ocupadas por esta.
-      row += segs.length;
-    }
-  } else {
-    for (let di = first; di < end; di++) {
-      if (!collapsedLines.has(di)) {
-        // Sem wrap: 1 row por linha de documento — a row é o índice lógico (comportamento atual).
-        visualLines.push({ docLine: di, row: di, segmentOffset: 0, segmentText: source.line(di) });
-      }
-    }
-  }
-  const visualEnd = visualLines.length;
-
-  for (let vi = 0; vi < visualEnd; vi++) {
-    const vl = visualLines[vi]!;
-    const index = vl.docLine;
-    const text = vl.segmentText;
-    // Y = row visual (acumulada: 1 row por segmento de wrap) — nunca colide com a
-    // linha lógica seguinte, porque a row avança pelo nº de segmentos da linha anterior.
-    const y = layout.paddingTop + vl.row * layout.lineHeight - layout.scrollOffsetPx;
-    const spans = highlight?.spansFor(index);
-
-    // Gutter: número da linha (1-based), direita-alinhado no gutter.
-    // Só aparece no primeiro segmento visual de cada linha de documento.
-    if (layout.gutterWidth > 0 && vl.segmentOffset === 0) {
-      // Git diff indicators (barras coloridas na borda esquerda do gutter)
-      if (gitDiffs !== undefined) {
-        for (const diff of gitDiffs) {
-          if (index >= diff.startLine && index < diff.startLine + diff.lineCount) {
-            const diffColor: RGBA = diff.kind === "added"
-              ? 0x2EA04399  // verde (r=46, g=160, b=67, a=0.6)
-              : diff.kind === "modified"
-                ? 0x3794FF99  // azul (r=55, g=148, b=255, a=0.6)
-                : 0xF0474799; // vermelho (r=240, g=71, b=71, a=0.6)
-            rects.push({
-              rect: { x: 0, y, w: 3, h: layout.lineHeight },
-              color: diffColor,
-            });
-            break;
+      // Gutter: número da linha (1-based), direita-alinhado no gutter.
+      // Só aparece no primeiro segmento visual de cada linha de documento.
+      if (layout.gutterWidth > 0 && seg.segmentIndex === 0) {
+        // Git diff indicators (barras coloridas na borda esquerda do gutter)
+        if (gitDiffs !== undefined) {
+          for (const diff of gitDiffs) {
+            if (index >= diff.startLine && index < diff.startLine + diff.lineCount) {
+              const diffColor: RGBA = diff.kind === "added"
+                ? 0x2EA04399  // verde (r=46, g=160, b=67, a=0.6)
+                : diff.kind === "modified"
+                  ? 0x3794FF99  // azul (r=55, g=148, b=255, a=0.6)
+                  : 0xF0474799; // vermelho (r=240, g=71, b=71, a=0.6)
+              rects.push({
+                rect: { x: 0, y, w: 3, h: layout.lineHeight },
+                color: diffColor,
+              });
+              break;
+            }
           }
         }
-      }
 
-      const lineNumber = String(index + 1);
-      // Mede a largura total do número para posicionar à direita.
-      let numWidth = 0;
-      for (let ci = 0; ci < lineNumber.length; ci++) {
-        const g = atlas.resolveGlyph(lineNumber[ci] ?? " ", style);
-        numWidth += g.advance;
-      }
-      let nx = layout.gutterWidth - 8 - numWidth; // 8px padding direito
-      for (let ci = 0; ci < lineNumber.length; ci++) {
-        const g = atlas.resolveGlyph(lineNumber[ci] ?? " ", style);
-        glyphs.push({
-          atlasX: g.region.x,
-          atlasY: g.region.y,
-          atlasW: g.region.w,
-          atlasH: g.region.h,
-          x: nx,
-          y,
-          color: layout.gutterColor,
-        });
-        nx += g.advance;
-      }
-
-      // Indicador de folding no gutter
-      if (folding !== undefined) {
-        const thisFold = folding.find((fr) => fr.startLine === index);
-        if (thisFold !== undefined) {
-          const indicator = thisFold.isCollapsed ? "▸" : "▾";
-          const indG = atlas.resolveGlyph(indicator, style);
-          const indX = layout.gutterWidth - 8 - numWidth - indG.advance - 4;
+        const lineNumber = String(index + 1);
+        // Mede a largura total do número para posicionar à direita.
+        let numWidth = 0;
+        for (let ci = 0; ci < lineNumber.length; ci++) {
+          const g = atlas.resolveGlyph(lineNumber[ci] ?? " ", style);
+          numWidth += g.advance;
+        }
+        let nx = layout.gutterWidth - 8 - numWidth; // 8px padding direito
+        for (let ci = 0; ci < lineNumber.length; ci++) {
+          const g = atlas.resolveGlyph(lineNumber[ci] ?? " ", style);
           glyphs.push({
-            atlasX: indG.region.x,
-            atlasY: indG.region.y,
-            atlasW: indG.region.w,
-            atlasH: indG.region.h,
-            x: indX,
+            atlasX: g.region.x,
+            atlasY: g.region.y,
+            atlasW: g.region.w,
+            atlasH: g.region.h,
+            x: nx,
             y,
             color: layout.gutterColor,
+          });
+          nx += g.advance;
+        }
+
+        // Indicador de folding no gutter
+        if (folding !== undefined) {
+          const thisFold = folding.find((fr) => fr.startLine === index);
+          if (thisFold !== undefined) {
+            const indicator = thisFold.isCollapsed ? "▸" : "▾";
+            const indG = atlas.resolveGlyph(indicator, style);
+            const indX = layout.gutterWidth - 8 - numWidth - indG.advance - 4;
+            glyphs.push({
+              atlasX: indG.region.x,
+              atlasY: indG.region.y,
+              atlasW: indG.region.w,
+              atlasH: indG.region.h,
+              x: indX,
+              y,
+              color: layout.gutterColor,
+            });
+          }
+        }
+
+        // Bolinha de breakpoint no gutter (vermelha, à esquerda dos números)
+        if (breakpointLines !== undefined && breakpointLines.includes(index + 1)) {
+          const dotG = atlas.resolveGlyph("●", style);
+          glyphs.push({
+            atlasX: dotG.region.x,
+            atlasY: dotG.region.y,
+            atlasW: dotG.region.w,
+            atlasH: dotG.region.h,
+            x: 5,
+            y,
+            color: 0xE51400FF, // vermelho VS Code para breakpoint
           });
         }
       }
 
-      // Bolinha de breakpoint no gutter (vermelha, à esquerda dos números)
-      if (breakpointLines !== undefined && breakpointLines.includes(index + 1)) {
-        const dotG = atlas.resolveGlyph("●", style);
-        glyphs.push({
-          atlasX: dotG.region.x,
-          atlasY: dotG.region.y,
-          atlasW: dotG.region.w,
-          atlasH: dotG.region.h,
-          x: 5,
-          y,
-          color: 0xE51400FF, // vermelho VS Code para breakpoint
-        });
-      }
-    }
+      let x = layout.paddingLeft;
+      let column = 0;
+      let offset = 0;
 
-    let x = layout.paddingLeft;
-    let column = 0;
-    let offset = 0;
-
-    while (offset < text.length) {
-      const code = text.codePointAt(offset);
-      if (code === undefined) break;
-      const rune = String.fromCodePoint(code);
-      const size = rune.length;
-      if (rune === "\t") {
-        const stop = layout.tabWidth - (column % layout.tabWidth);
-        x += spaceAdvance * stop;
-        column += stop;
+      while (offset < text.length) {
+        const code = text.codePointAt(offset);
+        if (code === undefined) break;
+        const rune = String.fromCodePoint(code);
+        const size = rune.length;
+        if (rune === "\t") {
+          const stop = layout.tabWidth - (column % layout.tabWidth);
+          x += spaceAdvance * stop;
+          column += stop;
+          offset += size;
+          continue;
+        }
+        const placed = atlas.resolveGlyph(rune, style);
+        if (rune !== " ") {
+          glyphs.push({
+            atlasX: placed.region.x,
+            atlasY: placed.region.y,
+            atlasW: placed.region.w,
+            atlasH: placed.region.h,
+            x,
+            y,
+            color: glyphColor(spans, highlight?.theme, offset + seg.start) ?? layout.defaultColor,
+          });
+        }
+        x += placed.advance;
+        column += 1;
         offset += size;
-        continue;
       }
-      const placed = atlas.resolveGlyph(rune, style);
-      if (rune !== " ") {
-        glyphs.push({
-          atlasX: placed.region.x,
-          atlasY: placed.region.y,
-          atlasW: placed.region.w,
-          atlasH: placed.region.h,
-          x,
-          y,
-          color: glyphColor(spans, highlight?.theme, offset + vl.segmentOffset) ?? layout.defaultColor,
-        });
-      }
-      x += placed.advance;
-      column += 1;
-      offset += size;
-    }
 
-    // Bracket matching (P3#14): destaca o par com um retângulo fino (underline-like).
-    if (bracketMatch && layout.bracketMatchColor) {
-      const [open, close] = bracketMatch;
-      for (const bp of [open, close]) {
-        if (bp.line === index) {
-          let bx = layout.paddingLeft;
-          let bcol = 0;
-          let boff = 0;
-          const targetCol = Math.min(bp.column, text.length);
-          while (boff < targetCol) {
-            const code = text.codePointAt(boff);
-            if (code === undefined) break;
-            const rune = String.fromCodePoint(code);
-            const size = rune.length;
-            if (rune === "\t") {
-              const stop = layout.tabWidth - (bcol % layout.tabWidth);
-              bx += spaceAdvance * stop;
-              bcol += stop;
-            } else {
-              const placed = atlas.resolveGlyph(rune, style);
-              bx += placed.advance;
-              bcol += 1;
-            }
-            boff += size;
-          }
-          const bracketChar = text[bp.column] ?? "";
+      // Bracket matching (P3#14): destaca o par com um retângulo fino (underline-like).
+      // Com wrap, o bracket só é desenhado no **segmento** que o contém.
+      if (bracketMatch && layout.bracketMatchColor) {
+        const [open, close] = bracketMatch;
+        for (const bp of [open, close]) {
+          if (bp.line !== index) continue;
+          if (bp.column < seg.start || bp.column > seg.end) continue;
+          // Coluna do bracket **dentro** do segmento.
+          const colInSeg = Math.min(bp.column, seg.end) - seg.start;
+          const bx = advanceWithin(
+            atlas,
+            style,
+            text,
+            colInSeg,
+            layout.paddingLeft,
+            spaceAdvance,
+            layout.tabWidth,
+          );
+          const bracketChar = text[colInSeg] ?? "";
           const charW = atlas.resolveGlyph(bracketChar, style).advance;
           rects.push({
             rect: { x: bx, y: y + layout.lineHeight - 3, w: Math.max(charW, 4), h: 2 },
@@ -497,35 +475,37 @@ export function buildInstances(
           });
         }
       }
-    }
 
-    // Inlay hints (P4#19): desenha label após a posição calculada, em cor mais clara.
-    if (inlayHints !== undefined) {
-      for (const ih of inlayHints) {
-        if (ih.line === index) {
-          let hx = ih.x;
-          // Se paddingLeft, adiciona um espaço extra antes do hint
-          if (ih.paddingLeft) hx += spaceAdvance;
+      // Inlay hints (P4#19): desenha label após a posição calculada, em cor mais clara.
+      // Com wrap, o hint é desenhado **uma vez** (no 1º segmento da linha) — senão o label
+      // apareceria repetido em cada row da linha quebrada.
+      if (inlayHints !== undefined && seg.segmentIndex === 0) {
+        for (const ih of inlayHints) {
+          if (ih.line === index) {
+            let hx = ih.x;
+            // Se paddingLeft, adiciona um espaço extra antes do hint
+            if (ih.paddingLeft) hx += spaceAdvance;
 
-          // 60% de opacidade da cor padrão
-          const base = layout.defaultColor;
-          const hintAlpha = Math.round((base & 0xff) * 0.6);
-          const hintColor = ((base & 0xffffff00) | hintAlpha) >>> 0;
+            // 60% de opacidade da cor padrão
+            const base = layout.defaultColor;
+            const hintAlpha = Math.round((base & 0xff) * 0.6);
+            const hintColor = ((base & 0xffffff00) | hintAlpha) >>> 0;
 
-          for (let ci = 0; ci < ih.label.length; ci++) {
-            const g = atlas.resolveGlyph(ih.label[ci] ?? " ", style);
-            if (ih.label[ci] !== " ") {
-              glyphs.push({
-                atlasX: g.region.x,
-                atlasY: g.region.y,
-                atlasW: g.region.w,
-                atlasH: g.region.h,
-                x: hx,
-                y,
-                color: hintColor,
-              });
+            for (let ci = 0; ci < ih.label.length; ci++) {
+              const g = atlas.resolveGlyph(ih.label[ci] ?? " ", style);
+              if (ih.label[ci] !== " ") {
+                glyphs.push({
+                  atlasX: g.region.x,
+                  atlasY: g.region.y,
+                  atlasW: g.region.w,
+                  atlasH: g.region.h,
+                  x: hx,
+                  y,
+                  color: hintColor,
+                });
+              }
+              hx += g.advance;
             }
-            hx += g.advance;
           }
         }
       }
@@ -533,129 +513,98 @@ export function buildInstances(
   }
 
   // Search highlight: pinta retângulos de fundo nas posições das ocorrências.
+  // Com wrap, um match que atravessa segmentos é pintado **um rect por segmento**.
   if (searchHighlight) {
     for (let mi = 0; mi < searchHighlight.matches.length; mi++) {
       const match = searchHighlight.matches[mi]!;
       if (match.line < first || match.line >= end) continue;
-      const text = source.line(match.line);
       const isCurrent = mi === searchHighlight.currentIndex;
-      // Caminha pelo texto para achar o x do início e do fim do match.
-      let mx = layout.paddingLeft;
-      let mcol = 0;
-      let moff = 0;
-      let matchStartX = mx;
-      let matchEndX = mx;
-      const targetEnd = Math.min(match.index + match.length, text.length);
-      while (moff < targetEnd) {
-        if (moff === match.index) matchStartX = mx;
-        const code = text.codePointAt(moff);
-        if (code === undefined) break;
-        const rune = String.fromCodePoint(code);
-        const size = rune.length;
-        if (rune === "\t") {
-          const stop = layout.tabWidth - (mcol % layout.tabWidth);
-          mx += spaceAdvance * stop;
-          mcol += stop;
-          moff += size;
-          continue;
-        }
-        const placed = atlas.resolveGlyph(rune, style);
-        mx += placed.advance;
-        mcol += 1;
-        moff += size;
+      // ⚠️ `SearchMatch.index` é o offset **absoluto** no documento (contrato de busca); a
+      // posição **relativa à linha** é `match.column` — é ela que posiciona o destaque
+      // (e que permite saber em qual segmento de wrap o match cai).
+      const from = match.column;
+      const to = match.column + match.length;
+      for (const seg of rowMap.paintSegmentsOf(match.line)) {
+        // Interseção do match com o segmento (offsets da linha).
+        const s = Math.max(from, seg.start);
+        const e = Math.min(to, seg.end);
+        if (e <= s) continue;
+        const matchStartX = advanceWithin(
+          atlas,
+          style,
+          seg.text,
+          s - seg.start,
+          layout.paddingLeft,
+          spaceAdvance,
+          layout.tabWidth,
+        );
+        const matchEndX = advanceWithin(
+          atlas,
+          style,
+          seg.text,
+          e - seg.start,
+          layout.paddingLeft,
+          spaceAdvance,
+          layout.tabWidth,
+        );
+        if (matchEndX - matchStartX <= 0) continue;
+        rects.push({
+          rect: {
+            x: matchStartX,
+            y: layout.paddingTop + seg.row * layout.lineHeight - layout.scrollOffsetPx,
+            w: matchEndX - matchStartX,
+            h: layout.lineHeight,
+          },
+          color: isCurrent ? layout.searchCurrentColor : layout.searchMatchColor,
+        });
       }
-      matchEndX = mx;
-      // Se o match está após o fim da linha (linha vazia ou truncada),
-      // `matchStartX === matchEndX` e a largura será 0 — pulamos.
-      if (matchEndX - matchStartX <= 0) continue;
-      rects.push({
-        rect: {
-          x: matchStartX,
-          y: layout.paddingTop + match.line * layout.lineHeight - layout.scrollOffsetPx,
-          w: Math.max(matchEndX - matchStartX, 0),
-          h: layout.lineHeight,
-        },
-        color: isCurrent ? layout.searchCurrentColor : layout.searchMatchColor,
-      });
     }
   }
 
   // Seleção: pinta retângulos de fundo entre anchor e active.
   if (selection && !SelectionOps.isCollapsed(selection)) {
-    const { start, end } = SelectionOps.normalized(selection);
-    const startPos = source.positionAt(start);
-    const endPos = source.positionAt(Math.max(0, end - 1));
-    // Linhas afetadas pela seleção (dentro do range visível).
-    const selFirst = Math.max(first, startPos.line);
-    const selLast = Math.min(endPos.line, end - 1, source.lineCount() - 1);
-    for (let line = selFirst; line <= selLast; line++) {
-      const text = source.line(line);
-      // Coluna inicial na linha: se a seleção começa nesta linha, usa a coluna de início;
-      // senão, começa do início da linha (col 0).
-      const lineStartCol = line === startPos.line ? startPos.column : 0;
-      // Coluna final na linha: se a seleção termina nesta linha, usa a coluna de fim;
-      // senão, vai até o fim da linha (text.length).
-      const lineEndCol = line === endPos.line ? endPos.column : text.length;
-      if (lineStartCol >= lineEndCol) continue;
-      // Caminha pelo texto para achar o x do início e do fim na linha.
-      let sx = layout.paddingLeft;
-      let scol = 0;
-      let soff = 0;
-      let selStartX = sx;
-      let selEndX = sx;
-      const targetOff = Math.min(lineEndCol, text.length);
-      while (soff < targetOff) {
-        if (soff === lineStartCol) selStartX = sx;
-        const code = text.codePointAt(soff);
-        if (code === undefined) break;
-        const rune = String.fromCodePoint(code);
-        const size = rune.length;
-        if (rune === "\t") {
-          const stop = layout.tabWidth - (scol % layout.tabWidth);
-          sx += spaceAdvance * stop;
-          scol += stop;
-          soff += size;
-          continue;
-        }
-        const placed = atlas.resolveGlyph(rune, style);
-        sx += placed.advance;
-        scol += 1;
-        soff += size;
-      }
-      selEndX = sx;
-      if (selEndX - selStartX <= 0) continue;
-      rects.push({
-        rect: {
-          x: selStartX,
-          y: layout.paddingTop + line * layout.lineHeight - layout.scrollOffsetPx,
-          w: Math.max(selEndX - selStartX, 0),
-          h: layout.lineHeight,
-        },
-        color: layout.selectionColor,
-      });
-    }
+    pushSelectionRects(rects, source, layout, atlas, style, rowMap, selection, first, end, spaceAdvance);
   }
 
   if (caret && caret.line >= first && caret.line < end) {
-    rects.push({
-      rect: {
-        x: layout.paddingLeft + caretAdvance(atlas, style, caret.column, spaceAdvance),
-        y: layout.paddingTop + caret.line * layout.lineHeight - layout.scrollOffsetPx,
-        w: caret.width,
-        h: layout.lineHeight,
-      },
-      color: caret.color,
-    });
+    const loc = rowMap.locate(caret.line, caret.column);
+    const row = loc !== undefined ? loc.row : rowMap.rowOfLine(caret.line);
+    if (row !== undefined) {
+      // Com wrap, o caret vive no **segmento** que contém a coluna: o x é medido dentro do
+      // segmento (a row do segmento, não a da linha lógica).
+      const seg = loc !== undefined ? rowMap.segmentsOf(caret.line)[loc.segmentIndex] : undefined;
+      const x =
+        loc !== undefined && seg !== undefined && wrap
+          ? advanceWithin(atlas, style, seg.text, loc.column, layout.paddingLeft, spaceAdvance, layout.tabWidth)
+          : layout.paddingLeft + caretAdvance(atlas, style, caret.column, spaceAdvance);
+      rects.push({
+        rect: {
+          x,
+          y: layout.paddingTop + row * layout.lineHeight - layout.scrollOffsetPx,
+          w: caret.width,
+          h: layout.lineHeight,
+        },
+        color: caret.color,
+      });
+    }
   }
 
   // Cuidados extras para múltiplos cursores (P2#5)
   if (extraCarets) {
     for (const ec of extraCarets) {
       if (ec.line >= first && ec.line < end) {
+        const loc = rowMap.locate(ec.line, ec.column);
+        const row = loc !== undefined ? loc.row : rowMap.rowOfLine(ec.line);
+        if (row === undefined) continue;
+        const seg = loc !== undefined ? rowMap.segmentsOf(ec.line)[loc.segmentIndex] : undefined;
+        const x =
+          loc !== undefined && seg !== undefined && wrap
+            ? advanceWithin(atlas, style, seg.text, loc.column, layout.paddingLeft, spaceAdvance, layout.tabWidth)
+            : layout.paddingLeft + caretAdvance(atlas, style, ec.column, spaceAdvance);
         rects.push({
           rect: {
-            x: layout.paddingLeft + caretAdvance(atlas, style, ec.column, spaceAdvance),
-            y: layout.paddingTop + ec.line * layout.lineHeight - layout.scrollOffsetPx,
+            x,
+            y: layout.paddingTop + row * layout.lineHeight - layout.scrollOffsetPx,
             w: ec.width,
             h: layout.lineHeight,
           },
@@ -669,52 +618,7 @@ export function buildInstances(
   if (extraSelections) {
     for (const extraSel of extraSelections) {
       if (SelectionOps.isCollapsed(extraSel)) continue;
-      const { start, end } = SelectionOps.normalized(extraSel);
-      const startPos = source.positionAt(start);
-      const endPos = source.positionAt(Math.max(0, end - 1));
-      const selFirst = Math.max(first, startPos.line);
-      const selLast = Math.min(endPos.line, end - 1, source.lineCount() - 1);
-      for (let line = selFirst; line <= selLast; line++) {
-        const text = source.line(line);
-        const lineStartCol = line === startPos.line ? startPos.column : 0;
-        const lineEndCol = line === endPos.line ? endPos.column : text.length;
-        if (lineStartCol >= lineEndCol) continue;
-        let sx = layout.paddingLeft;
-        let scol = 0;
-        let soff = 0;
-        let selStartX = sx;
-        let selEndX = sx;
-        const targetOff = Math.min(lineEndCol, text.length);
-        while (soff < targetOff) {
-          if (soff === lineStartCol) selStartX = sx;
-          const code = text.codePointAt(soff);
-          if (code === undefined) break;
-          const rune = String.fromCodePoint(code);
-          const size = rune.length;
-          if (rune === "\t") {
-            const stop = layout.tabWidth - (scol % layout.tabWidth);
-            sx += spaceAdvance * stop;
-            scol += stop;
-            soff += size;
-            continue;
-          }
-          const placed = atlas.resolveGlyph(rune, style);
-          sx += placed.advance;
-          scol += 1;
-          soff += size;
-        }
-        selEndX = sx;
-        if (selEndX - selStartX <= 0) continue;
-        rects.push({
-          rect: {
-            x: selStartX,
-            y: layout.paddingTop + line * layout.lineHeight - layout.scrollOffsetPx,
-            w: Math.max(selEndX - selStartX, 0),
-            h: layout.lineHeight,
-          },
-          color: layout.selectionColor,
-        });
-      }
+      pushSelectionRects(rects, source, layout, atlas, style, rowMap, extraSel, first, end, spaceAdvance);
     }
   }
 
@@ -728,6 +632,118 @@ function caretAdvance(atlas: GlyphAtlas, style: TextStyle, column: number, space
   if (column <= 0) return 0;
   const metrics = atlas.measure(" ".repeat(column), atlas.registerStyle(style));
   return metrics.advance === 0 ? column * spaceAdvance : metrics.advance;
+}
+
+/**
+ * Avança `x` (px) ao longo de `text` (code units UTF-16) até a posição `at`, devolvendo o x
+ * final (o x **da** posição `at`).
+ *
+ * Tabs são expandidos até o próximo stop; a coluna do tab é **relativa ao início de `text`** —
+ * num segmento de wrap o texto recomeça (cada row visual tem sua própria contagem de colunas,
+ * como no desenho dos glifos).
+ */
+function advanceWithin(
+  atlas: GlyphAtlas,
+  style: TextStyle,
+  text: string,
+  at: number,
+  startX: number,
+  spaceAdvance: number,
+  tabWidth: number,
+): number {
+  let x = startX;
+  let column = 0;
+  let off = 0;
+  const limit = Math.max(0, Math.min(at, text.length));
+  while (off < limit) {
+    const code = text.codePointAt(off);
+    if (code === undefined) break;
+    const rune = String.fromCodePoint(code);
+    const size = rune.length;
+    if (rune === "\t") {
+      const stop = tabWidth - (column % tabWidth);
+      x += spaceAdvance * stop;
+      column += stop;
+      off += size;
+      continue;
+    }
+    const placed = atlas.resolveGlyph(rune, style);
+    x += placed.advance;
+    column += 1;
+    off += size;
+  }
+  return x;
+}
+
+/**
+ * Pinta a seleção (rects de fundo) entre `anchor` e `active` — **um rect por segmento** de wrap
+ * atravessado (sem wrap: um rect por linha, como sempre).
+ *
+ * As linhas colapsadas (folding) não têm segmentos desenháveis: usa-se a row reservada e o
+ * traçado da linha inteira (compatível com o caminho sem wrap).
+ */
+function pushSelectionRects(
+  rects: RectInstance[],
+  source: LineSource,
+  layout: LineLayout,
+  atlas: GlyphAtlas,
+  style: TextStyle,
+  rowMap: VisualRowMap,
+  selection: Selection,
+  first: number,
+  end: number,
+  spaceAdvance: number,
+): void {
+  const { start, end: selEnd } = SelectionOps.normalized(selection);
+  const startPos = source.positionAt(start);
+  const endPos = source.positionAt(Math.max(0, selEnd - 1));
+  // Linhas afetadas pela seleção (dentro do range visível).
+  const selFirst = Math.max(first, startPos.line);
+  const selLast = Math.min(endPos.line, end - 1, source.lineCount() - 1);
+  for (let line = selFirst; line <= selLast; line++) {
+    const text = source.line(line);
+    // Coluna inicial na linha: se a seleção começa nesta linha, usa a coluna de início;
+    // senão, começa do início da linha (col 0).
+    const lineStartCol = line === startPos.line ? startPos.column : 0;
+    // Coluna final na linha: se a seleção termina nesta linha, usa a coluna de fim;
+    // senão, vai até o fim da linha (text.length).
+    const lineEndCol = line === endPos.line ? endPos.column : text.length;
+    if (lineStartCol >= lineEndCol) continue;
+    for (const seg of rowMap.paintSegmentsOf(line)) {
+      // Interseção da seleção com o segmento (offsets da linha).
+      const from = Math.max(lineStartCol, seg.start);
+      const to = Math.min(lineEndCol, seg.end);
+      if (to <= from) continue;
+      const selStartX = advanceWithin(
+        atlas,
+        style,
+        seg.text,
+        from - seg.start,
+        layout.paddingLeft,
+        spaceAdvance,
+        layout.tabWidth,
+      );
+      const selEndX = advanceWithin(
+        atlas,
+        style,
+        seg.text,
+        to - seg.start,
+        layout.paddingLeft,
+        spaceAdvance,
+        layout.tabWidth,
+      );
+      if (selEndX - selStartX <= 0) continue;
+      rects.push({
+        rect: {
+          x: selStartX,
+          y: layout.paddingTop + seg.row * layout.lineHeight - layout.scrollOffsetPx,
+          w: selEndX - selStartX,
+          h: layout.lineHeight,
+        },
+        color: layout.selectionColor,
+      });
+    }
+  }
 }
 
 /**

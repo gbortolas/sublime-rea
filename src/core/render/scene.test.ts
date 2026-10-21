@@ -2,9 +2,16 @@
  * Testes do `scene.ts`: só linhas visíveis viram instâncias (virtualização), tabs e caret.
  */
 import { describe, expect, it } from "vitest";
-import type { RGBA, Scope, ScopeStyle, SearchMatch, TextStyle, ThemeResolver } from "../../shared";
+import type { RGBA, Scope, ScopeStyle, SearchMatch, Selection, TextStyle, ThemeResolver } from "../../shared";
 import { GlyphAtlas } from "./atlas";
-import { buildInstances, type LineLayout, type LineSource, type SceneInstances } from "./scene";
+import {
+  buildInstances,
+  type CaretPosition,
+  type LineLayout,
+  type LineSource,
+  type SceneInstances,
+  type SearchHighlight,
+} from "./scene";
 
 /** Resolvedor de tema mínimo local ao teste (evita import cruzado entre módulos de `core`). */
 function prefixTheme(rules: Readonly<Record<string, RGBA>>): ThemeResolver {
@@ -74,6 +81,12 @@ function buildWithMeasure(
   atlas: GlyphAtlas,
   range: { first: number; count: number },
   measure: (text: string) => number,
+  extras?: {
+    readonly caret?: CaretPosition;
+    readonly search?: SearchHighlight;
+    readonly selection?: Selection;
+    readonly extraCarets?: readonly CaretPosition[];
+  },
 ): SceneInstances {
   return buildInstances(
     source,
@@ -81,11 +94,11 @@ function buildWithMeasure(
     atlas,
     style,
     range,
-    undefined, // caret
+    extras?.caret,
     undefined, // highlight
-    undefined, // searchHighlight
-    undefined, // selection
-    undefined, // extraCarets
+    extras?.search,
+    extras?.selection,
+    extras?.extraCarets,
     undefined, // extraSelections
     undefined, // bracketMatch
     measure,
@@ -386,5 +399,222 @@ describe("buildInstances — soft wrap (row visual)", () => {
     );
     // Row base 10 → Y = paddingTop + 10 * lineHeight = 204; a linha seguinte → 224.
     expect([...new Set(scene.glyphs.map((g) => g.y))]).toEqual([204, 224]);
+  });
+});
+
+describe("buildInstances — soft wrap (caret/seleção/busca na row certa)", () => {
+  const atlas = new GlyphAtlas();
+  /** Medição determinística: 10px por caractere (o wrap quebra a cada 10 chars). */
+  const measure = (text: string): number => text.length * 10;
+  /** 26 chars × 10px = 260px → 3 segmentos de 10/10/6 (rows 0, 1, 2). */
+  const long = "abcdefghijklmnopqrstuvwxyz";
+
+  it("caret na 2ª metade da linha quebrada fica na row do segmento (não na 1ª)", () => {
+    const scene = buildWithMeasure(
+      sourceOf([long]),
+      wrapLayout(100),
+      atlas,
+      { first: 0, count: 1 },
+      measure,
+      { caret: { line: 0, column: 15, color: 0xffffffff, width: 2 } },
+    );
+    const caretRect = scene.rects.find((r) => r.color === 0xffffffff);
+    // Row 1 (0-based) = 2ª row visual → Y = paddingTop(4) + 1 * lineHeight(20) = 24.
+    expect(caretRect?.rect.y).toBe(24);
+    // X = início do 2º segmento + 5 colunas dentro dele.
+    expect(caretRect?.rect.x).toBeCloseTo(8 + 5 * 9.6, 5);
+  });
+
+  it("caret no início do 2º segmento fica no começo da 2ª row", () => {
+    const scene = buildWithMeasure(
+      sourceOf([long]),
+      wrapLayout(100),
+      atlas,
+      { first: 0, count: 1 },
+      measure,
+      { caret: { line: 0, column: 10, color: 0xffffffff, width: 2 } },
+    );
+    const caretRect = scene.rects.find((r) => r.color === 0xffffffff);
+    expect(caretRect?.rect.y).toBe(24);
+    expect(caretRect?.rect.x).toBeCloseTo(8, 5);
+  });
+
+  it("seleção dentro de uma linha quebrada é desenhada no segmento certo", () => {
+    const scene = buildWithMeasure(
+      sourceOf([long]),
+      wrapLayout(100),
+      atlas,
+      { first: 0, count: 1 },
+      measure,
+      { selection: { anchor: 12, active: 15 } },
+    );
+    const sel = scene.rects.find((r) => r.color === 0x264f78ff);
+    // Colunas 12..14 → 2º segmento (row 1): X = paddingLeft + 2 colunas, W = 2 colunas.
+    expect(sel?.rect.y).toBe(24);
+    expect(sel?.rect.x).toBeCloseTo(8 + 2 * 9.6, 5);
+    expect(sel?.rect.w).toBeCloseTo(2 * 9.6, 5);
+  });
+
+  it("seleção que atravessa segmentos gera um rect por segmento", () => {
+    const scene = buildWithMeasure(
+      sourceOf([long]),
+      wrapLayout(100),
+      atlas,
+      { first: 0, count: 1 },
+      measure,
+      { selection: { anchor: 8, active: 13 } },
+    );
+    const sels = scene.rects.filter((r) => r.color === 0x264f78ff);
+    expect(sels).toHaveLength(2);
+    // 1º segmento: cols 8..10 (row 0) · 2º segmento: cols 10..12 (row 1).
+    expect(sels[0]?.rect.y).toBe(4);
+    expect(sels[0]?.rect.x).toBeCloseTo(8 + 8 * 9.6, 5);
+    expect(sels[0]?.rect.w).toBeCloseTo(2 * 9.6, 5);
+    expect(sels[1]?.rect.y).toBe(24);
+    expect(sels[1]?.rect.x).toBeCloseTo(8, 5);
+    expect(sels[1]?.rect.w).toBeCloseTo(2 * 9.6, 5);
+  });
+
+  it("match da busca fica na row do segmento que o contém", () => {
+    const scene = buildWithMeasure(
+      sourceOf([long]),
+      wrapLayout(100),
+      atlas,
+      { first: 0, count: 1 },
+      measure,
+      {
+        search: {
+          matches: [{ index: 12, length: 3, line: 0, column: 12 }],
+          currentIndex: -1,
+        },
+      },
+    );
+    const match = scene.rects.find((r) => r.color === 0xffff0044);
+    expect(match?.rect.y).toBe(24);
+    expect(match?.rect.x).toBeCloseTo(8 + 2 * 9.6, 5);
+    expect(match?.rect.w).toBeCloseTo(3 * 9.6, 5);
+  });
+
+  it("gutter: o número da linha fica na 1ª row da linha (não na última)", () => {
+    const scene = buildWithMeasure(
+      sourceOf([long, "zz"]),
+      { ...wrapLayout(100), gutterWidth: 30 },
+      atlas,
+      { first: 0, count: 2 },
+      measure,
+    );
+    // Glifos por row: a linha 0 ocupa 3 rows (10 + 10 + 6 chars) e a linha 1 ocupa a row 3.
+    // O número do gutter é o 1º glifo de cada linha ⇒ a row 0 tem 11 glifos (1 + 10) e a
+    // row 3 tem 3 (1 + 2).
+    const byRow = new Map<number, number>();
+    for (const g of scene.glyphs) byRow.set(g.y, (byRow.get(g.y) ?? 0) + 1);
+    expect([...byRow.entries()]).toEqual([
+      [4, 11],
+      [24, 10],
+      [44, 6],
+      [64, 3],
+    ]);
+  });
+
+  it("destaque de linha atual acompanha a row do caret", () => {
+    const scene = buildWithMeasure(
+      sourceOf([long]),
+      wrapLayout(100),
+      atlas,
+      { first: 0, count: 1 },
+      measure,
+      { caret: { line: 0, column: 15, color: 0xffffffff, width: 2 } },
+    );
+    // O fundo da "linha atual" (cor 0x264f78ff+8% de luz) fica na row do caret.
+    const lineHighlight = scene.rects.find((r) => r.color === 623258111);
+    expect(lineHighlight?.rect.y).toBe(24);
+  });
+
+  it("scrollbar: o thumb é proporcional ao total de rows visuais", () => {
+    const base = { ...wrapLayout(100, 50), scrollbarWidth: 10 };
+    const withRows = buildWithMeasure(
+      sourceOf([long]),
+      { ...base, totalVisualRows: 10 },
+      atlas,
+      { first: 0, count: 1 },
+      measure,
+    );
+    // 10 rows × 20px = 200px de conteúdo, viewport de 100px ⇒ thumb de 50px, na metade.
+    // (O track da scrollbar é o 1º rect em x = 390; o thumb é o último.)
+    const thumb = withRows.rects.filter((r) => r.rect.x === 390).at(-1);
+    expect(thumb?.rect.h).toBeCloseTo(50, 5);
+    expect(thumb?.rect.y).toBeCloseTo(25, 5);
+    // Sem `totalVisualRows` (1 row por linha lógica) o conteúdo cabe na viewport: sem thumb.
+    const withoutRows = buildWithMeasure(sourceOf([long]), base, atlas, { first: 0, count: 1 }, measure);
+    expect(withoutRows.rects.filter((r) => r.rect.x === 390)).toHaveLength(1); // só o track
+  });
+});
+
+describe("buildInstances — regressão sem wrap (wrapWidth = 0)", () => {
+  const atlas = new GlyphAtlas();
+  const measure = (text: string): number => text.length * 10;
+
+  it("caret, seleção e busca: mesmas instâncias do baseline (sem wrap)", () => {
+    const scene = buildWithMeasure(
+      sourceOf(["abc def", "0123456789"]),
+      layout(0),
+      atlas,
+      { first: 0, count: 2 },
+      measure,
+      {
+        caret: { line: 1, column: 3, color: 0xffffffff, width: 2 },
+        search: {
+          matches: [{ index: 0, length: 3, line: 0, column: 0 }],
+          currentIndex: 0,
+        },
+        selection: { anchor: 1, active: 4 },
+      },
+    );
+    // Snapshot do comportamento legado (antes da malha visual) — congelado.
+    expect(scene.rects.map((r) => ({ ...r.rect, color: r.color }))).toEqual([
+      { x: 0, y: 0, w: 400, h: 100, color: 0x1e1f22ff }, // fundo
+      { x: 0, y: 24, w: 400, h: 20, color: 0x252629ff }, // destaque da linha atual (linha 1)
+      { x: 8, y: 4, w: 28.800000000000004, h: 20, color: 0xff880088 }, // match de busca (atual)
+      { x: 17.6, y: 4, w: 19.200000000000003, h: 20, color: 0x264f78ff }, // seleção (1..4)
+      { x: 36.8, y: 24, w: 2, h: 20, color: 0xffffffff }, // caret
+    ]);
+  });
+
+  it("tabs: o x do caret e da seleção não mudam (baseline)", () => {
+    const scene = buildWithMeasure(
+      sourceOf(["\tabc def"]),
+      layout(0),
+      atlas,
+      { first: 0, count: 1 },
+      measure,
+      {
+        caret: { line: 0, column: 3, color: 0xffffffff, width: 2 },
+        selection: { anchor: 2, active: 6 },
+      },
+    );
+    const caretRect = scene.rects.find((r) => r.color === 0xffffffff);
+    const sel = scene.rects.find((r) => r.color === 0x264f78ff);
+    // Baseline: caret x = paddingLeft + 3 * advanceDoEspaço; seleção x = paddingLeft + 4 * advance.
+    expect(caretRect?.rect.x).toBeCloseTo(8 + 3 * 9.6, 5);
+    expect(sel?.rect.x).toBeCloseTo(56, 5);
+    expect(sel?.rect.w).toBeCloseTo(3 * 9.6, 5);
+  });
+});
+
+describe("buildInstances — custo por frame", () => {
+  it("a faixa visível não custa O(documento)", () => {
+    // Documento de 10k linhas; a faixa visível (40 linhas) começa na linha 5000.
+    const lines = Array.from({ length: 10_000 }, (_, i) => `linha ${i} ` + "x".repeat(60));
+    const source = sourceOf(lines);
+    const atlas = new GlyphAtlas();
+    const measure = (text: string): number => text.length * 8;
+    const started = performance.now();
+    for (let i = 0; i < 20; i++) {
+      buildWithMeasure(source, wrapLayout(700, 0), atlas, { first: 5000, count: 40 }, measure);
+    }
+    const elapsed = performance.now() - started;
+    // 20 frames de uma faixa de 40 linhas: ~1.4ms/frame medido. A folga é enorme frente a
+    // um custo O(documento) (que seria ~200ms/frame só para achar a row visual do caret).
+    expect(elapsed).toBeLessThan(1000);
   });
 });

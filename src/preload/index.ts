@@ -36,6 +36,7 @@ import type {
   SearchDocumentResult,
   SearchQuery,
   SelectionSet,
+  SnippetsListResult,
   DapBreakpoint,
   DapBreakpointSpec,
   DapEvaluation,
@@ -199,6 +200,13 @@ export interface ScribePreloadApi {
   onDapOutput(callback: (event: DapOutputEvent) => void): () => void;
   /** Escuta a confirmação de breakpoints (verificados) de um arquivo. */
   onDapBreakpoints(callback: (event: { path: string; breakpoints: DapBreakpoint[] }) => void): () => void;
+  /**
+   * Snippets de pacote (`.sublime-snippet` dentro de `Packages/<Nome>/…`).
+   *
+   * É **global ao app** (não tem handle). Um preload mais antigo simplesmente não expõe o
+   * método — o renderer degrada para os snippets embutidos, sem crash.
+   */
+  snippets(): Promise<SnippetsListResult>;
 }
 
 // Duplicado de propósito: o preload não importa `src/shared` em runtime (sandbox).
@@ -446,6 +454,7 @@ const api: ScribePreloadApi = {
   onDapBreakpoints: (
     callback: (event: { path: string; breakpoints: DapBreakpoint[] }) => void,
   ): (() => void) => subscribeDap("dap.breakpoints", callback as (payload: unknown) => void),
+  snippets: (): Promise<SnippetsListResult> => call<SnippetsListResult>("snippets.list", []),
 };
 
 /**

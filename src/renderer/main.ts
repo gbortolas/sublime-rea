@@ -53,6 +53,7 @@ import type {
   LspRenameResult,
   LspSignatureHelp,
   LspTextEdit,
+  PackageSnippetDefinition,
   RenderBackendKind,
   RGBA,
   ReplaceAllResult,
@@ -63,7 +64,9 @@ import type {
   Selection,
   SelectionEdit,
   SelectionSet,
+  SnippetsListResult,
   TextStyle,
+  Viewport,
 } from "../shared";
 import {
   FindBarModel,
@@ -97,7 +100,7 @@ import {
 import { attachMinimap } from "./minimap";
 import type { MinimapBinding } from "./minimap";
 import { findSnippet, parseSnippet } from "./snippets";
-import type { SnippetVariableContext } from "./snippets";
+import type { Snippet, SnippetVariableContext } from "./snippets";
 import {
   applyEdit,
   chooseSnippetOption,
@@ -111,9 +114,17 @@ import {
 import type { SnippetEditRange, SnippetSession } from "./snippet-session";
 import { hideSnippetChoice, showSnippetChoice } from "./snippet-choice";
 import {
+  cursorAbove,
+  cursorBelow,
+  selectAllOccurrences,
+  selectNextOccurrence,
+  wordAt,
+} from "./multi-cursor-ops";
+import {
   Canvas2DBackend,
   GlyphAtlas,
   ViewportImpl,
+  VisualRowIndex,
   WebGPUBackend,
   WebGPUUnavailableError,
   type AtlasSurface,
@@ -401,6 +412,21 @@ function splitLines(text: string): string[] {
 }
 
 /**
+ * Primeira linha cujo conteúdo mudou entre duas listas de linhas.
+ *
+ * `undefined` = as duas listas são equivalentes (o texto não mudou). O índice de rows
+ * visuais usa isto para invalidar **a partir** da linha alterada — as rows antes dela
+ * continuam válidas e não são recalculadas.
+ */
+export function firstChangedLine(before: readonly string[], after: readonly string[]): number | undefined {
+  const max = Math.max(before.length, after.length);
+  for (let i = 0; i < max; i++) {
+    if (before[i] !== after[i]) return i;
+  }
+  return undefined;
+}
+
+/**
  * `LineSource` ligado ao **texto do documento** (o adaptador mínimo do renderer). Guarda o texto
  * completo e o fatia por linha sob demanda — o `Viewport` só materializa o range visível, então
  * **não** há nó DOM por linha (DEC-REN-7).
@@ -409,6 +435,10 @@ export class DocumentLineSource implements LineSource {
   private textValue: string;
   private lines: string[];
   private revisionValue: number;
+  /** Contador de conteúdo: muda a cada texto **diferente** aplicado. */
+  private contentVersionValue = 0;
+  /** Primeira linha alterada na última aplicação de texto (`undefined` = texto idêntico). */
+  private firstChangedLineValue: number | undefined;
 
   constructor(text = "", revision = 0) {
     this.textValue = text;
@@ -424,10 +454,31 @@ export class DocumentLineSource implements LineSource {
     return this.revisionValue;
   }
 
+  /**
+   * Versão do **conteúdo**: muda a cada texto **diferente** aplicado.
+   *
+   * A revisão do documento não serve para isto: a edição local usa um contador próprio
+   * (1, 2, 3…) e o servidor devolve a revisão real — os dois números se cruzam e a
+   * "revisão" pode ficar igual depois de uma mudança de texto.
+   */
+  get contentVersion(): number {
+    return this.contentVersionValue;
+  }
+
+  /** Primeira linha alterada na última aplicação de texto (`undefined` = texto idêntico). */
+  get firstChangedLine(): number | undefined {
+    return this.firstChangedLineValue;
+  }
+
   /** Substitui o texto (vindo da ponte) e guarda a revisão associada. */
   setText(next: string, revision?: number): void {
-    this.textValue = next;
-    this.lines = splitLines(next);
+    if (next !== this.textValue) {
+      const nextLines = splitLines(next);
+      this.firstChangedLineValue = firstChangedLine(this.lines, nextLines);
+      this.contentVersionValue += 1;
+      this.textValue = next;
+      this.lines = nextLines;
+    }
     if (revision !== undefined) this.revisionValue = revision;
   }
 
@@ -462,6 +513,26 @@ export class DocumentLineSource implements LineSource {
     const length = this.lines[target]?.length ?? 0;
     return offset + Math.max(0, Math.min(column, length));
   }
+}
+
+/**
+ * Fonte que expõe a **versão do conteúdo** (a `DocumentLineSource` do renderer expõe).
+ *
+ * O índice de rows visuais precisa saber *quando* o texto mudou (para invalidar) e *a
+ * partir de qual linha* (para invalidar o mínimo). Uma `LineSource` genérica não expõe
+ * nada disso — aí o índice só é reconstruído quando a **fonte** ou a **largura de wrap**
+ * mudam.
+ */
+interface VersionedLineSource extends LineSource {
+  /** Contador que muda a cada texto **diferente** aplicado. */
+  readonly contentVersion: number;
+  /** Primeira linha alterada na última aplicação (`undefined` = texto idêntico). */
+  readonly firstChangedLine: number | undefined;
+}
+
+/** `true` se a fonte expõe a versão do conteúdo (a `DocumentLineSource` do renderer). */
+function isVersionedLineSource(source: LineSource): source is LineSource & VersionedLineSource {
+  return "contentVersion" in source && typeof source.contentVersion === "number";
 }
 
 /** Estado de undo/redo que a ponte devolve (espelha `DocumentUndoState` do contrato). */
@@ -592,6 +663,12 @@ interface ScribeBridge {
   onDapStopped?(callback: (event: DapStoppedEvent) => void): () => void;
   onDapOutput?(callback: (event: DapOutputEvent) => void): () => void;
   onDapBreakpoints?(callback: (event: { path: string; breakpoints: DapBreakpoint[] }) => void): () => void;
+  /**
+   * Snippets de pacote (`.sublime-snippet` dentro de `Packages/<Nome>/…`) — **opcional**:
+   * um preload mais antigo simplesmente não expõe o método e o renderer fica só com os
+   * snippets embutidos (sem crash).
+   */
+  snippets?(): Promise<SnippetsListResult>;
 }
 
 function readBridge(): ScribeBridge | undefined {
@@ -645,6 +722,61 @@ interface TabSession extends DocumentSession {
 }
 
 // ---- snippets: contexto de variáveis, âncora do dropdown e ciclo de vida ------------------------
+
+/**
+ * Índice de snippets de **pacote** por trigger (lowercased) — a busca é case-insensitive,
+ * como a dos snippets embutidos.
+ */
+export type PackageSnippetIndex = ReadonlyMap<string, PackageSnippetDefinition>;
+
+/**
+ * Indexa as definições de snippet de pacote por trigger (lowercased).
+ *
+ * A **primeira** definição com o mesmo trigger vence (a precedência de camada —
+ * `user > app > os` — já foi resolvida no `main`, que lê o `PackageResolver`).
+ */
+export function indexPackageSnippets(
+  definitions: readonly PackageSnippetDefinition[],
+): Map<string, PackageSnippetDefinition> {
+  const index = new Map<string, PackageSnippetDefinition>();
+  for (const definition of definitions) {
+    const key = definition.trigger.toLowerCase();
+    if (key.length === 0) continue;
+    if (index.has(key)) continue;
+    index.set(key, definition);
+  }
+  return index;
+}
+
+/**
+ * Converte uma definição de pacote no formato de snippet do renderer (`template`).
+ *
+ * O corpo do pacote é o **template** — a expansão passa pelo mesmo `parseSnippet` dos
+ * embutidos (tab stops, escolhas, espelhos e transformações funcionam igual).
+ */
+export function packageSnippetToSnippet(definition: PackageSnippetDefinition): Snippet {
+  return {
+    trigger: definition.trigger,
+    template: definition.body,
+    ...(definition.description !== undefined ? { description: definition.description } : {}),
+  };
+}
+
+/**
+ * Acha o snippet do **trigger** digitado: os de **pacote** primeiro (o usuário pode
+ * redefinir um trigger embutido), os **embutidos** como fallback.
+ *
+ * Índice vazio = preload antigo (sem `snippets.list`) ⇒ só os embutidos (degradação sem
+ * crash).
+ */
+export function resolveSnippetForWord(
+  word: string,
+  packageSnippets: PackageSnippetIndex,
+): Snippet | undefined {
+  const definition = packageSnippets.get(word.toLowerCase());
+  if (definition !== undefined) return packageSnippetToSnippet(definition);
+  return findSnippet(word);
+}
 
 /**
  * Vista mínima do documento para montar o **contexto de variáveis TM** de um snippet.
@@ -745,6 +877,11 @@ export interface SnippetChoiceAnchorInput {
   readonly canvasTop: number;
   /** Linha (0-based) do caret. */
   readonly line: number;
+  /**
+   * Row **visual** da linha do caret (0-based) — com soft wrap, a row de uma linha não
+   * é o seu índice. `undefined` = sem wrap (a row é a própria linha).
+   */
+  readonly visualRow?: number;
   /** Coluna (0-based) do caret. */
   readonly column: number;
   /** Scroll vertical da viewport (px). */
@@ -775,7 +912,8 @@ export function snippetChoiceAnchor(input: SnippetChoiceAnchorInput): {
   const y =
     input.canvasTop +
     TEXT_PADDING_TOP_PX +
-    (input.line + 1) * input.lineHeight -
+    (input.visualRow ?? input.line) * input.lineHeight +
+    input.lineHeight -
     input.scrollOffsetPx;
   return { x, y };
 }
@@ -819,6 +957,8 @@ function openSnippetChoicePopup(
     canvasLeft: rect.left,
     canvasTop: rect.top,
     line: pos.line,
+    // A row **visual** da linha do caret (com soft wrap, não é o índice da linha).
+    visualRow: renderer.visualRowOfLine(pos.line),
     column: pos.column,
     scrollOffsetPx: viewport.scrollOffsetPx(),
     gutterWidth: gutterWidthOf(renderer),
@@ -1239,7 +1379,9 @@ async function fetchInlayHints(
 ): Promise<void> {
   if (bridge.inlayHints === undefined) return;
   const lineHeight = Math.ceil(TEXT_STYLE.sizePx * 1.4);
-  const firstLine = Math.max(0, Math.floor((viewport.scrollOffsetPx() - 8) / lineHeight));
+  // A 1ª linha **visível**: com soft wrap o offset da rolagem é contado em rows visuais
+  // ⇒ a linha é a que contém a 1ª row (o pedido ao LSP é em linhas).
+  const firstLine = renderer.firstVisibleLine();
   const visLines = Math.ceil(renderer.viewportHeight / lineHeight) + 1;
   const lastLine = firstLine + visLines;
   try {
@@ -1264,7 +1406,10 @@ async function fetchInlayHints(
             px += TEXT_STYLE.sizePx * 0.6;
           }
         }
-        const y = paddingTop + h.position.line * lineHeight - viewport.scrollOffsetPx();
+        const y =
+          paddingTop +
+          renderer.visualRowOfLine(h.position.line) * lineHeight -
+          viewport.scrollOffsetPx();
         rendered.push({
           line: h.position.line,
           x: px,
@@ -1623,7 +1768,9 @@ class DocumentController {
     // Salva estado da sessão atual
     const old = this.sessions[this.activeIndex];
     if (old !== undefined) {
-      old.savedScrollPx = this.viewport.scrollOffsetPx();
+      // Em **linhas lógicas** (com soft wrap, o offset real é contado em rows visuais —
+      // a restauração abaixo é por linha).
+      old.savedScrollPx = this.renderer.logicalScrollOffsetPx();
       // Snippets (P4#18): trocar de documento encerra a sessão de snippet ativa.
       old.snippetSession = undefined;
       hideSnippetChoice();
@@ -2409,6 +2556,26 @@ class ScribeRenderer {
    * e trava o renderer. As mudanças de layout chegam por **evento**.
    */
   private layoutDirty = false;
+  /**
+   * Índice de **rows visuais** (soft wrap) do documento ativo.
+   *
+   * `undefined` = **sem wrap**: o viewport conta a rolagem em linhas lógicas (o modo
+   * legado) e o total de rows é o próprio número de linhas.
+   *
+   * Com wrap, o índice é a **fonte única** do total de rows (o `wrapLine` do core) — o
+   * cálculo caractere a caractere divergia dele e desalinhavo a rolagem do texto desenhado.
+   */
+  private visualRows: VisualRowIndex | undefined;
+  /** Largura de wrap (px) com que o índice atual foi construído. */
+  private visualRowsWidth = 0;
+  /** Fonte com que o índice atual foi construído (trocar de documento ⇒ recria). */
+  private visualRowsSource: LineSource | undefined;
+  /** Versão do conteúdo com que o índice foi construído (edição ⇒ invalida). */
+  private visualRowsVersion: number | undefined;
+  /** Nº de linhas com que o índice foi construído (rede de segurança p/ fonte sem versão). */
+  private visualRowsLineCount = 0;
+  /** Total de rows já publicado no viewport (evita `setMetrics` por frame). */
+  private publishedVisualRowCount = -1;
 
   constructor(
     private readonly canvas: HTMLCanvasElement,
@@ -2454,10 +2621,31 @@ class ScribeRenderer {
 
   /** Largura atual do gutter em px. */
   getGutterWidth(): number {
-    const lineCount = this.source.lineCount();
+    return this.gutterWidthFor(this.source.lineCount());
+  }
+
+  /**
+   * Largura do gutter (px) para um dado número de linhas.
+   *
+   * **Fonte única**: o gutter, a largura útil do wrap e a rolagem têm de usar o **mesmo**
+   * número — se divergirem, o wrap e a rolagem saem de contas diferentes.
+   */
+  private gutterWidthFor(lineCount: number): number {
     const gutterDigits = Math.max(1, Math.floor(Math.log10(Math.max(1, lineCount))) + 1);
     return gutterDigits * 9 + 16;
   }
+
+  /**
+   * Mede a largura de um texto (px) com o atlas de glifos.
+   *
+   * É a **mesma** medição do soft wrap do core (`wrapLine`) e a que o `buildInstances`
+   * recebe — o índice de rows e o texto desenhado precisam concordar no pixel.
+   */
+  private readonly measureText = (text: string): number => {
+    let w = 0;
+    for (let i = 0; i < text.length; i++) w += this.atlas.resolveGlyph(text[i] ?? " ", this.style).advance;
+    return w;
+  };
 
   /** Atualiza a seleção ativa para pintura no próximo frame. */
   setSelection(selection: Selection | undefined): void {
@@ -2474,6 +2662,14 @@ class ScribeRenderer {
 
   attachSource(source: LineSource): void {
     this.source = source;
+    // Trocar de documento invalida o índice de rows: as rows do texto anterior não valem
+    // para o novo (e o mapper apontaria para um índice obsoleto).
+    this.visualRows = undefined;
+    this.visualRowsSource = undefined;
+    this.visualRowsWidth = 0;
+    this.visualRowsVersion = undefined;
+    this.visualRowsLineCount = 0;
+    this.publishedVisualRowCount = -1;
     this.viewport.setMetrics({ lineCount: source.lineCount() });
     this.viewport.scrollTo(0);
   }
@@ -2484,6 +2680,73 @@ class ScribeRenderer {
    */
   markLayoutDirty(): void {
     this.layoutDirty = true;
+  }
+
+  /**
+   * Garante que o índice de **rows visuais** está em dia com o documento e com a largura de
+   * wrap. Devolve o **total de rows visuais** do documento.
+   *
+   * Regras:
+   * - **Sem wrap** (`wrapWidth <= 0`): o índice é descartado e o viewport volta ao modo
+   *   legado (contagem em linhas lógicas) — o comportamento sem wrap tem que ser
+   *   **idêntico** ao de antes do mapper;
+   * - **Com wrap**: o índice é reconstruído quando a **fonte** ou a **largura de wrap**
+   *   mudam; uma **edição** apenas o invalida (a partir da primeira linha alterada) — o
+   *   índice é incremental, o recálculo é sob demanda.
+   */
+  private ensureVisualRows(wrapWidth: number): number {
+    const lineCount = this.source.lineCount();
+    if (wrapWidth <= 0) {
+      if (this.visualRows !== undefined) {
+        this.visualRows = undefined;
+        this.visualRowsSource = undefined;
+        this.visualRowsWidth = 0;
+        this.visualRowsVersion = undefined;
+        // Sem wrap o viewport volta a contar em linhas lógicas (modo legado).
+        this.viewport.setVisualRowMapper(undefined);
+      }
+      return lineCount;
+    }
+    const version = isVersionedLineSource(this.source) ? this.source.contentVersion : undefined;
+    const index = this.visualRows;
+    // Uma fonte **sem versão** (o seam de desenvolvimento) não avisa quando o texto muda:
+    // aí o índice só é reconstruído quando o nº de linhas muda.
+    const staleCount = version === undefined && this.visualRowsLineCount !== lineCount;
+    if (
+      index === undefined ||
+      this.visualRowsSource !== this.source ||
+      this.visualRowsWidth !== wrapWidth ||
+      staleCount
+    ) {
+      const created = new VisualRowIndex(this.source, wrapWidth, this.measureText);
+      this.visualRows = created;
+      this.visualRowsSource = this.source;
+      this.visualRowsWidth = wrapWidth;
+      this.visualRowsVersion = version;
+      this.visualRowsLineCount = lineCount;
+      this.viewport.setVisualRowMapper(created);
+      return created.rowCount;
+    }
+    if (version !== undefined && version !== this.visualRowsVersion) {
+      // O texto mudou: invalida a partir da primeira linha alterada (as rows anteriores
+      // continuam válidas — o índice recalcula o resto sob demanda).
+      const changed = isVersionedLineSource(this.source) ? this.source.firstChangedLine : undefined;
+      index.invalidate(changed ?? 0);
+      this.visualRowsVersion = version;
+      this.visualRowsLineCount = lineCount;
+    }
+    return index.rowCount;
+  }
+
+  /**
+   * Publica o total de rows visuais no viewport (o `visualLineCount` da rolagem).
+   *
+   * Só chama `setMetrics` quando o valor **muda** — nada de alocar por frame.
+   */
+  private publishVisualRowCount(count: number): void {
+    if (count === this.publishedVisualRowCount) return;
+    this.publishedVisualRowCount = count;
+    this.viewport.setMetrics({ visualLineCount: count });
   }
 
   resize(cssWidth: number, cssHeight: number): void {
@@ -2507,31 +2770,17 @@ class ScribeRenderer {
 
     // Atualiza viewport com visualLineCount (soft wrap)
     const lineCount = this.source.lineCount();
-    const gutterDigits = Math.max(1, Math.floor(Math.log10(Math.max(1, lineCount))) + 1);
-    const gutterWidth = gutterDigits * 9 + 16;
+    const gutterWidth = this.gutterWidthFor(lineCount);
     // Mesma largura útil do `renderOnce` — wrap e rolagem não podem divergir.
     const wrapWidth = usefulTextWidth(this.viewportWidth, gutterWidth);
-    let vizCount = lineCount;
-    if (wrapWidth > 0) {
-      vizCount = 0;
-      for (let i = 0; i < lineCount; i++) {
-        const text = this.source.line(i);
-        if (text.length === 0) { vizCount += 1; continue; }
-        // Mede caractere a caractere
-        let w = 0;
-        let segs = 1;
-        for (let ci = 0; ci < text.length; ci++) {
-          const advance = this.atlas.resolveGlyph(text[ci] ?? " ", this.style).advance;
-          if (w + advance > wrapWidth) { segs++; w = 0; }
-          if (text[ci] !== " ") w += advance;
-        }
-        vizCount += segs;
-      }
-    }
+    // O total de rows vem do **índice** (o `wrapLine` do core): o cálculo caractere a
+    // caractere divergia dele e a rolagem não batia com o texto desenhado.
+    const visualRowCount = this.ensureVisualRows(wrapWidth);
+    this.publishedVisualRowCount = visualRowCount;
     this.viewport.setMetrics({
       viewportWidth: this.viewportWidth,
       viewportHeight: this.viewportHeight,
-      visualLineCount: vizCount,
+      visualLineCount: visualRowCount,
     });
   }
 
@@ -2559,11 +2808,16 @@ class ScribeRenderer {
       this.resize(this.viewportWidth, this.viewportHeight);
     }
     const viewportRect = { x: 0, y: 0, w: this.viewportWidth, h: this.viewportHeight };
-    const range = this.viewport.visibleLineRange();
     // Largura dinâmica do gutter: número de dígitos do total de linhas + folga.
     const lineCount = this.source.lineCount();
-    const gutterDigits = Math.max(1, Math.floor(Math.log10(Math.max(1, lineCount))) + 1);
-    const gutterWidth = gutterDigits * 9 + 16; // ~9px/dígito + 16px padding horizontal
+    const gutterWidth = this.gutterWidthFor(lineCount); // ~9px/dígito + 16px padding horizontal
+    // Mesma largura útil do `resize` — wrap e rolagem não podem divergir.
+    const wrapWidth = usefulTextWidth(viewportRect.w, gutterWidth);
+    // O índice de rows tem que estar em dia **antes** do range visível: com o mapper ativo,
+    // o viewport conta a rolagem em **rows visuais**.
+    const visualRowCount = this.ensureVisualRows(wrapWidth);
+    this.publishVisualRowCount(visualRowCount);
+    const range = this.viewport.visibleLineRange();
     const colors = THEME.current.colors;
     const layout: LineLayout = {
       lineHeight: this.lineHeight(),
@@ -2585,12 +2839,23 @@ class ScribeRenderer {
       selectionColor: colors.selection,
       bracketMatchColor: colors.caret,
       // Soft wrap (P3#15): largura disponível para o texto = viewport - gutter - scrollbar - padding - minimap
-      wrapWidth: usefulTextWidth(viewportRect.w, gutterWidth),
+      wrapWidth,
+      // Row base da faixa visível (row **visual** absoluta) + total de rows: com o mapper
+      // ativo, a rolagem é contada em rows e o texto tem de ser desenhado na mesma unidade.
+      ...(this.visualRows !== undefined
+        ? {
+            visualRowOffset: this.visualRows.rowOfLine(range.first),
+            totalVisualRows: visualRowCount,
+          }
+        : {}),
     };
 
     // Computa carets e seleções extras para multi-cursor (P2#5)
+    // O "caret primário" marca a **primeira linha visível** (destaque de linha atual): com
+    // soft wrap o offset da rolagem é contado em rows ⇒ a linha é a que contém a 1ª row.
+    const firstVisibleRow = Math.floor(this.viewport.scrollOffsetPx() / layout.lineHeight);
     const primaryCaret = {
-      line: Math.floor(this.viewport.scrollOffsetPx() / layout.lineHeight),
+      line: this.visualRows?.lineOfRow(firstVisibleRow) ?? firstVisibleRow,
       column: 0,
       color: colors.caret,
       width: 2,
@@ -2646,12 +2911,9 @@ class ScribeRenderer {
       extraCarets,
       extraSelections,
       bracketMatch,
-      // measureWidth para soft wrap (P3#15): mede texto usando o atlas
-      (text: string): number => {
-        let w = 0;
-        for (let i = 0; i < text.length; i++) w += this.atlas.resolveGlyph(text[i] ?? " ", this.style).advance;
-        return w;
-      },
+      // measureWidth para soft wrap (P3#15): a **mesma** medição do índice de rows — o
+      // texto desenhado e a contagem de rows têm que sair do mesmo `wrapLine`.
+      this.measureText,
       this.currentFolding,
       this.currentInlayHints,
       this.gitDiffs,
@@ -2684,6 +2946,46 @@ class ScribeRenderer {
   /** Número de linhas da fonte ativa. */
   sourceLineCount(): number {
     return this.source.lineCount();
+  }
+
+  /**
+   * Primeira **linha lógica** visível (a do topo da viewport).
+   *
+   * Com soft wrap, o offset da rolagem é contado em **rows visuais** — quem fala em
+   * *linhas* (roda do mouse, PageUp/PageDown, pedido de inlay hints, minimap) precisa
+   * desta conversão. Sem wrap, é exatamente a 1ª linha visível de sempre.
+   */
+  firstVisibleLine(): number {
+    const firstRow = Math.floor(this.viewport.scrollOffsetPx() / this.lineHeight());
+    return this.visualRows?.lineOfRow(firstRow) ?? firstRow;
+  }
+
+  /** Offset da rolagem em **linhas lógicas** (px) — para quem fala em linhas. */
+  logicalScrollOffsetPx(): number {
+    return this.firstVisibleLine() * this.lineHeight();
+  }
+
+  /**
+   * Linha lógica de um **Y do canvas** (px) — o clique do mouse.
+   *
+   * Com soft wrap, o Y do canvas é uma **row visual** ⇒ a linha é a que contém a row
+   * (a conta por `lineHeight` daria a row, não a linha). Sem wrap, é a conta de sempre.
+   */
+  lineAtCanvasY(y: number): number {
+    const row = Math.floor(
+      (y + this.viewport.scrollOffsetPx() - this.style.sizePx * 0.7) / this.lineHeight(),
+    );
+    return this.visualRows?.lineOfRow(row) ?? row;
+  }
+
+  /**
+   * Row **visual** de uma linha lógica — a row em que a linha é desenhada.
+   *
+   * Com soft wrap, a row de uma linha **não** é o seu índice: as linhas anteriores podem
+   * ocupar várias rows. É a âncora vertical dos popups (que nascem na linha do caret).
+   */
+  visualRowOfLine(line: number): number {
+    return this.visualRows?.rowOfLine(line) ?? line;
   }
 
   /** Conecta o minimap ao renderer. */
@@ -2731,8 +3033,7 @@ class ScribeRenderer {
     const ctx = this.canvas.getContext("2d");
     if (ctx === null) return;
 
-    const gutterDigits = Math.max(1, Math.floor(Math.log10(Math.max(1, this.source.lineCount()))) + 1);
-    const gutterWidth = gutterDigits * 9 + 16;
+    const gutterWidth = this.gutterWidthFor(this.source.lineCount());
     const paddingLeft = gutterWidth + 8;
     const paddingTop = 8;
     const charW = this.style.sizePx * 0.6;
@@ -2742,7 +3043,12 @@ class ScribeRenderer {
     // ── Squiggly underlines (como antes) ──────────────────────────────────
     for (const diag of visible) {
       const color = this.diagColor(diag.severity);
-      const startY = diag.range.startLine * lineHeight + lineHeight - 2 - scrollPx;
+      // Row **visual** do diagnóstico: com soft wrap, a linha lógica ocupa N rows e o
+      // squiggly tem de ficar na row do segmento que contém o offset.
+      const row =
+        this.visualRows?.locate(diag.range.startLine, diag.range.startCol)?.row ??
+        diag.range.startLine;
+      const startY = row * lineHeight + lineHeight - 2 - scrollPx;
       const startX = paddingLeft + diag.range.startCol * charW;
       const endX = paddingLeft + diag.range.endCol * charW;
       const width = Math.max(4, endX - startX);
@@ -2782,7 +3088,9 @@ class ScribeRenderer {
     const iconX = Math.round((gutterWidth - iconSize) / 2);
 
     for (const [line, severity] of lineMaxSeverity) {
-      const y = line * lineHeight + Math.round((lineHeight - iconSize) / 2) - scrollPx + paddingTop;
+      // O ícone fica na **primeira row** da linha (a row visual, com soft wrap).
+      const row = this.visualRows?.rowOfLine(line) ?? line;
+      const y = row * lineHeight + Math.round((lineHeight - iconSize) / 2) - scrollPx + paddingTop;
       if (y + iconSize < 0 || y > this.viewportHeight) continue;
 
       ctx.save();
@@ -3024,6 +3332,36 @@ export async function bootRenderer(): Promise<boolean> {
     bridge !== undefined
       ? new DocumentController(bridge, viewport, renderer)
       : undefined;
+
+  // ── Snippets de pacote (`.sublime-snippet` dentro de `Packages/<Nome>/…`) ──────────────────
+  //
+  // A lista é **global ao app** (não é por documento): uma única busca no boot, cacheada
+  // aqui — o trigger nunca vai ao IPC. Preload antigo (sem `snippets`) ⇒ o app segue só com
+  // os snippets embutidos (degradação explícita, sem crash).
+  const packageSnippets = new Map<string, PackageSnippetDefinition>();
+  if (bridge !== undefined && bridge.snippets === undefined) {
+    console.info("Scribe: ponte sem `snippets.list` — só os snippets embutidos");
+  } else if (bridge?.snippets !== undefined) {
+    void bridge.snippets().then(
+      (result) => {
+        // Guarda de runtime: a resposta cruza o IPC (o `main` devolve `{ snippets }`).
+        const payload: { readonly snippets?: unknown } | undefined = result;
+        const definitions: readonly PackageSnippetDefinition[] = Array.isArray(payload?.snippets)
+          ? payload.snippets
+          : [];
+        for (const [trigger, definition] of indexPackageSnippets(definitions)) {
+          packageSnippets.set(trigger, definition);
+        }
+        if (definitions.length > 0) {
+          console.info(`Scribe: ${definitions.length} snippet(s) de pacote carregado(s)`);
+        }
+      },
+      // Falha no IPC (ou main sem índice de pacotes): o app segue com os embutidos.
+      (error: unknown) => {
+        console.warn("Scribe: falha ao buscar snippets de pacote — só os embutidos", error);
+      },
+    );
+  }
 
   // Destaque de sintaxe: o main resolve a gramática e tokeniza; aqui só colorimos (ThemeResolver).
   const highlightStore = new HighlightStore();
@@ -3446,10 +3784,9 @@ export async function bootRenderer(): Promise<boolean> {
     const rect = surface.getBoundingClientRect();
     const x = event.clientX - rect.left;
     const y = event.clientY - rect.top;
-    const lineHeight = Math.ceil(TEXT_STYLE.sizePx * 1.4);
-    const line = Math.floor(
-      (y + viewport.scrollOffsetPx() - TEXT_STYLE.sizePx * 0.7) / lineHeight,
-    );
+    // A linha sob o mouse: com soft wrap, o Y do canvas é uma **row** ⇒ a linha é a que
+    // a contém (o renderer faz a conversão).
+    const line = renderer.lineAtCanvasY(y);
     if (line < 0 || line >= session.source.lineCount()) {
       cancelDebugHover();
       return;
@@ -3534,20 +3871,18 @@ export async function bootRenderer(): Promise<boolean> {
     // ── Breakpoints condicionais (P4#27) ───────────────────────────────────────────────────
     // O painel lista os breakpoints do **documento ativo** — as edições abaixo aplicam
     // sempre ao documento ativo (o painel é ressincronizado a cada troca de aba).
-    debugView.onBreakpointConditionChange((line: number, condition: string) => {
+    //
+    // ⚠️ O gancho é o de **spec**: a spec nova traz `condition`, `hitCondition` e
+    // `logMessage` juntos. O gancho antigo (só `condition`) continua existindo no painel,
+    // mas só dispara quando este **não** está registrado — por isso a troca é obrigatória
+    // (com ele, os campos novos nunca chegariam ao main).
+    debugView.onBreakpointSpecChange((line: number, spec: DapBreakpointSpec) => {
       const session = controller?.current;
       if (session === undefined) return;
       const current = debugBreakpoints.get(session.path) ?? [];
-      const next = current.map((spec): DapBreakpointSpec => {
-        if (spec.line !== line) return spec;
-        if (condition.length > 0) return { ...spec, condition };
-        // Condição apagada: a spec volta sem o campo (o tipo é `exactOptionalPropertyTypes`).
-        return {
-          line: spec.line,
-          ...(spec.hitCondition !== undefined ? { hitCondition: spec.hitCondition } : {}),
-          ...(spec.logMessage !== undefined ? { logMessage: spec.logMessage } : {}),
-        };
-      });
+      const next = current.map((candidate): DapBreakpointSpec =>
+        candidate.line === line ? spec : candidate,
+      );
       applyBreakpoints(session.path, next, session.handle);
     });
     debugView.onBreakpointRemove((line: number) => {
@@ -3853,15 +4188,27 @@ export async function bootRenderer(): Promise<boolean> {
     referencesPopup = { isOpen: false, open: () => {}, close: () => {}, dispose: () => {} };
   }
 
-  attachInputListeners(surface, viewport, renderer, controller, findBar, palette, bridge, completion, hoverTooltip, signatureHelpPopup, documentSymbolsPopup, referencesPopup);
+  attachInputListeners(surface, viewport, renderer, controller, findBar, palette, bridge, completion, hoverTooltip, signatureHelpPopup, documentSymbolsPopup, referencesPopup, packageSnippets);
 
   // Minimap (P2#9): as cores vêm do tema ativo — sem isso a faixa fica preta no tema claro.
+  //
+  // O minimap desenha **uma linha por linha do documento** ⇒ ele precisa do offset da
+  // rolagem em **linhas**. Com soft wrap, o offset real é contado em rows visuais: o
+  // proxy abaixo traduz (o resto — range visível e `scrollTo` — é o do viewport real).
+  const minimapViewport: Viewport & { scrollOffsetPx(): number } = {
+    visibleLineRange: () => viewport.visibleLineRange(),
+    subscribe: (observer) => viewport.subscribe(observer),
+    scrollTo: (line, opts) => viewport.scrollTo(line, opts),
+    takeDamage: () => viewport.takeDamage(),
+    dispose: () => viewport.dispose(),
+    scrollOffsetPx: () => renderer.logicalScrollOffsetPx(),
+  };
   const minimap = attachMinimap({
     source: {
       lineCount: () => controller?.current?.source.lineCount() ?? source.lineCount(),
       line: (i: number) => controller?.current?.source.line(i) ?? source.line(i),
     },
-    viewport,
+    viewport: minimapViewport,
     lineHeight: Math.ceil(TEXT_STYLE.sizePx * 1.4),
     getViewportHeight: () => renderer.viewportHeight,
     colors: () => {
@@ -4214,9 +4561,13 @@ function attachInputListeners(
   signatureHelpPopup: SignatureHelpBinding,
   documentSymbolsPopup: DocumentSymbolsBinding,
   referencesPopup: ReferencesPopupBinding,
+  /** Snippets de pacote por trigger (lowercased) — cacheados no boot (ver `bootRenderer`). */
+  packageSnippets: PackageSnippetIndex,
 ): void {
   const lineHeight = Math.ceil(TEXT_STYLE.sizePx * 1.4);
-  const currentLine = (): number => Math.floor(viewport.scrollOffsetPx() / lineHeight);
+  // A 1ª linha **visível** (o `scrollTo` do viewport é em linhas): com soft wrap o offset
+  // da rolagem é contado em rows visuais ⇒ a linha é a que contém a 1ª row.
+  const currentLine = (): number => renderer.firstVisibleLine();
 
   // Os popups de contexto num lugar só — para garantir exclusividade (um por vez).
   const popups: ContextPopups = {
@@ -4301,7 +4652,7 @@ function attachInputListeners(
     const gutterW = renderer.getGutterWidth?.() ?? 48;
     if (x < gutterW) {
       const y = event.clientY - rect.top;
-      const line = Math.floor((y + viewport.scrollOffsetPx() - TEXT_STYLE.sizePx * 0.7) / lineHeight);
+      const line = renderer.lineAtCanvasY(y);
       if (line >= 0 && session) {
         const folds = foldingStates.get(session.handle);
         if (folds !== undefined) {
@@ -4318,7 +4669,9 @@ function attachInputListeners(
       }
     }
     const y = event.clientY - rect.top;
-    const line = Math.floor((y + viewport.scrollOffsetPx() - TEXT_STYLE.sizePx * 0.7) / lineHeight);
+    // A linha sob o mouse (com soft wrap, o Y do canvas é uma **row** — o renderer
+    // converte para a linha lógica).
+    const line = renderer.lineAtCanvasY(y);
     if (line < 0 || line >= session.source.lineCount()) return;
     const text = session.source.line(line);
     const approxCharW = TEXT_STYLE.sizePx * 0.6;
@@ -4368,7 +4721,7 @@ function attachInputListeners(
     const rect = surface.getBoundingClientRect();
     const x = event.clientX - rect.left;
     const y = event.clientY - rect.top;
-    const line = Math.floor((y + viewport.scrollOffsetPx() - TEXT_STYLE.sizePx * 0.7) / lineHeight);
+    const line = renderer.lineAtCanvasY(y);
     if (line < 0) { mouseDragAnchor = undefined; return; }
     const clampedLine = Math.min(line, session.source.lineCount() - 1);
     const text = session.source.line(clampedLine);
@@ -4440,7 +4793,7 @@ function attachInputListeners(
       const rect = surface.getBoundingClientRect();
       const x = event.clientX - rect.left;
       const y = event.clientY - rect.top;
-      const line = Math.floor((y + viewport.scrollOffsetPx() - TEXT_STYLE.sizePx * 0.7) / lineHeight);
+      const line = renderer.lineAtCanvasY(y);
       if (line < 0 || line >= session.source.lineCount()) return;
       const text = session.source.line(line);
       const approxCharW = TEXT_STYLE.sizePx * 0.6;
@@ -4482,7 +4835,9 @@ function attachInputListeners(
           const gutterDigits = Math.max(1, Math.floor(Math.log10(Math.max(1, session.source.lineCount()))) + 1);
           const gutterW = gutterDigits * 9 + 16;
           const x = (gutterW + 8) + pos.column * charW;
-          const y = (pos.line * lineHeightVal - scrollPx + lineHeightVal) + 8;
+          // Âncora vertical: a **row visual** da linha do caret (com soft wrap, a row de
+          // uma linha não é o seu índice).
+          const y = (renderer.visualRowOfLine(pos.line) * lineHeightVal - scrollPx + lineHeightVal) + 8;
           // Exclusividade: fecha os popups de contexto abertos (completion, hover, etc.).
           closeContextPopups(popups);
           completion.open(items, (item) => {
@@ -4613,7 +4968,9 @@ function attachInputListeners(
             const gutterDigits = Math.max(1, Math.floor(Math.log10(Math.max(1, session.source.lineCount()))) + 1);
             const gutterW = gutterDigits * 9 + 16;
             const x = (gutterW + 8) + pos.column * charW;
-            const y = (pos.line * lineHeightVal - scrollPx + lineHeightVal) + 8;
+            // Âncora vertical: a **row visual** da linha do caret (com soft wrap, a row de
+            // uma linha não é o seu índice).
+            const y = (renderer.visualRowOfLine(pos.line) * lineHeightVal - scrollPx + lineHeightVal) + 8;
             // Exclusividade: fecha os popups de contexto abertos antes de abrir este.
             closeContextPopups(popups);
             signatureHelpPopup.show(help, x, y);
@@ -4666,7 +5023,7 @@ function attachInputListeners(
           if (actions.length === 0) return;
           // Exclusividade: fecha os popups de contexto abertos (e remove o code actions órfão).
           closeContextPopups(popups);
-          showCodeActionsPopup(actions, session, viewport, controller, bridge);
+          showCodeActionsPopup(actions, session, viewport, controller, bridge, renderer);
         } catch (error) {
           console.warn("Scribe: falha ao buscar code actions", error);
         }
@@ -4726,6 +5083,57 @@ function attachInputListeners(
       viewport.scrollTo(targetLine);
       scheduleInlayHintRefresh();
       setDocStatus(`linha ${lineNum}`);
+      renderer.start();
+      return;
+    }
+    // Ctrl+D: seleciona a **próxima ocorrência** da palavra sob o cursor e **acrescenta** um
+    // cursor (multi-cursor ao estilo VS Code, P2#5).
+    // - 1ª vez: a palavra sob o cursor vira a seleção primária;
+    // - vezes seguintes: a ocorrência seguinte é acrescentada e passa a ser a primária;
+    // - sem mais ocorrências: nada acontece (sem erro, sem toast) — o conjunto continua.
+    if (primary && !event.shiftKey && !event.altKey && (event.key === "d" || event.key === "D")) {
+      event.preventDefault();
+      const session = controller?.current;
+      if (session === undefined) return;
+      const next = selectNextOccurrence(session.selections, session.source.text);
+      if (next === undefined) return;
+      session.selections = next;
+      const nextPrimary = next[0];
+      if (nextPrimary === undefined) return;
+      session.selection = nextPrimary;
+      session.caret = nextPrimary.active;
+      renderer.setSelection(session.selection);
+      renderer.setSelections(session.selections);
+      updateCaretStatus(session.source, session.caret);
+      renderer.start();
+      return;
+    }
+    // Ctrl+Shift+L: **seleciona todas** as ocorrências do termo (da seleção atual ou da
+    // palavra sob o cursor) — o conjunto de seleções é substituído pelas ocorrências.
+    if (primary && event.shiftKey && !event.altKey && (event.key === "l" || event.key === "L")) {
+      event.preventDefault();
+      const session = controller?.current;
+      if (session === undefined) return;
+      const text = session.source.text;
+      const current = session.selections[0] ?? session.selection;
+      let needle = "";
+      if (!SelectionOps.isCollapsed(current)) {
+        const { start, end } = SelectionOps.normalized(current);
+        needle = text.slice(start, end);
+      } else {
+        needle = wordAt(text, current.active)?.text ?? "";
+      }
+      if (needle.length === 0) return;
+      const next = selectAllOccurrences(session.selections, text, needle);
+      if (next === session.selections) return;
+      session.selections = next;
+      const nextPrimary = next[0];
+      if (nextPrimary === undefined) return;
+      session.selection = nextPrimary;
+      session.caret = nextPrimary.active;
+      renderer.setSelection(session.selection);
+      renderer.setSelections(session.selections);
+      updateCaretStatus(session.source, session.caret);
       renderer.start();
       return;
     }
@@ -4802,7 +5210,10 @@ function attachInputListeners(
         while (wordStart >= 0 && /[a-zA-Z0-9_]/.test(text[wordStart]!)) wordStart--;
         wordStart++; // first char of word
         const word = text.slice(wordStart, session.caret);
-        const snippet = findSnippet(word);
+        // Snippets de **pacote** (`.sublime-snippet`) têm precedência sobre os embutidos: um
+        // pacote do usuário pode redefinir um trigger embutido. A expansão usa o **mesmo**
+        // pipeline (`parseSnippet`) — tab stops, escolhas, espelhos e transformações iguais.
+        const snippet = resolveSnippetForWord(word, packageSnippets);
         if (snippet !== undefined) {
           event.preventDefault();
           // Variáveis TM: o contexto é montado **antes** da expansão (o texto selecionado,
@@ -4931,6 +5342,39 @@ function attachInputListeners(
       return;
     }
 
+    // Alt+Shift+↑/↓: **acrescenta** um cursor na linha vizinha (preservando a coluna) —
+    // multi-cursor ao estilo VS Code (P2#5). No limite do documento não faz nada.
+    if (
+      event.altKey &&
+      event.shiftKey &&
+      (event.key === "ArrowUp" || event.key === "ArrowDown")
+    ) {
+      event.preventDefault();
+      const session = controller?.current;
+      if (session === undefined) return;
+      const next =
+        event.key === "ArrowUp"
+          ? cursorAbove(session.selections, session.source)
+          : cursorBelow(session.selections, session.source);
+      // Limite do documento: o conjunto não mudou — nada a fazer.
+      if (next.length === session.selections.length) return;
+      session.selections = next;
+      const nextPrimary = next[0];
+      if (nextPrimary === undefined) return;
+      session.selection = nextPrimary;
+      session.caret = nextPrimary.active;
+      renderer.setSelection(session.selection);
+      renderer.setSelections(session.selections);
+      updateCaretStatus(session.source, session.caret);
+      const caretLine = session.source.positionAt(session.caret).line;
+      const visible = viewport.visibleLineRange();
+      if (caretLine < visible.first || caretLine >= visible.first + visible.count) {
+        viewport.scrollTo(caretLine);
+      }
+      renderer.start();
+      return;
+    }
+
     // Navegação por setas e seleção (Shift+seta, P1#1)
     if (event.key === "ArrowLeft" || event.key === "ArrowRight" || event.key === "ArrowUp" || event.key === "ArrowDown") {
       event.preventDefault();
@@ -4963,14 +5407,18 @@ function attachInputListeners(
         }
       }
 
+      // Multi-cursor (P2#5): com N cursores a seta mexe **só no cursor primário** — os
+      // extras ficam onde estão (o conjunto **não** colapsa para 1).
+      const extras = session.selections.length > 1 ? session.selections.slice(1) : [];
       if (event.shiftKey) {
-        // Shift+seta: estende a seleção
-        session.selection = { anchor: session.selection.anchor, active: newOffset };
-        session.selections = [session.selection] as SelectionSet;
+        // Shift+seta: estende a seleção do cursor primário
+        const primary = session.selections[0] ?? session.selection;
+        session.selection = { anchor: primary.anchor, active: newOffset };
+        session.selections = [session.selection, ...extras];
       } else {
-        // Seta sem Shift: colapsa a seleção
+        // Seta sem Shift: colapsa a seleção do cursor primário
         session.selection = SelectionOps.collapsed(newOffset);
-        session.selections = SelectionSetOps.singular(newOffset);
+        session.selections = [session.selection, ...extras];
       }
       session.caret = newOffset;
       renderer.setSelection(session.selection);
@@ -5167,6 +5615,7 @@ function showCodeActionsPopup(
   viewport: ViewportImpl,
   controller: DocumentController | undefined,
   bridge: ScribeBridge | undefined,
+  renderer: ScribeRenderer,
 ): void {
   // Remove o popup anterior (se houver) — nunca dois code actions na tela.
   removeCodeActionsPopup();
@@ -5198,7 +5647,8 @@ function showCodeActionsPopup(
     const lineHeight = Math.ceil(TEXT_STYLE.sizePx * 1.4);
     const charW = TEXT_STYLE.sizePx * 0.6;
     const x = r.left + 12 + pos.column * charW;
-    const y = r.top + (pos.line * lineHeight - viewport.scrollOffsetPx() + lineHeight) + 8;
+    const y =
+      r.top + (renderer.visualRowOfLine(pos.line) * lineHeight - viewport.scrollOffsetPx() + lineHeight) + 8;
     popup.style.left = `${Math.min(x, window.innerWidth - 220)}px`;
     popup.style.top = `${Math.min(y, window.innerHeight - 200)}px`;
   } else {

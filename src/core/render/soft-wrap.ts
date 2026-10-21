@@ -28,6 +28,340 @@ export interface WrapSegment {
   readonly width: number;
 }
 
+/* ───────────────────────────── malha visual (rows) ───────────────────────────── */
+
+/**
+ * Fonte mínima de linhas — a mesma forma de `LineSource` (do `scene.ts`), declarada aqui
+ * porque o `soft-wrap` **não** pode depender do `scene` (import circular: `scene` → `soft-wrap`).
+ */
+export interface VisualLineSource {
+  lineCount(): number;
+  line(index: number): string;
+}
+
+/**
+ * Um segmento de wrap **posicionado** na malha visual: a row que ele ocupa e o intervalo
+ * (code units UTF-16) que ele cobre dentro do texto da linha.
+ */
+export interface VisualRowSegment {
+  /** Row visual (índice absoluto da row, contando as rows de wrap das linhas anteriores). */
+  readonly row: number;
+  /** Índice do segmento dentro da linha lógica (0 = primeiro). */
+  readonly segmentIndex: number;
+  /** Offset (code units UTF-16) do início do segmento no texto da linha. */
+  readonly start: number;
+  /** Offset (code units UTF-16) do fim do segmento (exclusive). */
+  readonly end: number;
+  /** Texto do segmento (`line.slice(start, end)`). */
+  readonly text: string;
+}
+
+/**
+ * Onde um offset (coluna) cai na malha visual de uma linha lógica.
+ */
+export interface VisualRowInfo {
+  /** Row visual do segmento que contém o offset. */
+  readonly row: number;
+  /** Offset (code units UTF-16) do início do segmento dentro da linha. */
+  readonly segmentOffset: number;
+  /** Coluna (code units UTF-16) do offset **dentro** do segmento. */
+  readonly column: number;
+  /** Índice do segmento dentro da linha lógica. */
+  readonly segmentIndex: number;
+}
+
+/** Opções de `buildVisualRowMap`. */
+export interface VisualRowMapOptions {
+  /**
+   * Row visual da **primeira** linha da faixa.
+   * Default: `firstLine` (ancoragem legada — a row base da primeira linha visível é o seu
+   * índice lógico). Só faz sentido com soft wrap (`wrapWidth > 0`).
+   */
+  readonly firstRow?: number;
+  /**
+   * Linhas **colapsadas** (folding): não são desenhadas, mas reservam 1 row (compatível com o
+   * caminho sem wrap, onde a row de uma linha é o seu índice lógico).
+   */
+  readonly collapsedLines?: ReadonlySet<number>;
+}
+
+/**
+ * Malha visual de uma **faixa** de linhas lógicas: para cada linha, os segmentos de wrap com a
+ * row que cada um ocupa.
+ *
+ * É a unidade de trabalho do render: o `buildInstances` calcula a malha **uma vez** por frame
+ * (O(faixa visível)) e reusa-a para o texto, o gutter, o caret, a seleção e a busca.
+ */
+export interface VisualRowMap {
+  /** Primeira linha lógica da faixa. */
+  readonly firstLine: number;
+  /** Row visual da primeira linha lógica da faixa. */
+  readonly firstRow: number;
+  /** Segmentos **desenháveis** de uma linha da faixa (vazio se a linha está colapsada/fora). */
+  segmentsOf(line: number): readonly VisualRowSegment[];
+  /**
+   * Segmentos de uma linha para o desenho de **ranges** (caret, seleção, busca).
+   *
+   * Para uma linha **colapsada** (folding) devolve um segmento único cobrindo a linha inteira,
+   * na row reservada — assim caret/seleção/busca continuam visíveis como no modo sem wrap.
+   */
+  paintSegmentsOf(line: number): readonly VisualRowSegment[];
+  /** Row (primeira) de uma linha da faixa — a row reservada, se a linha está colapsada. */
+  rowOfLine(line: number): number | undefined;
+  /** Localiza um offset (coluna) dentro de uma linha da faixa. */
+  locate(line: number, column: number): VisualRowInfo | undefined;
+}
+
+const EMPTY_SEGMENTS: readonly VisualRowSegment[] = [];
+
+/**
+ * Constrói a malha visual de uma faixa de linhas lógicas.
+ *
+ * ⚠️ **Custo**: O(nº de linhas da faixa) — **não** O(documento). A row visual de uma linha depende
+ * de quantos segmentos as linhas *anteriores* têm; por isso a faixa começa numa row base
+ * conhecida (`options.firstRow`) e o resto é acumulado a partir dali.
+ *
+ * @param source Fonte das linhas.
+ * @param firstLine Primeira linha lógica da faixa.
+ * @param count Nº de linhas da faixa.
+ * @param wrapWidth Largura de wrap (px). `≤ 0` = sem wrap (1 row por linha lógica).
+ * @param measure Medidor de largura (obrigatório só quando `wrapWidth > 0`).
+ * @param options Row base da faixa + linhas colapsadas.
+ */
+export function buildVisualRowMap(
+  source: VisualLineSource,
+  firstLine: number,
+  count: number,
+  wrapWidth: number,
+  measure: ((text: string) => number) | undefined,
+  options?: VisualRowMapOptions,
+): VisualRowMap {
+  const first = Math.max(0, firstLine);
+  const last = first + Math.max(0, count);
+  const collapsed = options?.collapsedLines;
+  const firstRow = options?.firstRow ?? first;
+  // Sem wrap (ou sem medidor) cada linha ocupa exatamente 1 row.
+  const wrap = wrapWidth > 0 && measure !== undefined;
+  const meas: (text: string) => number = measure ?? ((): number => 0);
+
+  const byLine = new Map<number, VisualRowSegment[]>();
+  const collapsedSegments = new Map<number, VisualRowSegment[]>();
+  let row = firstRow;
+
+  for (let line = first; line < last; line++) {
+    const text = source.line(line);
+    if (collapsed !== undefined && collapsed.has(line)) {
+      // Linha colapsada: não é desenhada, mas reserva 1 row.
+      collapsedSegments.set(line, [{ row, segmentIndex: 0, start: 0, end: text.length, text }]);
+      row += 1;
+      continue;
+    }
+    if (!wrap) {
+      byLine.set(line, [{ row, segmentIndex: 0, start: 0, end: text.length, text }]);
+      row += 1;
+      continue;
+    }
+    const segs = wrapLine(text, wrapWidth, meas);
+    const mapped: VisualRowSegment[] = [];
+    for (let i = 0; i < segs.length; i++) {
+      const seg = segs[i]!;
+      mapped.push({ row: row + i, segmentIndex: i, start: seg.start, end: seg.end, text: seg.text });
+    }
+    byLine.set(line, mapped);
+    row += mapped.length;
+  }
+
+  return {
+    firstLine: first,
+    firstRow,
+    segmentsOf: (line: number): readonly VisualRowSegment[] => byLine.get(line) ?? EMPTY_SEGMENTS,
+    paintSegmentsOf: (line: number): readonly VisualRowSegment[] =>
+      byLine.get(line) ?? collapsedSegments.get(line) ?? EMPTY_SEGMENTS,
+    rowOfLine: (line: number): number | undefined => {
+      const segs = byLine.get(line);
+      if (segs !== undefined) return segs[0]?.row;
+      return collapsedSegments.get(line)?.[0]?.row;
+    },
+    locate: (line: number, column: number): VisualRowInfo | undefined => {
+      const segs = byLine.get(line);
+      if (segs === undefined || segs.length === 0) return undefined;
+      return locateInSegments(segs, column);
+    },
+  };
+}
+
+/**
+ * Localiza um offset (coluna) dentro dos segmentos de uma linha.
+ *
+ * Regra: o offset cai no **último** segmento cujo início é ≤ o offset; se o offset está numa
+ * lacuna (espaço pulado na quebra), ele fica no fim do segmento anterior.
+ */
+function locateInSegments(segs: readonly VisualRowSegment[], column: number): VisualRowInfo {
+  let index = 0;
+  for (let i = 0; i < segs.length; i++) {
+    const seg = segs[i]!;
+    if (column < seg.start) break;
+    index = i;
+    if (column < seg.end) break;
+  }
+  const seg = segs[index]!;
+  return {
+    row: seg.row,
+    segmentOffset: seg.start,
+    column: Math.max(0, Math.min(column, seg.end) - seg.start),
+    segmentIndex: seg.segmentIndex,
+  };
+}
+
+/**
+ * Row visual de uma linha lógica (e do offset dentro dela).
+ *
+ * ⚠️ **Custo**: O(linhas até `line`) — a row de uma linha depende de quantos segmentos as
+ * linhas anteriores têm. **Não** chame isto por linha a cada quadro: use `buildVisualRowMap`
+ * (faixa visível) ou `VisualRowIndex` (cache incremental).
+ *
+ * @param source Fonte das linhas.
+ * @param line Linha lógica (0-based).
+ * @param wrapWidth Largura de wrap (px). `≤ 0` = sem wrap.
+ * @param measure Medidor de largura.
+ * @param column Offset (code units UTF-16) dentro da linha. Default: `0`.
+ */
+export function visualRowOf(
+  source: VisualLineSource,
+  line: number,
+  wrapWidth: number,
+  measure: (text: string) => number,
+  column = 0,
+): VisualRowInfo {
+  const total = source.lineCount();
+  const target = Math.max(0, Math.min(line, Math.max(0, total - 1)));
+  let row = 0;
+  for (let i = 0; i < target; i++) {
+    row += wrapWidth > 0 ? wrapLine(source.line(i), wrapWidth, measure).length : 1;
+  }
+  const segs: VisualRowSegment[] =
+    wrapWidth > 0
+      ? wrapLine(source.line(target), wrapWidth, measure).map((seg, i) => ({
+          row: row + i,
+          segmentIndex: i,
+          start: seg.start,
+          end: seg.end,
+          text: seg.text,
+        }))
+      : [{ row, segmentIndex: 0, start: 0, end: source.line(target).length, text: source.line(target) }];
+  return locateInSegments(segs, column);
+}
+
+/**
+ * Índice **incremental** de rows visuais: cacheia a row inicial de cada linha já visitada.
+ *
+ * O cálculo ingênuo (`visualRowOf`) é O(documento) por chamada — inviável por quadro. Este
+ * índice faz o trabalho total em O(documento) **uma vez** e responde O(1) amortizado depois
+ * (a row de uma linha já visitada é um `array` lookup).
+ *
+ * O renderer mantém um índice por documento e o invalida quando o texto muda.
+ */
+export class VisualRowIndex {
+  private readonly source: VisualLineSource;
+  private readonly wrapWidth: number;
+  private readonly measure: (text: string) => number;
+  /** Row visual no início de cada linha (crescente). `rowStarts[0] = 0`. */
+  private readonly rowStarts: number[] = [0];
+  /** Segmentos por linha (cacheados; no máximo `segmentCacheLimit` linhas). */
+  private readonly segmentCache = new Map<number, readonly VisualRowSegment[]>();
+
+  /** Nº máximo de linhas com segmentos em cache (memória × simplicity). */
+  static readonly segmentCacheLimit = 512;
+
+  constructor(
+    source: VisualLineSource,
+    wrapWidth: number,
+    measure: (text: string) => number,
+  ) {
+    this.source = source;
+    this.wrapWidth = wrapWidth;
+    this.measure = measure;
+  }
+
+  /** Row visual da **primeira** row da linha lógica `line` (absolute no documento). */
+  rowOfLine(line: number): number {
+    const total = this.source.lineCount();
+    const target = Math.max(0, Math.min(line, total));
+    this.ensureRows(target);
+    return this.rowStarts[target] ?? 0;
+  }
+
+  /** Total de rows visuais do documento. */
+  get rowCount(): number {
+    return this.rowOfLine(this.source.lineCount());
+  }
+
+  /** Linha lógica que contém a row visual `row`. */
+  lineOfRow(row: number): number {
+    const total = this.source.lineCount();
+    this.ensureRows(total);
+    let lo = 0;
+    let hi = total;
+    // Último `i` com `rowStarts[i] <= row`.
+    while (lo < hi) {
+      const mid = (lo + hi + 1) >>> 1;
+      if ((this.rowStarts[mid] ?? 0) <= row) lo = mid;
+      else hi = mid - 1;
+    }
+    return Math.min(lo, Math.max(0, total - 1));
+  }
+
+  /** Segmentos (com row) de uma linha. */
+  segmentsOf(line: number): readonly VisualRowSegment[] {
+    const cached = this.segmentCache.get(line);
+    if (cached !== undefined) return cached;
+    const text = this.source.line(line);
+    const segs: VisualRowSegment[] =
+      this.wrapWidth > 0
+        ? wrapLine(text, this.wrapWidth, this.measure).map((seg, i) => ({
+            row: 0,
+            segmentIndex: i,
+            start: seg.start,
+            end: seg.end,
+            text: seg.text,
+          }))
+        : [{ row: 0, segmentIndex: 0, start: 0, end: text.length, text }];
+    if (this.segmentCache.size >= VisualRowIndex.segmentCacheLimit) this.segmentCache.clear();
+    this.segmentCache.set(line, segs);
+    return segs;
+  }
+
+  /** Localiza um offset (coluna) dentro de uma linha lógica. */
+  locate(line: number, column: number): VisualRowInfo | undefined {
+    const total = this.source.lineCount();
+    if (line < 0 || line >= total) return undefined;
+    const base = this.rowOfLine(line);
+    const segs = this.segmentsOf(line).map((seg) => ({ ...seg, row: base + seg.segmentIndex }));
+    if (segs.length === 0) return undefined;
+    return locateInSegments(segs, column);
+  }
+
+  /**
+   * Invalida o cache a partir de `fromLine` (use quando o texto muda).
+   * Sem argumento, invalida tudo.
+   */
+  invalidate(fromLine = 0): void {
+    const keep = Math.max(0, Math.min(fromLine, this.rowStarts.length - 1));
+    this.rowStarts.length = keep + 1;
+    this.segmentCache.clear();
+  }
+
+  /** Garante que `rowStarts` cobre as linhas `0..upto`. */
+  private ensureRows(upto: number): void {
+    while (this.rowStarts.length <= upto) {
+      const line = this.rowStarts.length - 1;
+      const segs = this.segmentsOf(line);
+      const next = (this.rowStarts[line] ?? 0) + segs.length;
+      this.rowStarts.push(next);
+    }
+  }
+}
+
 /**
  * Quebra visual: divide o `texto` em segmentos que cabem em `maxWidth` px.
  *

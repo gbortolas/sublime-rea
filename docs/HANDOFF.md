@@ -1,8 +1,8 @@
 # HANDOFF — sublime-rea
 
 > **Documento de handoff entre sessões** (leia antes de retomar). Atualizado em **2026-10-21**.
-> Status: **🐛 varredura de usabilidade ✅ · ✨ 3 features (lupa, multi-cursor, snippets) ✅**<br>
-> Próximo: **snippets (fiação do dropdown) · Ctrl+D (criar cursores) · pilha de undo por documento**
+> Status: **🐛 varredura de usabilidade ✅ · ✨ 3 features (lupa, multi-cursor, snippets) ✅ · ✨ 5 features (undo por documento, logpoints, rows visuais, Ctrl+D, snippets de pacote) ✅**<br>
+> Próximo: **snippets de pacote (fiação no renderer) · DAP — adaptador Node (vscode-js-debug)**
 
 ---
 
@@ -61,12 +61,11 @@ Sem o deadline maior, `open_binary`/`analyze` **via MCP** volta a estourar os 33
 > Os 7 bugs de usabilidade achados (e o crash que matava o app) estão em
 > [§🐛 Varredura de usabilidade](#-varredura-de-usabilidade-2026-10-21).
 
-1. **📝 Snippets — próximos passos** — snippets de **pacote** (`.sublime-snippet` via
-   `PackageResolver`) e expansão de snippets LSP (`insertTextFormat: 2`) no popup de completação.
-2. **⌨️ Ctrl+D / Alt+Shift+Up** — criar cursores extras (hoje só o **Ctrl+click** cria).
-3. **🗃️ Pilha de undo por documento** — hoje a pilha é **global**: desfazer na aba B pode
-   aplicar deltas da aba A no buffer de B (bug pré-existente, **não** corrigido).
-4. **🧩 DAP — adaptador Node** (`vscode-js-debug`) — exige download/empacotamento; decidir antes.
+1. **📝 Snippets — próximos passos** — expansão de snippets **LSP** (`insertTextFormat: 2`) no popup
+   de completação e leitura de `scope`/variáveis do formato Sublime nos snippets de pacote.
+2. **🧩 DAP — adaptador Node** (`vscode-js-debug`) — exige download/empacotamento; decidir antes.
+3. **🖥️ Folding × soft wrap** — o `VisualRowIndex` não conhece linhas colapsadas ⇒ uma linha
+   dobrada que quebra desalinha a contagem de rows (limitação conhecida, declarada).
 
 > ✅ **Pegadinha resolvida (2026-10-16, P3.9):** o `setup.py` agora **detecta** um JDK ≥ 21
 > compatível (`JAVA_HOME`, PATH, sdkman, `/usr/lib/jvm`) e escreve um **`export JAVA_HOME=…` ativo**
@@ -1058,6 +1057,26 @@ tornam o caminho alcançável: `const` (com `${1|let,const,var|}`) e `file` (com
 **E2E por CDP** (`/tmp/opencode/cdp-choice.mjs`): digitar `const` + Tab expande para
 `const let name = value;` e abre o dropdown com `["let","const","var"]`; **seta + Enter** troca
 para `const const name = value;` e o popup sai do DOM ✓.
+
+---
+
+## ✨ 5 features (2026-10-21, madrugada)
+
+| # | Feature | Onde | Testes |
+|---|---|---|---|
+| 1 | **🗃️ Pilha de undo por documento** — a pilha era global (desfazer na aba B corrompia a A) | `core/command/undo-stack.ts` (`scopeId`, `undoDepthFor`), `command-bus.ts`, `core/editor/editor-core.ts` | +12 |
+| 2 | **🧩 DAP: logpoints + hitCondition** — 3 campos editáveis no painel, badge "log", `logMessage` chega ao adaptador | `shared/dap-contract.ts`, `core/dap/*`, `renderer/debug-panel.ts` | +25 |
+| 3 | **🖥️ Soft wrap em rows visuais** — caret/seleção/busca/gutter/diagnósticos na row certa; scroll em rows | `core/render/soft-wrap.ts` (`VisualRowIndex`), `scene.ts`, `viewport.ts`, `renderer/main.ts` | +40 |
+| 4 | **⌨️ Ctrl+D / Alt+Shift+↑↓ / Ctrl+Shift+L** — multi-cursor estilo VS Code | NOVO `renderer/multi-cursor-ops.ts`, `renderer/main.ts` | +26 |
+| 5 | **📦 Snippets de pacote** — `.sublime-snippet` dos pacotes (`user > app > os`) | NOVO `core/packages/package-snippets.ts`, `shared/snippet-contract.ts`, IPC `snippets.list` | +19 |
+
+**Gates:** `typecheck`/`lint`/`test`/`build` exit 0 · **958 testes / 70 arquivos** · E2E de
+usabilidade **TUDO OK** (o app continua íntegro depois de tudo).
+
+**Limitações declaradas:** o `VisualRowIndex` não conhece **linhas colapsadas** (folding) ⇒ uma
+linha dobrada que quebra em N rows desalinha a contagem em N−1; a busca do Ctrl+D é
+**case-sensitive**; o `scope` do formato Sublime não é lido; a lista de snippets de pacote só muda
+quando o índice de pacotes é reconstruído.
 
 ---
 

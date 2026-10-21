@@ -774,6 +774,27 @@ Problemas identificados ao testar o AppImage pela primeira vez:
       **E2E por CDP**: `const` + Tab → dropdown com as 3 opções → seta + Enter troca a opção ✓
       (831 testes / 64 arquivos).
 
+## ✨ 5 features (2026-10-21, madrugada)
+
+- [x] **🗃️ Pilha de undo por documento** ✅ — a pilha era **global** (desfazer na aba B aplicava os
+      deltas da aba A no buffer de B ⇒ corrupção). Agora `UndoTarget.scopeId()` escopa os passos e
+      `undoDepthFor(scope)`/`redoDepthFor(scope)` dão o estado **por documento**.
+      E2E de 2 abas provando que A não é corrompido ✓ · **873 testes**.
+- [x] **🧩 DAP: logpoints + hitCondition na UI** ✅ — o painel edita os **3** campos do breakpoint
+      (`condition`/`hitCondition`/`logMessage`) com badge de "log"; `onBreakpointSpecChange`
+      substitui `onBreakpointConditionChange`; o `logMessage` chega ao adaptador ✓ · **877 testes**.
+- [x] **🖥️ Soft wrap em rows visuais** ✅ — caret, seleção, busca, gutter e diagnósticos usam a
+      **row visual** (`VisualRowIndex` + mapper do viewport); o `vizCount` do renderer saiu do
+      laço char-a-char; o hit-test do mouse e o scroll passaram a falar em rows ✓ · **898 testes**.
+- [x] **⌨️ Ctrl+D / Alt+Shift+↑↓ / Ctrl+Shift+L** ✅ — multi-cursor estilo VS Code: o Ctrl+D
+      **acrescenta** a próxima ocorrência (limites de palavra), o Alt+Shift acrescenta cursor na
+      linha vizinha, o Ctrl+Shift+L seleciona todas; as setas mexem só no primário ✓ · **939 testes**.
+- [x] **📦 Snippets de pacote** ✅ — `.sublime-snippet` dentro dos pacotes são lidos
+      (`prefix`/`body`/`description`, precedência `user > app > os`, tetos) e expandem pelo mesmo
+      pipeline dos embutidos; IPC `snippets.list` ✓ · **958 testes**.
+
+---
+
 ## 🏠 P3 — Housekeeping (2026-10-20, bootstrap)
 
 - [x] **P3.13 — 3 bugs do `setup.py`** ✅ **fechado** (2026-10-20, achados ao rodar o bootstrap

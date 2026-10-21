@@ -4,6 +4,29 @@ Todas as mudanças notáveis neste projeto.
 
 ---
 
+## [0.5.0] — 2026-10-21
+
+### ✨ 5 features
+
+- **🗃️ Undo por documento** — a pilha de undo era **global**: desfazer na aba B aplicava os deltas
+  da aba A no buffer de B (texto corrompido). Agora cada documento tem a sua linha do tempo
+  (`UndoTarget.scopeId()`, `undoDepthFor(scope)`); `canUndo`/`canRedo` são **por documento**.
+- **🧩 DAP: logpoints + hitCondition** — o painel de depuração agora edita os **3** campos do
+  breakpoint (`condition`, `hitCondition`, `logMessage`), com badge de "log"; o `logMessage` chega
+  ao adaptador (logpoint) e o `hitCondition` limita a Nª ocorrência.
+- **🖥️ Soft wrap em rows visuais** — caret, seleção, busca, gutter e diagnósticos passam a usar a
+  **row visual** da linha quebrada (antes ficavam na row lógica ⇒ cursor fora do texto); o scroll
+  também passa a contar rows (`VisualRowIndex` + mapper do viewport).
+- **⌨️ Ctrl+D / Alt+Shift+↑↓ / Ctrl+Shift+L** — multi-cursor ao estilo VS Code: o Ctrl+D **acrescenta**
+  a próxima ocorrência da palavra sob o cursor (respeitando limites de palavra), o Alt+Shift
+  acrescenta cursor na linha vizinha e o Ctrl+Shift+L seleciona todas as ocorrências. As setas
+  passam a mexer **só no cursor primário**, sem colapsar o conjunto.
+- **📦 Snippets de pacote** — os arquivos **`.sublime-snippet`** dentro dos pacotes (`Packages/<Nome>/snippets/`)
+  são lidos (`prefix`/`body`/`description`, com precedência `user > app > os`) e passam a expandir
+  pelo mesmo pipeline dos embutidos (tab stops, escolhas, espelhos, transformações).
+
+---
+
 ## [0.4.1] — 2026-10-21
 
 ### 🐛 Varredura de usabilidade (o app estava "inutilizável")

@@ -760,6 +760,14 @@ export function createEditorCore(options: EditorCoreOptions = {}): EditorCore {
     const buffer = registry.resolve(handle);
     if (buffer === undefined) return undefined;
     return {
+      /**
+       * Escopo do documento (o handle) — é o que dá a **cada aba a sua linha do tempo**: o
+       * `UndoStack` só aplica, no `undo`/`redo`, os passos do mesmo escopo. Sem isso, desfazer
+       * na aba B aplicava os deltas da aba A no buffer de B (texto corrompido).
+       */
+      scopeId(): string {
+        return String(handle);
+      },
       applyEdits(edits: readonly Edit[], origin: EditOrigin): void {
         for (const edit of edits) {
           buffer.apply({ from: edit.at, removed: edit.remove, inserted: edit.insert }, origin);
@@ -1266,8 +1274,8 @@ export function createEditorCore(options: EditorCoreOptions = {}): EditorCore {
     return {
       revision: buffer.revision,
       text: buffer.text(),
-      canUndo: commands.undoStack.undoDepth > 0,
-      canRedo: commands.undoStack.redoDepth > 0,
+      canUndo: commands.undoStack.undoDepthFor(String(handle)) > 0,
+      canRedo: commands.undoStack.redoDepthFor(String(handle)) > 0,
     };
   }
 
@@ -1322,8 +1330,8 @@ export function createEditorCore(options: EditorCoreOptions = {}): EditorCore {
     return {
       revision: buffer.revision,
       text: buffer.text(),
-      canUndo: commands.undoStack.undoDepth > 0,
-      canRedo: commands.undoStack.redoDepth > 0,
+      canUndo: commands.undoStack.undoDepthFor(String(handle)) > 0,
+      canRedo: commands.undoStack.redoDepthFor(String(handle)) > 0,
     };
   }
 
@@ -1389,8 +1397,8 @@ export function createEditorCore(options: EditorCoreOptions = {}): EditorCore {
         return {
           revision: buffer.revision,
           text: buffer.text(),
-          canUndo: commands.undoStack.undoDepth > 0,
-          canRedo: commands.undoStack.redoDepth > 0,
+          canUndo: commands.undoStack.undoDepthFor(String(handle)) > 0,
+          canRedo: commands.undoStack.redoDepthFor(String(handle)) > 0,
         };
       });
     } finally {
@@ -1402,15 +1410,19 @@ export function createEditorCore(options: EditorCoreOptions = {}): EditorCore {
    * Estado de undo/redo do documento + cursor. A pilha (`UndoStack`) é do `CommandBus`; aqui só
    * lemos as profundidades (não inventamos API que o núcleo não suporta).
    *
+   * `canUndo`/`canRedo` são do **documento** (do escopo do handle) — não o total global: a pilha
+   * guarda as linhas do tempo de todos os documentos abertos, mas cada aba só vê a sua.
+   *
    * `selections` é o **conjunto** de cursores corrente (multi-cursor, P2#5) — depois de um
    * `Ctrl+Z` são os N cursores restaurados às posições originais.
    */
   function undoStateOf(handle: DocumentHandle): DocumentUndoState {
     const buffer = resolveBuffer(handle);
     const stack = commands.undoStack;
+    const scope = String(handle);
     return {
-      canUndo: stack.undoDepth > 0,
-      canRedo: stack.redoDepth > 0,
+      canUndo: stack.undoDepthFor(scope) > 0,
+      canRedo: stack.redoDepthFor(scope) > 0,
       revision: buffer.revision,
       caret: state.caret,
       selection: state.selection,
@@ -1422,6 +1434,9 @@ export function createEditorCore(options: EditorCoreOptions = {}): EditorCore {
    * Desfaz/refaz dentro do escopo do documento (espelha `runInsert`): fixa o `pendingHandle` para
    * que o alvo do `CommandBus` aponte ao documento certo, aplica o inverso pelo `UndoStack` e
    * devolve o estado observável. Serializado na mesma fila de escrita dos inserts.
+   *
+   * O `pendingHandle` também define o **escopo** do passo (`String(handle)`) — por isso o undo
+   * aqui só desfaz o que foi feito **neste** documento (cada aba tem a sua linha do tempo).
    */
   async function runHistory(
     handle: DocumentHandle,

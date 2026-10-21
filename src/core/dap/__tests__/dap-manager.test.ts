@@ -503,6 +503,58 @@ describe("DapManager", () => {
     manager.dispose();
   });
 
+  // ── Logpoints e condição de paradas ───────────────────────────────────────────────────────
+
+  it("o logpoint e a hitCondition chegam ao adaptador no setBreakpoints", async () => {
+    // Sem isto, a UI dos logpoints é decorativa: a mensagem nunca chegaria ao adaptador.
+    const manager = new DapManager([config()]);
+    const sent: unknown[] = [];
+    autoRespond(proc, (body) => {
+      sent.push(body);
+    });
+    await expect(manager.start(config(), { program: "/tmp/main.py" })).resolves.toBe("running");
+
+    await manager.setBreakpoints("/tmp/main.py", [
+      { line: 5, hitCondition: "3", logMessage: "i = ${i}" },
+    ]);
+
+    expect(sent.length).toBe(1);
+    const args = sent[0] as
+      | { breakpoints?: { line: number; hitCondition?: string; logMessage?: string }[] }
+      | undefined;
+    expect(args?.breakpoints?.[0]).toMatchObject({
+      line: 5,
+      hitCondition: "3",
+      logMessage: "i = ${i}",
+    });
+    manager.dispose();
+  });
+
+  it("a spec do logpoint é preservada (fonte da verdade do core)", async () => {
+    const manager = new DapManager([config()]);
+    await manager.setBreakpoints("/tmp/main.py", [
+      { line: 5, hitCondition: "3", logMessage: "i = ${i}" },
+    ]);
+    expect(manager.breakpointSpecsFor("/tmp/main.py")).toEqual([
+      { line: 5, hitCondition: "3", logMessage: "i = ${i}" },
+    ]);
+    manager.dispose();
+  });
+
+  it("o breakpoint armado devolve a mensagem de log (badge de logpoint)", async () => {
+    const manager = new DapManager([config()]);
+    autoRespond(proc);
+    await expect(manager.start(config(), { program: "/tmp/main.py" })).resolves.toBe("running");
+
+    const armed = await manager.setBreakpoints("/tmp/main.py", [
+      { line: 5, logMessage: "i = ${i}" },
+    ]);
+    // A linha devolvida é a do adaptador (o mock responde 42) — o que importa aqui é a
+    // mensagem de log, que é o que o badge de logpoint mostra.
+    expect(armed[0]).toMatchObject({ logMessage: "i = ${i}", verified: true });
+    manager.dispose();
+  });
+
   // ── evaluate (watch/hover) ───────────────────────────────────────────────────────────────
 
   it("evaluate devolve valor e tipo", async () => {

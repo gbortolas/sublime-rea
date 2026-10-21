@@ -4,7 +4,7 @@
  */
 import { describe, expect, it } from "vitest";
 import type { DamageRects, Disposable } from "../../shared";
-import { ViewportImpl } from "./viewport";
+import { ViewportImpl, type VisualRowMapper } from "./viewport";
 
 class ManualFrames {
   private pending: ((now: number) => void) | null = null;
@@ -36,6 +36,8 @@ interface SetupOverrides {
   readonly viewportWidth?: number;
   readonly overscan?: number;
   readonly scrollDurationMs?: number;
+  readonly visualLineCount?: number;
+  readonly visualRowMapper?: VisualRowMapper;
 }
 
 function setup(overrides: SetupOverrides = {}): {
@@ -54,6 +56,8 @@ function setup(overrides: SetupOverrides = {}): {
     now: (): number => clock.t,
     requestFrame: frames.request,
     scrollDurationMs: overrides.scrollDurationMs ?? 0,
+    ...(overrides.visualLineCount !== undefined ? { visualLineCount: overrides.visualLineCount } : {}),
+    ...(overrides.visualRowMapper !== undefined ? { visualRowMapper: overrides.visualRowMapper } : {}),
   });
   return { viewport, frames, clock };
 }
@@ -160,5 +164,80 @@ describe("ViewportImpl — dispose", () => {
     viewport.scrollTo(5);
     expect(viewport.scrollOffsetPx()).toBe(0);
     expect(viewport.takeDamage()).toEqual([]);
+  });
+});
+
+/* ─────────────────────── modo soft wrap (rows visuais) ─────────────────────── */
+
+describe("ViewportImpl — modo soft wrap (rows visuais)", () => {
+  /**
+   * Mapa de exemplo: a linha 0 ocupa 3 rows (0, 1, 2), a linha 1 ocupa 2 rows (3, 4) e a
+   * linha 2 ocupa 1 row (5).
+   */
+  const rowStarts = [0, 3, 5, 6];
+  const mapper: VisualRowMapper = {
+    rowOfLine: (line: number): number => rowStarts[Math.min(Math.max(line, 0), rowStarts.length - 1)] ?? 0,
+    lineOfRow: (row: number): number => {
+      let line = 0;
+      for (let i = 0; i < rowStarts.length; i++) {
+        if ((rowStarts[i] ?? 0) <= row) line = i;
+      }
+      return line;
+    },
+  };
+
+  /** Viewport de 3 linhas, 2 rows visíveis, 8 rows no total. */
+  function wrapSetup(withMapper: boolean): { viewport: ViewportImpl } {
+    const { viewport } = setup({
+      lineCount: 3,
+      lineHeight: 10,
+      viewportHeight: 20,
+      visualLineCount: 8,
+      ...(withMapper ? { visualRowMapper: mapper } : {}),
+    });
+    return { viewport };
+  }
+
+  it("sem o mapper, o viewport conta em linhas lógicas (comportamento legado)", () => {
+    const { viewport } = wrapSetup(false);
+    viewport.scrollTo(2);
+    expect(viewport.scrollOffsetPx()).toBe(20);
+    expect(viewport.visibleLineRange()).toEqual({ first: 2, count: 1 });
+  });
+
+  it("com o mapper, a rolagem é contada em rows visuais", () => {
+    const { viewport } = wrapSetup(true);
+    // A linha 2 começa na row 5 → 5 * lineHeight.
+    viewport.scrollTo(2);
+    expect(viewport.scrollOffsetPx()).toBe(50);
+  });
+
+  it("visibleLineRange devolve as linhas lógicas que cobrem as rows visíveis", () => {
+    const { viewport } = wrapSetup(true);
+    // Row 0 → linha 0; a faixa visível (2 rows) cobre as rows 0..1 → linha 0.
+    expect(viewport.visibleLineRange()).toEqual({ first: 0, count: 1 });
+    viewport.scrollTo(1); // row 3 → linha 1
+    expect(viewport.visibleLineRange()).toEqual({ first: 1, count: 1 });
+  });
+
+  it("o dano cobre todas as rows da linha tocada", () => {
+    const { viewport } = wrapSetup(true);
+    viewport.scrollTo(1); // linha 1 (row 3)
+    const damage = viewport.takeDamage();
+    // A linha 0 (rows 0..2) saiu da faixa; a linha 1 (rows 3..4) entrou.
+    expect(damage.map((r) => ({ y: r.y, h: r.h }))).toEqual([
+      { y: 0, h: 30 },
+      { y: 30, h: 20 },
+    ]);
+  });
+
+  it("setVisualRowMapper alterna o modo em tempo de execução", () => {
+    const { viewport } = wrapSetup(false);
+    viewport.setVisualRowMapper(mapper);
+    viewport.scrollTo(2);
+    expect(viewport.scrollOffsetPx()).toBe(50);
+    viewport.setVisualRowMapper(undefined);
+    viewport.scrollTo(2);
+    expect(viewport.scrollOffsetPx()).toBe(20);
   });
 });

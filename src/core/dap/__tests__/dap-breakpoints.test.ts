@@ -31,6 +31,31 @@ describe("normalizeBreakpointSpecs", () => {
     expect(specs[0]).toMatchObject({ line: 3, hitCondition: "2", logMessage: "chegou em {x}" });
   });
 
+  it("a spec de um logpoint sobrevive à normalização (mensagem + linha)", () => {
+    const specs = normalizeBreakpointSpecs([
+      { line: 12, logMessage: "i = ${i}" },
+    ]);
+    expect(specs).toEqual([{ line: 12, logMessage: "i = ${i}" }]);
+  });
+
+  it("os três campos convivem na mesma spec", () => {
+    const specs = normalizeBreakpointSpecs([
+      { line: 12, condition: "x > 1", hitCondition: "3", logMessage: "i = ${i}" },
+    ]);
+    expect(specs[0]).toEqual({
+      line: 12,
+      condition: "x > 1",
+      hitCondition: "3",
+      logMessage: "i = ${i}",
+    });
+  });
+
+  it("mensagem de log vazia é omitida (não vira string vazia)", () => {
+    const specs = normalizeBreakpointSpecs([{ line: 1, logMessage: "   " }]);
+    expect(specs).toEqual([{ line: 1 }]);
+    expect("logMessage" in (specs[0] as object)).toBe(false);
+  });
+
   it("descarta linhas inválidas (0, negativo, fracionário, NaN)", () => {
     expect(normalizeBreakpointSpecs([0, -3, 1.5, Number.NaN, 5])).toEqual([{ line: 5 }]);
   });
@@ -120,6 +145,17 @@ describe("toSourceBreakpoints", () => {
       hitCondition: "2",
       logMessage: "oi",
     });
+  });
+
+  it("o logpoint chega ao adaptador no formato do protocolo", () => {
+    // O logpoint só funciona se o adaptador receber a mensagem (`SourceBreakpoint.logMessage`).
+    const protocol = toSourceBreakpoints([{ line: 12, logMessage: "i = ${i}" }]);
+    expect(protocol[0]).toEqual({ line: 12, logMessage: "i = ${i}" });
+  });
+
+  it("a condição de paradas chega ao adaptador no formato do protocolo", () => {
+    const protocol = toSourceBreakpoints([{ line: 12, hitCondition: "3" }]);
+    expect(protocol[0]).toEqual({ line: 12, hitCondition: "3" });
   });
 
   it("lista vazia vira lista vazia", () => {

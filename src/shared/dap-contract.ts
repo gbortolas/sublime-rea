@@ -108,6 +108,10 @@ export interface DapBreakpoint {
   readonly line: number;
   /** Condição avaliada pelo adaptador (se houver). */
   readonly condition?: string;
+  /** Condição de paradas (se houver) — o breakpoint só para na Nª ocorrência. */
+  readonly hitCondition?: string;
+  /** Mensagem de log (se houver) — logpoint: registra em vez de parar. */
+  readonly logMessage?: string;
   readonly message?: string;
 }
 
@@ -129,6 +133,99 @@ export interface DapBreakpointSpec {
   readonly logMessage?: string;
 }
 
+// ── Breakpoints: campos editáveis, tetos e a edição de um campo ─────────────────────────────
+
+/**
+ * Campo **editável** de um breakpoint.
+ *
+ * Os três campos são editáveis na interface (o painel de depuração) e chegam ao adaptador
+ * como `SourceBreakpoint.condition` / `.hitCondition` / `.logMessage` do protocolo DAP.
+ */
+export type DapBreakpointField = "condition" | "hitCondition" | "logMessage";
+
+/** Teto do tamanho da condição de um breakpoint. */
+export const MAX_BREAKPOINT_CONDITION_LENGTH = 512;
+
+/** Teto do tamanho da condição de paradas (`hitCondition`). */
+export const MAX_BREAKPOINT_HIT_CONDITION_LENGTH = 64;
+
+/** Teto do tamanho da mensagem de log (logpoint). */
+export const MAX_BREAKPOINT_LOG_MESSAGE_LENGTH = 512;
+
+/**
+ * Teto de cada campo editável de um breakpoint.
+ *
+ * O mesmo teto vale nas três camadas (interface, normalização do core e envio ao
+ * adaptador): a UI corta o que o usuário digitar, e o core corta de novo o que vier
+ * pelo IPC (a UI não é a fonte da verdade).
+ */
+export const MAX_BREAKPOINT_FIELD_LENGTH: Readonly<Record<DapBreakpointField, number>> = {
+  condition: MAX_BREAKPOINT_CONDITION_LENGTH,
+  hitCondition: MAX_BREAKPOINT_HIT_CONDITION_LENGTH,
+  logMessage: MAX_BREAKPOINT_LOG_MESSAGE_LENGTH,
+};
+
+/**
+ * Aplica a edição de um campo a uma spec de breakpoint e devolve a spec **nova**.
+ *
+ * Regras (as mesmas da normalização do core — `src/core/dap/dap-breakpoints.ts`):
+ * - o valor é **aparado** (`trim`) e **truncado** no teto do campo;
+ * - valor vazio (ou só espaços) ⇒ o campo **some** da spec (nunca vira string vazia —
+ *   o tipo é `exactOptionalPropertyTypes` e o adaptador rejeitaria campo vazio);
+ * - os **outros** campos são preservados (editar a condição não apaga o logpoint).
+ */
+export function applyBreakpointField(
+  spec: DapBreakpointSpec,
+  field: DapBreakpointField,
+  value: string,
+): DapBreakpointSpec {
+  const text = value.trim().slice(0, MAX_BREAKPOINT_FIELD_LENGTH[field]);
+  const kept = text.length > 0 ? text : undefined;
+
+  const condition = field === "condition" ? kept : spec.condition;
+  const hitCondition = field === "hitCondition" ? kept : spec.hitCondition;
+  const logMessage = field === "logMessage" ? kept : spec.logMessage;
+
+  return {
+    line: spec.line,
+    ...(condition !== undefined ? { condition } : {}),
+    ...(hitCondition !== undefined ? { hitCondition } : {}),
+    ...(logMessage !== undefined ? { logMessage } : {}),
+  };
+}
+
+/**
+ * O breakpoint é um **logpoint** — registra a mensagem em vez de parar.
+ *
+ * Definição: tem `logMessage` **e** não tem `condition` (com condição, o breakpoint
+ * para *e* registra — é um breakpoint condicional com log, não um logpoint puro).
+ */
+export function isLogpointSpec(spec: DapBreakpointSpec): boolean {
+  return (
+    spec.logMessage !== undefined &&
+    spec.logMessage.length > 0 &&
+    spec.condition === undefined
+  );
+}
+
+/**
+ * Aplica a edição de um campo **na lista** de specs (a linha editada) e devolve a lista
+ * nova — as demais linhas são preservadas como estão.
+ *
+ * É o que a interface faz quando o usuário edita um campo: a lista local passa a refletir
+ * a edição (a spec da linha trocada) sem tocar nas outras linhas.
+ */
+export function applyBreakpointFieldToList(
+  specs: readonly DapBreakpointSpec[],
+  line: number,
+  field: DapBreakpointField,
+  value: string,
+): DapBreakpointSpec[] {
+  return specs.map((spec) =>
+    spec.line === line ? applyBreakpointField(spec, field, value) : spec,
+  );
+}
+
 /** Contexto de avaliação de expressão no programa depurado (DAP `evaluate`). */
 export type DapEvaluationContext = "watch" | "repl" | "hover" | "clipboard";
 
@@ -144,8 +241,8 @@ export type DapEvaluationRequestContext = Extract<DapEvaluationContext, "watch" 
 /**
  * Teto do tamanho de uma expressão avaliada (`dap.evaluate`).
  *
- * O mesmo teto da condição de breakpoint (`MAX_CONDITION_LENGTH`): expressão maior que
- * isso é quase sempre erro de digitação — e o `evaluate` é pago pelo IPC.
+ * O mesmo teto da condição de breakpoint (`MAX_BREAKPOINT_CONDITION_LENGTH`): expressão
+ * maior que isso é quase sempre erro de digitação — e o `evaluate` é pago pelo IPC.
  */
 export const MAX_EVALUATION_LENGTH = 512;
 

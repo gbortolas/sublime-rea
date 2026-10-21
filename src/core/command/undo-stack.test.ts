@@ -5,6 +5,20 @@ import { describe, expect, it } from "vitest";
 import { UndoStack } from "./undo-stack";
 import { FakeTarget } from "./__tests__/fakes";
 
+/**
+ * Alvo **com escopo** — cada instância é um "documento" diferente. O `FakeTarget` não sabe seu
+ * documento (escopo `undefined`); este sabe (o `scopeId` que o `EditorCore` expõe).
+ */
+class ScopedTarget extends FakeTarget {
+  constructor(private readonly scope: string) {
+    super();
+  }
+
+  scopeId(): string {
+    return this.scope;
+  }
+}
+
 describe("UndoStack — roundtrip undo/redo", () => {
   it("desfaz e refaz transações com o inverso do delta", () => {
     const stack = new UndoStack();
@@ -246,5 +260,129 @@ describe("UndoStack — profundidade e higiene", () => {
     expect(stack.undoDepth).toBe(0);
     expect(stack.redoDepth).toBe(0);
     expect(stack.lastLabel).toBeUndefined();
+  });
+});
+
+describe("UndoStack — escopo por documento (linha do tempo de cada aba)", () => {
+  it("undo no escopo B desfaz o passo de B e preserva o de A", () => {
+    const stack = new UndoStack();
+    const a = new ScopedTarget("A");
+    const b = new ScopedTarget("B");
+
+    stack.record("Edit A", [{ at: 0, remove: "", insert: "aaa" }], { scopeId: "A" });
+    stack.record("Edit B", [{ at: 0, remove: "", insert: "bbb" }], { scopeId: "B" });
+    a.text = "aaa";
+    b.text = "bbb";
+
+    // A profundidade **por escopo** conta só o que é do documento.
+    expect(stack.undoDepthFor("A")).toBe(1);
+    expect(stack.undoDepthFor("B")).toBe(1);
+    expect(stack.undoDepth).toBe(2); // global: os dois documentos
+
+    expect(stack.undo(b)).toBe(true);
+    expect(b.text).toBe("");
+    expect(a.text).toBe("aaa"); // o buffer de A não foi tocado
+
+    // O passo de A continua na pilha (não foi consumido pelo undo de B).
+    expect(stack.undoDepthFor("A")).toBe(1);
+    expect(stack.undoDepthFor("B")).toBe(0);
+    expect(stack.undoDepth).toBe(1);
+  });
+
+  it("undo no escopo A pula o passo de B (não aplica os deltas de B no buffer de A)", () => {
+    const stack = new UndoStack();
+    const a = new ScopedTarget("A");
+    const b = new ScopedTarget("B");
+
+    stack.record("Edit A", [{ at: 0, remove: "", insert: "aaa" }], { scopeId: "A" });
+    stack.record("Edit B", [{ at: 0, remove: "", insert: "bbb" }], { scopeId: "B" });
+    a.text = "aaa";
+    b.text = "bbb";
+
+    // O topo global é o passo de B — mas o alvo é de A ⇒ o passo de B é **pulado**.
+    expect(stack.undo(a)).toBe(true);
+    expect(a.text).toBe(""); // ← só o inverso do passo de A foi aplicado
+    expect(b.text).toBe("bbb");
+    expect(stack.undoDepthFor("B")).toBe(1); // o passo de B ficou na pilha
+  });
+
+  it("redo refaz só o passo do escopo do alvo", () => {
+    const stack = new UndoStack();
+    const a = new ScopedTarget("A");
+    const b = new ScopedTarget("B");
+
+    stack.record("Edit A", [{ at: 0, remove: "", insert: "aaa" }], { scopeId: "A" });
+    stack.record("Edit B", [{ at: 0, remove: "", insert: "bbb" }], { scopeId: "B" });
+    a.text = "aaa";
+    b.text = "bbb";
+
+    stack.undo(a);
+    stack.undo(b);
+    expect(a.text).toBe("");
+    expect(b.text).toBe("");
+    expect(stack.redoDepthFor("A")).toBe(1);
+    expect(stack.redoDepthFor("B")).toBe(1);
+
+    expect(stack.redo(b)).toBe(true);
+    expect(b.text).toBe("bbb");
+    expect(a.text).toBe(""); // o redo de A não foi aplicado
+
+    expect(stack.redo(a)).toBe(true);
+    expect(a.text).toBe("aaa");
+    expect(stack.redoDepthFor("A")).toBe(0);
+    expect(stack.redoDepthFor("B")).toBe(0);
+  });
+
+  it("passos de escopos diferentes não fundem (nem no glue)", () => {
+    const stack = new UndoStack();
+    stack.record("A", [{ at: 0, remove: "", insert: "a" }], { groupId: "g", scopeId: "A" });
+    stack.record("B", [{ at: 0, remove: "", insert: "b" }], { groupId: "g", scopeId: "B" });
+    expect(stack.undoDepth).toBe(2);
+
+    stack.markForGlueFor("A");
+    stack.markForGlueFor("B");
+    // Passos de escopos diferentes não se fundem (o passo fundido carregaria os deltas dos dois).
+    expect(stack.glueMarkedGroups()).toBe(false);
+    expect(stack.undoDepth).toBe(2);
+  });
+
+  it("o rótulo e a intenção de soft são lidos por escopo", () => {
+    const stack = new UndoStack();
+    const a = new ScopedTarget("A");
+
+    stack.record("Edit A", [{ at: 0, remove: "", insert: "aaa" }], { scopeId: "A" });
+    stack.record("Edit B", [{ at: 0, remove: "", insert: "bbb" }], { scopeId: "B" });
+
+    expect(stack.lastLabelFor("A")).toBe("Edit A");
+    expect(stack.lastLabelFor("B")).toBe("Edit B");
+    expect(stack.lastLabel).toBe("Edit B"); // global: o topo da pilha
+
+    expect(stack.softUndo(a)).toBe(true);
+    expect(stack.softIntentFor("A")).toBe("undo");
+    expect(stack.softIntentFor("B")).toBeUndefined();
+    expect(stack.softIntent).toBe("undo"); // global: última intenção
+  });
+
+  it("um alvo sem escopo (undefined) só casa com passos sem escopo", () => {
+    const stack = new UndoStack();
+    const plain = new FakeTarget();
+
+    stack.record("Edit A", [{ at: 0, remove: "", insert: "aaa" }], { scopeId: "A" });
+    expect(stack.undo(plain)).toBe(false); // o passo é de A — o alvo sem escopo não o toca
+    expect(stack.undoDepthFor("A")).toBe(1);
+
+    stack.record("Sem escopo", [{ at: 0, remove: "", insert: "x" }]);
+    expect(stack.undo(plain)).toBe(true);
+    expect(stack.undoDepthFor("A")).toBe(1);
+  });
+
+  it("clearScope limpa um documento e preserva o outro", () => {
+    const stack = new UndoStack();
+    stack.record("Edit A", [{ at: 0, remove: "", insert: "a" }], { scopeId: "A" });
+    stack.record("Edit B", [{ at: 0, remove: "", insert: "b" }], { scopeId: "B" });
+
+    stack.clearScope("A");
+    expect(stack.undoDepthFor("A")).toBe(0);
+    expect(stack.undoDepthFor("B")).toBe(1);
   });
 });

@@ -19,6 +19,9 @@
  *    (`UnknownCommandError`) — nunca silencioso (DEC-TR-5).
  * 5. **`undo()`/`redo()`/`emit()`** são extensões da implementação (fora do contrato congelado, que
  *    só expõe `softUndo`/`softRedo`) para que o bus seja utilizável e testável sozinho.
+ * 6. **Escopo do documento.** O bus grava cada passo com o `scopeId` do **alvo** (o documento que
+ *    está sendo editado) — é o que dá a cada documento a sua própria linha do tempo: o `undo`/`redo`
+ *    só toca os passos do escopo do alvo (passos de outra aba são pulados, não aplicados).
  */
 import type {
   CommandBus,
@@ -246,26 +249,33 @@ export class CommandBusImpl implements CommandBus, EditScopeHost {
 
   // --- Extensões da implementação (fora do contrato congelado) -------------------------------
 
-  /** Desfaz duro (aplica o inverso). Fora do contrato do doc `01`, que só expõe `softUndo`. */
+  /**
+   * Desfaz duro (aplica o inverso) — só os passos do **escopo do alvo** (o documento corrente).
+   * Fora do contrato do doc `01`, que só expõe `softUndo`.
+   */
   undo(): boolean {
     const target = this.resolveTarget?.();
     return target === undefined ? false : this.history.undo(target);
   }
 
-  /** Refaz duro. Par simétrico de `undo()`. */
+  /** Refaz duro — só os passos do **escopo do alvo**. Par simétrico de `undo()`. */
   redo(): boolean {
     const target = this.resolveTarget?.();
     return target === undefined ? false : this.history.redo(target);
   }
 
-  /** Marca o grupo do topo para *glue*. */
+  /** Marca o grupo do topo para *glue* — do **escopo do alvo** (o documento corrente). */
   markForGlue(): boolean {
-    return this.history.markForGlue();
+    const target = this.resolveTarget?.();
+    if (target === undefined) return this.history.markForGlue();
+    return this.history.markForGlueFor(target.scopeId?.());
   }
 
-  /** Desmarca o grupo do topo. */
+  /** Desmarca o grupo do topo — do **escopo do alvo** (o documento corrente). */
   unmarkForGlue(): boolean {
-    return this.history.unmarkForGlue();
+    const target = this.resolveTarget?.();
+    if (target === undefined) return this.history.unmarkForGlue();
+    return this.history.unmarkForGlueFor(target.scopeId?.());
   }
 
   /** Limpa undo+redo — **recusa** com escopo aberto (DEC-BUF-4/D4). */
@@ -314,6 +324,10 @@ export class CommandBusImpl implements CommandBus, EditScopeHost {
     const target = this.resolveTarget?.();
     if (target === undefined) return;
 
+    // O escopo do passo é o **documento do alvo** — é ele que dá a cada aba a sua linha do tempo
+    // (o `undo`/`redo` só tocam os passos do mesmo escopo).
+    const scopeId = target.scopeId?.();
+
     // O "antes" é lido **antes** de aplicar os deltas; o "depois", **depois** — o alvo
     // (o `EditorCore`) desloca os cursores junto com o texto, então o "depois" já vem
     // posicionado. É isso que faz o undo restaurar o **conjunto** de cursores (multi-cursor,
@@ -334,6 +348,7 @@ export class CommandBusImpl implements CommandBus, EditScopeHost {
       selectionAfter,
       selectionsBefore,
       selectionsAfter,
+      ...(scopeId !== undefined ? { scopeId } : {}),
     };
     if (group === undefined) {
       this.history.record(record.label, edits, base);

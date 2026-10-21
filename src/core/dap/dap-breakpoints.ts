@@ -10,20 +10,30 @@
  * derrubar a sessão inteira. Aqui o dado é saneado **antes** de cruzar a fronteira.
  */
 
-import type { DapBreakpointSpec } from "../../shared/dap-contract";
+import {
+  MAX_BREAKPOINT_CONDITION_LENGTH,
+  MAX_BREAKPOINT_HIT_CONDITION_LENGTH,
+  MAX_BREAKPOINT_LOG_MESSAGE_LENGTH,
+  type DapBreakpointSpec,
+} from "../../shared/dap-contract";
 import type { DapSourceBreakpoint } from "./dap-protocol";
 
 /** Teto de breakpoints por arquivo (protege o `setBreakpoints` contra listas absurdas). */
 export const MAX_BREAKPOINTS_PER_FILE = 500;
 
-/** Teto do tamanho da expressão condicional. */
-export const MAX_CONDITION_LENGTH = 512;
+/**
+ * Teto do tamanho da expressão condicional.
+ *
+ * O teto vive no **contrato compartilhado** (a interface e o core precisam do mesmo
+ * número) — aqui ele é só reexportado, para o histórico do módulo.
+ */
+export const MAX_CONDITION_LENGTH = MAX_BREAKPOINT_CONDITION_LENGTH;
 
 /** Teto do tamanho da condição de paradas (`hitCondition`). */
-export const MAX_HIT_CONDITION_LENGTH = 64;
+export const MAX_HIT_CONDITION_LENGTH = MAX_BREAKPOINT_HIT_CONDITION_LENGTH;
 
 /** Teto do tamanho da mensagem de log (logpoint). */
-export const MAX_LOG_MESSAGE_LENGTH = 512;
+export const MAX_LOG_MESSAGE_LENGTH = MAX_BREAKPOINT_LOG_MESSAGE_LENGTH;
 
 /**
  * Converte uma entrada heterogênea (números e/ou objetos) numa lista canônica de specs.

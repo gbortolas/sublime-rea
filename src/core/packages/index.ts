@@ -6,3 +6,4 @@
 export * from "./zip";
 export * from "./glob";
 export * from "./resolver";
+export * from "./package-snippets";

@@ -21,6 +21,22 @@
  * 4. **Soft undo/redo** move o cursor e registra a **intenção** (`softIntent`), sem tocar o texto —
  *    como pede DEC-BUF-4, que separa *soft* (por delta) do *hard* (por grupo).
  * 5. **Profundidade** = truncamento do mais antigo (não anel): previsível e testável.
+ * 6. **Escopo por documento (a linha do tempo de cada aba).** A pilha é **global**, mas cada
+ *    **documento** tem a sua própria linha do tempo: um passo carrega o `scopeId` do documento que
+ *    o criou e `undo`/`redo` só tocam os passos do **escopo do alvo**. Passos de outro documento são
+ *    **pulados** (não aplicados, **não** consumidos) — sem isso, desfazer na aba B aplicava os
+ *    deltas da aba A no buffer de B (texto corrompido).
+ *    - O `scopeId` do alvo é **opcional**: `undefined` = "sem escopo" (alvos de teste que não sabem
+ *      seu documento) — ele casa **só** com passos sem escopo.
+ *    - A **ordem global** é preservada: os passos de outros escopos ficam na pilha; o passo
+ *      desfeito sai do lugar e volta para o topo do redo **do mesmo escopo**.
+ *    - `undoDepth`/`redoDepth` (globais) continuam existindo (compatibilidade);
+ *      `undoDepthFor`/`redoDepthFor` contam **por escopo** — é o que o `EditorCore` usa para
+ *      `canUndo`/`canRedo` de cada aba.
+ *    - `lastLabel`/`softIntent` são **globais** (última operação); `lastLabelFor`/`softIntentFor`
+ *      são **por escopo**.
+ *    - `clear()` limpa **todos** os escopos ("limpar todo o histórico"); `clearScope()` limpa
+ *      **um** escopo.
  *
  * O alvo é um **port mínimo** definido aqui (`UndoTarget`) — **não** importamos o `TextStore` do
  * módulo de buffer (costura só via `src/shared`).
@@ -46,12 +62,25 @@ export interface UndoTarget {
   selections(): readonly Selection[];
   /** Substitui todas as seleções. */
   setSelections(sels: readonly Selection[]): void;
+  /**
+   * Escopo (documento) a que o alvo pertence — ex.: o handle do documento (`String(handle)`).
+   *
+   * **Opcional**: `undefined` = o alvo **não sabe** seu documento (alvos de teste). Nesse caso o
+   * alvo casa **só** com passos **sem escopo**. É o que separa as linhas do tempo: desfazer num
+   * alvo só toca passos do **mesmo** escopo — os de outros documentos são pulados.
+   */
+  scopeId?(): string | undefined;
 }
 
 export interface UndoRecordOptions {
   /** Chave de coalescência (`typing.42`); `undefined` = passo próprio. */
   readonly groupId?: string;
   readonly origin?: EditOrigin;
+  /**
+   * Escopo (documento) dono do passo — `undefined` = passo sem escopo.
+   * Passos de escopos diferentes **nunca** se misturam (nem na fusão, nem no *glue*).
+   */
+  readonly scopeId?: string;
   readonly caretBefore?: number;
   readonly caretAfter?: number;
   readonly selectionBefore?: Selection;
@@ -68,11 +97,22 @@ export interface UndoStackOptions {
 export type SoftIntent = "undo" | "redo";
 
 const DEFAULT_MAX_DEPTH = 1000;
+/** Chave interna do escopo "sem escopo" (`undefined`) — não colide com um id real. */
+const NO_SCOPE_KEY = "sem-escopo";
+
+/** Chave interna de um escopo: `undefined` → chave própria; um id real → `s:<id>`. */
+function scopeKey(scopeId: string | undefined): string {
+  return scopeId === undefined ? NO_SCOPE_KEY : `s:${scopeId}`;
+}
 
 interface Step {
   label: string;
   groupId: string | undefined;
   origin: EditOrigin;
+  /** Escopo (documento) dono do passo — `undefined` = sem escopo. */
+  scopeId: string | undefined;
+  /** Ordem cronológica (mono crescente) — mantém a pilha ordenada mesmo depois de um refazer. */
+  seq: number;
   /** Deltas *forward* (redo), em ordem de aplicação. */
   edits: Edit[];
   /** Deltas inversos (undo), já em ordem reversa e com `remove`/`insert` trocados. */
@@ -96,18 +136,25 @@ function invert(edits: readonly Edit[]): Edit[] {
 }
 
 /**
- * Pilha undo/redo com grupos, glue, soft e profundidade limitada.
+ * Pilha undo/redo com grupos, glue, soft, profundidade limitada e **escopo por documento**.
  *
  * Invariantes:
- * - `undoSteps`/`redoSteps` são disjuntos; registrar uma transação limpa o redo;
+ * - `undoSteps`/`redoSteps` são disjuntos; registrar uma transação limpa o redo **do escopo**;
  * - `undoDepth + redoDepth` nunca excede `maxDepth + redoDepth` (o redo só cresce ao desfazer);
- * - um passo só existe se tiver ≥ 1 delta (transação vazia é descartada).
+ * - um passo só existe se tiver ≥ 1 delta (transação vazia é descartada);
+ * - `undo`/`redo` só aplicam passos do **escopo do alvo** — os de outros documentos são pulados
+ *   (e ficam na pilha: a ordem global é preservada).
  */
 export class UndoStack {
   private readonly maxDepth: number;
   private undoSteps: Step[] = [];
   private redoSteps: Step[] = [];
-  private softIntentFlag: SoftIntent | undefined;
+  /** Intenção de *soft* por escopo (chave = `scopeKey`). */
+  private readonly softIntents = new Map<string, SoftIntent>();
+  /** Última intenção de *soft* registrada (qualquer escopo) — compatibilidade. */
+  private lastSoftIntent: { readonly key: string; readonly intent: SoftIntent } | undefined;
+  /** Contador de ordem cronológica dos passos. */
+  private seqCounter = 0;
 
   constructor(opts: UndoStackOptions = {}) {
     this.maxDepth = opts.maxDepth ?? DEFAULT_MAX_DEPTH;
@@ -116,32 +163,65 @@ export class UndoStack {
     }
   }
 
+  // --- Profundidade ----------------------------------------------------------------------------
+
+  /** Profundidade **global** do undo (todos os escopos) — compatibilidade. */
   get undoDepth(): number {
     return this.undoSteps.length;
   }
 
+  /** Profundidade **global** do redo (todos os escopos) — compatibilidade. */
   get redoDepth(): number {
     return this.redoSteps.length;
   }
 
-  /** `undoLabel` do passo do topo (distinto do `CommandId` — `06:144`). */
+  /**
+   * Quantos passos o **escopo** pode desfazer — é o `canUndo` da aba (não o total global).
+   * `scopeId` `undefined` = passos **sem escopo**.
+   */
+  undoDepthFor(scopeId: string | undefined): number {
+    return this.countScope(this.undoSteps, scopeId);
+  }
+
+  /** Quantos passos o **escopo** pode refazer — é o `canRedo` da aba. */
+  redoDepthFor(scopeId: string | undefined): number {
+    return this.countScope(this.redoSteps, scopeId);
+  }
+
+  // --- Rótulo e intenção ------------------------------------------------------------------------
+
+  /** `undoLabel` do passo do topo **global** (distinto do `CommandId` — `06:144`). */
   get lastLabel(): string | undefined {
     return this.undoSteps[this.undoSteps.length - 1]?.label;
   }
 
+  /** `undoLabel` do passo mais recente **do escopo** (o rótulo que a aba mostra). */
+  lastLabelFor(scopeId: string | undefined): string | undefined {
+    return this.topStepOf(this.undoSteps, scopeId)?.label;
+  }
+
   /** Última intenção registrada por *soft undo/redo* (ou `undefined` após uma operação dura). */
   get softIntent(): SoftIntent | undefined {
-    return this.softIntentFlag;
+    return this.lastSoftIntent?.intent;
   }
+
+  /** Intenção de *soft* **do escopo** (a de outro documento não aparece aqui). */
+  softIntentFor(scopeId: string | undefined): SoftIntent | undefined {
+    return this.softIntents.get(scopeKey(scopeId));
+  }
+
+  // --- Registro --------------------------------------------------------------------------------
 
   /**
    * Registra uma **transação**: os deltas que um comando aplicou ao alvo. Funde com o topo quando
-   * o `groupId` coincide (e não há redo pendente — editar depois de desfazer nunca funde).
+   * o `groupId` coincide **e o escopo também** (e não há redo pendente no escopo — editar depois
+   * de desfazer nunca funde).
    */
   record(label: string, edits: readonly Edit[], opts: UndoRecordOptions = {}): void {
     if (edits.length === 0) return;
 
     const groupId = opts.groupId;
+    const scopeId = opts.scopeId;
     const origin: EditOrigin = opts.origin ?? "user";
     const caretBefore = opts.caretBefore ?? 0;
     const caretAfter = opts.caretAfter ?? caretBefore;
@@ -152,10 +232,11 @@ export class UndoStack {
 
     const top = this.undoSteps[this.undoSteps.length - 1];
     const canMerge =
-      this.redoSteps.length === 0 &&
+      !this.hasRedoFor(scopeId) &&
       groupId !== undefined &&
       top !== undefined &&
-      top.groupId === groupId;
+      top.groupId === groupId &&
+      top.scopeId === scopeId;
 
     if (canMerge && top !== undefined) {
       top.edits.push(...edits);
@@ -164,15 +245,20 @@ export class UndoStack {
       top.caretAfter = caretAfter;
       top.selectionAfter = selectionAfter;
       top.selectionsAfter = selectionsAfter;
-      this.softIntentFlag = undefined;
+      this.clearSoftIntent(scopeId);
       return;
     }
 
-    if (this.redoSteps.length > 0) this.redoSteps = [];
+    // Novo passo: descarta o redo **do próprio escopo** — o redo de outro documento sobrevive
+    // (cada documento tem a sua linha do tempo).
+    this.redoSteps = this.redoSteps.filter((step) => step.scopeId !== scopeId);
+    this.seqCounter += 1;
     this.undoSteps.push({
       label,
       groupId,
       origin,
+      scopeId,
+      seq: this.seqCounter,
       edits: [...edits],
       inverse: invert(edits),
       caretBefore,
@@ -186,10 +272,12 @@ export class UndoStack {
     if (this.undoSteps.length > this.maxDepth) {
       this.undoSteps.splice(0, this.undoSteps.length - this.maxDepth);
     }
-    this.softIntentFlag = undefined;
+    this.clearSoftIntent(scopeId);
   }
 
-  /** Marca o passo do topo para *glue*. `false` = pilha vazia (nada a marcar). */
+  // --- Glue ------------------------------------------------------------------------------------
+
+  /** Marca o passo do topo **global** para *glue*. `false` = pilha vazia (nada a marcar). */
   markForGlue(): boolean {
     const top = this.undoSteps[this.undoSteps.length - 1];
     if (top === undefined) return false;
@@ -197,7 +285,7 @@ export class UndoStack {
     return true;
   }
 
-  /** Desmarca o passo do topo. `false` = pilha vazia. */
+  /** Desmarca o passo do topo **global**. `false` = pilha vazia. */
   unmarkForGlue(): boolean {
     const top = this.undoSteps[this.undoSteps.length - 1];
     if (top === undefined) return false;
@@ -205,16 +293,34 @@ export class UndoStack {
     return true;
   }
 
+  /** Marca o passo mais recente **do escopo** para *glue*. `false` = escopo sem passos. */
+  markForGlueFor(scopeId: string | undefined): boolean {
+    const step = this.topStepOf(this.undoSteps, scopeId);
+    if (step === undefined) return false;
+    step.marked = true;
+    return true;
+  }
+
+  /** Desmarca o passo mais recente **do escopo**. `false` = escopo sem passos. */
+  unmarkForGlueFor(scopeId: string | undefined): boolean {
+    const step = this.topStepOf(this.undoSteps, scopeId);
+    if (step === undefined) return false;
+    step.marked = false;
+    return true;
+  }
+
   /**
    * Funde cada sequência de passos **marcados** num único passo (DEC-BUF-4). O resultado é selado
-   * (`groupId` indefinido) para não voltar a coalescer. Devolve `true` se algo foi fundido.
+   * (`groupId` indefinido) para não voltar a coalescer. Só funde passos do **mesmo escopo** — um
+   * passo fundido com o de outro documento carregaria os deltas dos dois (corrupção).
+   * Devolve `true` se algo foi fundido.
    */
   glueMarkedGroups(): boolean {
     const merged: Step[] = [];
     let didMerge = false;
     for (const step of this.undoSteps) {
       const prev = merged[merged.length - 1];
-      if (prev !== undefined && prev.marked && step.marked) {
+      if (prev !== undefined && prev.marked && step.marked && prev.scopeId === step.scopeId) {
         prev.edits.push(...step.edits);
         prev.inverse = invert(prev.edits);
         prev.caretAfter = step.caretAfter;
@@ -232,60 +338,89 @@ export class UndoStack {
     return didMerge;
   }
 
-  /** Desfaz o topo: aplica o inverso e restaura o cursor de antes da transação. */
+  // --- Undo / redo (escopo do alvo) -------------------------------------------------------------
+
+  /**
+   * Desfaz o passo mais recente **do escopo do alvo**: aplica o inverso e restaura o cursor de
+   * antes da transação. Passos de **outros** escopos são pulados (não aplicados, não consumidos) —
+   * é o que impede um undo na aba B de aplicar os deltas da aba A no buffer de B.
+   */
   undo(target: UndoTarget): boolean {
-    const step = this.undoSteps.pop();
+    const scopeId = target.scopeId?.();
+    const index = this.indexOfTop(this.undoSteps, scopeId);
+    if (index < 0) return false;
+    const step = this.undoSteps.splice(index, 1)[0];
     if (step === undefined) return false;
     target.applyEdits(step.inverse, "undo");
     target.setCaret(step.caretBefore);
     target.setSelection(step.selectionBefore);
     target.setSelections(step.selectionsBefore);
     this.redoSteps.push(step);
-    this.softIntentFlag = undefined;
+    this.clearSoftIntent(scopeId);
     return true;
   }
 
-  /** Refaz o topo do redo: reaplica os deltas forward com a origem original da transação. */
+  /**
+   * Refaz o passo mais recente **do escopo do alvo**: reaplica os deltas forward com a origem
+   * original da transação. Passos de outros escopos são pulados.
+   */
   redo(target: UndoTarget): boolean {
-    const step = this.redoSteps.pop();
+    const scopeId = target.scopeId?.();
+    const index = this.indexOfTop(this.redoSteps, scopeId);
+    if (index < 0) return false;
+    const step = this.redoSteps.splice(index, 1)[0];
     if (step === undefined) return false;
     target.applyEdits(step.edits, step.origin);
     target.setCaret(step.caretAfter);
     target.setSelection(step.selectionAfter);
     target.setSelections(step.selectionsAfter);
-    this.undoSteps.push(step);
-    this.softIntentFlag = undefined;
-    return true;
-  }
-
-  /** *Soft undo*: leva o cursor para antes da última transação **sem** alterar o texto. */
-  softUndo(target: UndoTarget): boolean {
-    const top = this.undoSteps[this.undoSteps.length - 1];
-    if (top === undefined) return false;
-    target.setCaret(top.caretBefore);
-    this.softIntentFlag = "undo";
-    return true;
-  }
-
-  /** *Soft redo*: leva o cursor para depois da transação desfeita **sem** alterar o texto. */
-  softRedo(target: UndoTarget): boolean {
-    const top = this.redoSteps[this.redoSteps.length - 1];
-    if (top === undefined) return false;
-    target.setCaret(top.caretAfter);
-    this.softIntentFlag = "redo";
+    // O passo volta para a pilha **na sua ordem cronológica** (a pilha fica ordenada por `seq`).
+    this.insertBySeq(step);
+    this.clearSoftIntent(scopeId);
     return true;
   }
 
   /**
-   * Reaplica o histórico **atual** (o que ainda está no undo) em ordem cronológica a um alvo
-   * qualquer — replay de macro/estado. `origin` é `"external"`: o alvo é estranho à transação.
+   * *Soft undo*: leva o cursor para antes da última transação **do escopo do alvo** — sem alterar
+   * o texto.
+   */
+  softUndo(target: UndoTarget): boolean {
+    const scopeId = target.scopeId?.();
+    const step = this.topStepOf(this.undoSteps, scopeId);
+    if (step === undefined) return false;
+    target.setCaret(step.caretBefore);
+    this.setSoftIntent(scopeId, "undo");
+    return true;
+  }
+
+  /**
+   * *Soft redo*: leva o cursor para depois da transação desfeita **do escopo do alvo** — sem
+   * alterar o texto.
+   */
+  softRedo(target: UndoTarget): boolean {
+    const scopeId = target.scopeId?.();
+    const step = this.topStepOf(this.redoSteps, scopeId);
+    if (step === undefined) return false;
+    target.setCaret(step.caretAfter);
+    this.setSoftIntent(scopeId, "redo");
+    return true;
+  }
+
+  /**
+   * Reaplica o histórico **do escopo do alvo** (o que ainda está no undo) em ordem cronológica —
+   * replay de macro/estado. `origin` é `"external"`: o alvo é estranho à transação. Passos de
+   * outros escopos são ignorados (aplicá-los corromperia o buffer).
    */
   applyTo(target: UndoTarget): void {
+    const scopeId = target.scopeId?.();
     const edits: Edit[] = [];
-    for (const step of this.undoSteps) edits.push(...step.edits);
+    for (const step of this.undoSteps) {
+      if (step.scopeId !== scopeId) continue;
+      edits.push(...step.edits);
+    }
     if (edits.length === 0) return;
     target.applyEdits(edits, "external");
-    const last = this.undoSteps[this.undoSteps.length - 1];
+    const last = this.topStepOf(this.undoSteps, scopeId);
     if (last !== undefined) {
       target.setCaret(last.caretAfter);
       target.setSelection(last.selectionAfter);
@@ -293,10 +428,76 @@ export class UndoStack {
     }
   }
 
-  /** Limpa undo+redo. Recusa (via `CommandBus`) quando há escopo aberto — DEC-BUF-4/D4. */
+  // --- Limpeza ---------------------------------------------------------------------------------
+
+  /**
+   * Limpa undo+redo de **todos** os escopos ("limpar todo o histórico"). Recusa (via `CommandBus`)
+   * quando há escopo aberto — DEC-BUF-4/D4. Para limpar **um** documento, use `clearScope`.
+   */
   clear(): void {
     this.undoSteps = [];
     this.redoSteps = [];
-    this.softIntentFlag = undefined;
+    this.softIntents.clear();
+    this.lastSoftIntent = undefined;
+  }
+
+  /** Limpa undo+redo de **um escopo** (os outros documentos mantêm a linha do tempo). */
+  clearScope(scopeId: string | undefined): void {
+    this.undoSteps = this.undoSteps.filter((step) => step.scopeId !== scopeId);
+    this.redoSteps = this.redoSteps.filter((step) => step.scopeId !== scopeId);
+    this.clearSoftIntent(scopeId);
+  }
+
+  // --- Interno --------------------------------------------------------------------------------
+
+  /** Índice do passo mais recente do escopo (do topo para baixo); `-1` = não há. */
+  private indexOfTop(steps: readonly Step[], scopeId: string | undefined): number {
+    for (let i = steps.length - 1; i >= 0; i -= 1) {
+      if (steps[i]?.scopeId === scopeId) return i;
+    }
+    return -1;
+  }
+
+  /** Passo mais recente do escopo (do topo para baixo) ou `undefined`. */
+  private topStepOf(steps: readonly Step[], scopeId: string | undefined): Step | undefined {
+    const index = this.indexOfTop(steps, scopeId);
+    return index < 0 ? undefined : steps[index];
+  }
+
+  /** Quantos passos da pilha pertencem ao escopo. */
+  private countScope(steps: readonly Step[], scopeId: string | undefined): number {
+    let count = 0;
+    for (const step of steps) {
+      if (step.scopeId === scopeId) count += 1;
+    }
+    return count;
+  }
+
+  /** Há redo pendente **no escopo**? (um redo de outro documento não bloqueia a fusão) */
+  private hasRedoFor(scopeId: string | undefined): boolean {
+    return this.redoSteps.some((step) => step.scopeId === scopeId);
+  }
+
+  /** Reinsere um passo na pilha de undo mantendo a **ordem cronológica** (`seq`). */
+  private insertBySeq(step: Step): void {
+    let index = this.undoSteps.length;
+    while (index > 0 && (this.undoSteps[index - 1]?.seq ?? 0) > step.seq) {
+      index -= 1;
+    }
+    this.undoSteps.splice(index, 0, step);
+  }
+
+  /** Registra a intenção de *soft* do escopo. */
+  private setSoftIntent(scopeId: string | undefined, intent: SoftIntent): void {
+    const key = scopeKey(scopeId);
+    this.softIntents.set(key, intent);
+    this.lastSoftIntent = { key, intent };
+  }
+
+  /** Apaga a intenção de *soft* do escopo (operação dura ou nova edição). */
+  private clearSoftIntent(scopeId: string | undefined): void {
+    const key = scopeKey(scopeId);
+    this.softIntents.delete(key);
+    if (this.lastSoftIntent?.key === key) this.lastSoftIntent = undefined;
   }
 }

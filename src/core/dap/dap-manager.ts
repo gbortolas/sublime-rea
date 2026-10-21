@@ -532,6 +532,8 @@ export class DapManager implements Disposable {
         verified: bp.verified,
         line: bp.line ?? spec.line,
         ...(spec.condition !== undefined ? { condition: spec.condition } : {}),
+        ...(spec.hitCondition !== undefined ? { hitCondition: spec.hitCondition } : {}),
+        ...(spec.logMessage !== undefined ? { logMessage: spec.logMessage } : {}),
         ...(bp.id !== undefined ? { id: bp.id } : {}),
         ...(bp.message !== undefined ? { message: bp.message } : {}),
       };
