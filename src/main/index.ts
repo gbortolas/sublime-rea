@@ -37,6 +37,8 @@ import type {
   MainThreadBusy,
   ResourceLayer,
   SearchQuery,
+  Selection,
+  SelectionSet,
 } from "../shared";
 import { LspManager } from "../core/lsp/lsp-manager";
 import { BUILTIN_LSP_SERVERS } from "../shared/lsp-contract";
@@ -314,23 +316,23 @@ async function dispatchIpc(
       const at = requireNumber(request.args[1], "document.insert", "at");
       const text = requireString(request.args[2], "document.insert", "text");
       const origin = request.args[3] === "plugin" ? "plugin" : "user";
-      return core.insertText(handle, at, text, origin);
+      const selections = optionalSelections(request.args[4], "document.insert");
+      return core.insertText(handle, at, text, origin, selections);
     }
     case "document.batchInsert": {
       const handle = requireHandle(request.args[0], "document.batchInsert");
-      const inserts = request.args[1];
-      if (!Array.isArray(inserts) || inserts.length === 0) {
-        throw new IpcProtocolError("invalid-args", "document.batchInsert: inserts deve ser array não vazio");
-      }
+      const inserts = requireBatchInserts(request.args[1], "document.batchInsert");
       const origin = request.args[2] === "plugin" ? "plugin" : "user";
-      return core.batchInsert(handle, inserts, origin);
+      const selections = optionalSelections(request.args[3], "document.batchInsert");
+      return core.batchInsert(handle, inserts, origin, selections);
     }
     case "document.replaceOne": {
       const handle = requireHandle(request.args[0], "document.replaceOne");
       const at = requireNumber(request.args[1], "document.replaceOne", "at");
       const remove = requireNumber(request.args[2], "document.replaceOne", "remove");
       const insert = requireString(request.args[3], "document.replaceOne", "insert");
-      return core.replaceOne(handle, at, remove, insert);
+      const selections = optionalSelections(request.args[4], "document.replaceOne");
+      return core.replaceOne(handle, at, remove, insert, selections);
     }
     case "editor.undo":
       return core.undoDocument(requireHandle(request.args[0], "editor.undo"));
@@ -709,6 +711,84 @@ function requireHandle(value: unknown, method: string): DocumentHandle {
   return value as DocumentHandle;
 }
 
+/**
+ * Entradas do `document.batchInsert`: `{at, text, remove?}`.
+ *
+ * O `at` de cada entrada é **absoluto no estado do buffer após as entradas anteriores** ⇒ um
+ * lote multi-cursor deve entrar em ordem **descendente**. `remove` (padrão `""`) é o trecho a
+ * apagar em `at` (permite apagar em N cursores).
+ */
+interface BatchInsertEntry {
+  readonly at: number;
+  readonly text: string;
+  readonly remove?: string;
+}
+
+/** Valida as entradas do lote (tipo errado ⇒ `invalid-args`, nunca aceito em silêncio). */
+function requireBatchInserts(value: unknown, method: string): BatchInsertEntry[] {
+  if (!Array.isArray(value) || value.length === 0) {
+    throw new IpcProtocolError("invalid-args", `${method}: inserts deve ser array não vazio`);
+  }
+  const out: BatchInsertEntry[] = [];
+  for (const item of value as readonly unknown[]) {
+    if (typeof item !== "object" || item === null) {
+      throw new IpcProtocolError("invalid-args", `${method}: cada insert deve ser um objeto`);
+    }
+    const record = item as Record<string, unknown>;
+    const at = record["at"];
+    const text = record["text"];
+    const remove = record["remove"];
+    if (typeof at !== "number" || !Number.isInteger(at) || at < 0) {
+      throw new IpcProtocolError("invalid-args", `${method}: 'insert.at' deve ser inteiro >= 0`);
+    }
+    if (typeof text !== "string") {
+      throw new IpcProtocolError("invalid-args", `${method}: 'insert.text' deve ser string`);
+    }
+    if (remove !== undefined && typeof remove !== "string") {
+      throw new IpcProtocolError("invalid-args", `${method}: 'insert.remove' deve ser string`);
+    }
+    out.push({ at, text, ...(remove !== undefined ? { remove } : {}) });
+  }
+  return out;
+}
+
+/**
+ * Conjunto de cursores (multi-cursor, P2#5) vindo do wire: `[{anchor, active}, …]`.
+ *
+ * **Opcional**: `undefined`/`null` (cliente antigo, ou chamada sem o parâmetro) ⇒ `undefined` (o
+ * core infere o cursor). Um valor malformado é `invalid-args` — nunca aceito em silêncio.
+ */
+function optionalSelections(value: unknown, method: string): SelectionSet | undefined {
+  if (value === undefined || value === null) return undefined;
+  if (!Array.isArray(value)) {
+    throw new IpcProtocolError("invalid-args", `${method}: 'selections' deve ser array`);
+  }
+  const out: Selection[] = [];
+  for (const item of value as readonly unknown[]) {
+    if (typeof item !== "object" || item === null) {
+      throw new IpcProtocolError("invalid-args", `${method}: 'selections' deve conter seleções`);
+    }
+    const record = item as Record<string, unknown>;
+    const anchor = record["anchor"];
+    const active = record["active"];
+    if (
+      typeof anchor !== "number" ||
+      !Number.isInteger(anchor) ||
+      anchor < 0 ||
+      typeof active !== "number" ||
+      !Number.isInteger(active) ||
+      active < 0
+    ) {
+      throw new IpcProtocolError(
+        "invalid-args",
+        `${method}: 'selections' exige 'anchor'/'active' inteiros >= 0`,
+      );
+    }
+    out.push({ anchor, active });
+  }
+  return out;
+}
+
 /** Valida/parseia um `SearchQuery` vindo do wire (sem `any`); tipo errado ⇒ `invalid-args`. */
 function requireSearchQuery(value: unknown, method: string): SearchQuery {
   if (typeof value !== "object" || value === null) {
@@ -821,8 +901,13 @@ export async function startMainProcess(): Promise<void> {
 
   const createWindow = (documentPath?: string): ElectronBrowserWindow => {
     const window = new BrowserWindow({
-      width: 1024,
-      height: 768,
+      // Janela maior que a padrão: com rail (48) + painel lateral (240), 1024 deixava
+      // só ~736px de editor — apertado para ler/editar. `minWidth` impede que o
+      // layout colapse.
+      width: 1280,
+      height: 820,
+      minWidth: 900,
+      minHeight: 560,
       title: "Scribe",
       show: false,
       webPreferences: {
@@ -834,6 +919,16 @@ export async function startMainProcess(): Promise<void> {
     });
     // Menu in-window (rápido no Linux, sem D-Bus lag)
     window.setMenu(createAppMenu(window));
+    // Diagnóstico: se o renderer morrer (crash/OOM), a janela fecha e o app inteiro sai
+    // (`window-all-closed`). Logar o motivo é o que permite diagnosticar esse tipo de morte.
+    window.webContents.on("render-process-gone", (_event, details) => {
+      console.error(
+        `Scribe: renderer morreu (reason=${details.reason}, exitCode=${details.exitCode})`,
+      );
+    });
+    window.webContents.on("unresponsive", () => {
+      console.error("Scribe: renderer travou (unresponsive)");
+    });
     loadRenderer(window, documentPath);
     window.once("ready-to-show", () => window.show());
     return window;

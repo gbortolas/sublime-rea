@@ -15,6 +15,7 @@ import type { GlyphInstance, LineInstance, Rect, RectInstance, RGBA, SearchMatch
 import type { HighlightSpan, Scope, ThemeResolver } from "../../shared";
 import { SelectionOps, type Selection } from "../../shared";
 import type { GlyphAtlas } from "./atlas";
+import { wrapLine } from "./soft-wrap";
 import type { LineRange } from "./viewport";
 
 /** Fonte de linhas — a costura que o documento real implementará depois. */
@@ -74,6 +75,21 @@ export interface LineLayout {
    * Normalmente: `viewport.w - gutterWidth - scrollbarWidth - paddingLeft`.
    */
   readonly wrapWidth: number;
+  /**
+   * Row visual (índice da linha visual no documento inteiro, contando as linhas de wrap)
+   * da **primeira** linha do range visível.
+   *
+   * Só tem efeito com soft wrap (`wrapWidth > 0`).
+   *
+   * `undefined` (default) = comportamento atual: a row base da primeira linha visível é o
+   * seu índice de linha **lógica** (`range.first`) — a ancoragem no `first` visível é
+   * preservada e o `scrollOffsetPx` continua contado em linhas lógicas.
+   *
+   * Quando informado, o renderizador passa a contar a rolagem em **linhas visuais**: nesse
+   * caso `scrollOffsetPx` deve estar na mesma unidade (row visual), senão o texto quebrado
+   * fica desalinhado em relação à barra de rolagem.
+   */
+  readonly visualRowOffset?: number;
 }
 
 /** Cursor opcional desenhado como `RectInstance`. */
@@ -286,24 +302,44 @@ export function buildInstances(
 
   interface VisualLine {
     readonly docLine: number;
-    readonly segIdx: number;       // índice do segmento nesta linha (0 = primeiro)
+    readonly row: number;          // row visual (base do Y) — 1 row por segmento de wrap
     readonly segmentOffset: number;  // offset do segmento no texto original (code units)
     readonly segmentText: string;    // texto do segmento (substring)
   }
   const visualLines: VisualLine[] = [];
   if (wrap) {
+    // Row base da primeira linha do range: por padrão o índice da linha **lógica**
+    // (`first`) — preserva a ancoragem atual (o scroll continua em linhas lógicas).
+    // `layout.visualRowOffset` permite ao renderizador informar a row visual absoluta
+    // (quando a rolagem passa a ser contada em linhas visuais).
+    let row = layout.visualRowOffset ?? first;
     for (let di = first; di < end; di++) {
-      if (!collapsedLines.has(di)) {
-        const segs = splitLineIntoWraps(source.line(di), layout.wrapWidth, mw);
-        for (let si = 0; si < segs.length; si++) {
-          visualLines.push({ docLine: di, segIdx: si, segmentOffset: segs[si]!.start, segmentText: segs[si]!.text });
-        }
+      if (collapsedLines.has(di)) {
+        // Linha colapsada: não desenha, mas continua ocupando 1 row (compatível com
+        // o caminho sem wrap, onde a row de uma linha é o seu índice lógico).
+        row += 1;
+        continue;
       }
+      // `wrapLine` (soft-wrap.ts) é a implementação canônica: tem o early-exit
+      // "cabe tudo" — linhas que cabem na largura **não** são quebradas.
+      const segs = wrapLine(source.line(di), layout.wrapWidth, mw);
+      for (let si = 0; si < segs.length; si++) {
+        const seg = segs[si]!;
+        visualLines.push({
+          docLine: di,
+          row: row + si,
+          segmentOffset: seg.start,
+          segmentText: seg.text,
+        });
+      }
+      // A próxima linha lógica começa **depois** das rows ocupadas por esta.
+      row += segs.length;
     }
   } else {
     for (let di = first; di < end; di++) {
       if (!collapsedLines.has(di)) {
-        visualLines.push({ docLine: di, segIdx: 0, segmentOffset: 0, segmentText: source.line(di) });
+        // Sem wrap: 1 row por linha de documento — a row é o índice lógico (comportamento atual).
+        visualLines.push({ docLine: di, row: di, segmentOffset: 0, segmentText: source.line(di) });
       }
     }
   }
@@ -313,8 +349,9 @@ export function buildInstances(
     const vl = visualLines[vi]!;
     const index = vl.docLine;
     const text = vl.segmentText;
-    // Y = linha de documento base + segmento extra
-    const y = layout.paddingTop + index * layout.lineHeight + vl.segIdx * layout.lineHeight - layout.scrollOffsetPx;
+    // Y = row visual (acumulada: 1 row por segmento de wrap) — nunca colide com a
+    // linha lógica seguinte, porque a row avança pelo nº de segmentos da linha anterior.
+    const y = layout.paddingTop + vl.row * layout.lineHeight - layout.scrollOffsetPx;
     const spans = highlight?.spansFor(index);
 
     // Gutter: número da linha (1-based), direita-alinhado no gutter.
@@ -757,47 +794,6 @@ function leadingSpaces(s: string): number {
   let i = 0;
   while (i < s.length && s[i] === " ") i++;
   return i;
-}
-
-/**
- * Divide uma linha em segmentos visuais que cabem em `wrapWidth` px.
- * Usado pelo `buildInstances` quando `measureWidth` é fornecido.
- * Retorna a linha inteira como um segmento se `wrapWidth <= 0` ou texto vazio.
- */
-function splitLineIntoWraps(text: string, wrapWidth: number, measure: (text: string) => number): readonly { readonly start: number; readonly text: string }[] {
-  if (wrapWidth <= 0 || text.length === 0) {
-    return [{ start: 0, text }];
-  }
-  const segments: { start: number; text: string }[] = [];
-  let start = 0;
-  while (start < text.length) {
-    let lo = 1;
-    let hi = text.length - start;
-    let fit = 0;
-    while (lo <= hi) {
-      const mid = (lo + hi) >>> 1;
-      if (measure(text.slice(start, start + mid)) <= wrapWidth) {
-        fit = mid;
-        lo = mid + 1;
-      } else {
-        hi = mid - 1;
-      }
-    }
-    if (fit <= 0) fit = 1;
-    let breakAt = fit;
-    // Tenta quebrar em espaço (oportunista)
-    const lastSpace = text.lastIndexOf(" ", start + fit - 1);
-    if (lastSpace > start) {
-      const spaceWidth = fit - (lastSpace - start);
-      if (spaceWidth <= 20) breakAt = lastSpace - start;
-    }
-    if (breakAt <= 0) breakAt = 1;
-    segments.push({ start, text: text.slice(start, start + breakAt) });
-    start += breakAt;
-    // Pula espaços no início do próximo segmento (exceto se for o único)
-    while (start < text.length && text[start] === " ") start += 1;
-  }
-  return segments;
 }
 
 /**

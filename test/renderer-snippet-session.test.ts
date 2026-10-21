@@ -11,7 +11,9 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { parseSnippet } from "../src/renderer/snippets";
 import {
   applyEdit,
+  chooseSnippetOption,
   createSnippetSession,
+  currentChoice,
   currentStop,
   nextTabStop,
   previousTabStop,
@@ -199,6 +201,94 @@ describe("sessão de snippet — aninhamento (ancestrais)", () => {
     expect(next).not.toBeNull();
     expect(next!.updates).toEqual([{ start: 14, end: 25, newText: "pre In post" }]);
     expect(next!.text).toBe("pre In post - pre In post");
+  });
+});
+
+describe("sessão de snippet — escolhas (dropdown)", () => {
+  it("a parada atual expõe as opções e a opção escolhida (1ª por default)", () => {
+    const s = session("${1|a,b,c|}");
+    expect(currentStop(s)).toMatchObject({
+      index: 1,
+      start: 0,
+      end: 1,
+      choices: ["a", "b", "c"],
+      choiceIndex: 0,
+    });
+    expect(currentChoice(s)).toEqual({
+      index: 1,
+      choices: ["a", "b", "c"],
+      selected: 0,
+      start: 0,
+      end: 1,
+    });
+  });
+
+  it("parada sem escolha não tem estado de escolha", () => {
+    expect(currentChoice(session("${1:x}"))).toBeNull();
+    expect(currentStop(session("${1:x}"))?.choices).toBeUndefined();
+  });
+
+  it("escolher a 2ª opção troca o texto da tab stop e re-renderiza o espelho", () => {
+    const s = session("${1|a,b|} $1");
+    expect(s.text).toBe("a a");
+    const next = chooseSnippetOption(s, 1, 1);
+    expect(next).not.toBeNull();
+    expect(next!.text).toBe("b b");
+    // O espelho do índice 1 é re-renderizado com o texto escolhido.
+    expect(next!.updates).toEqual([{ start: 2, end: 3, newText: "b" }]);
+    // O campo primária continua coerente e a opção escolhida é registrada.
+    expect(next!.fields[0]).toMatchObject({ start: 0, end: 1, choiceIndex: 1 });
+    expect(currentChoice(next!)?.selected).toBe(1);
+  });
+
+  it("escolher uma opção mais longa desloca os offsets seguintes", () => {
+    const s = session("${1|a,bbbb|} $1");
+    const next = chooseSnippetOption(s, 1, 1);
+    expect(next).not.toBeNull();
+    expect(next!.text).toBe("bbbb bbbb");
+    expect(next!.fields[0]).toMatchObject({ start: 0, end: 4 });
+    expect(next!.fields[1]).toMatchObject({ start: 5, end: 9 });
+    expect(next!.updates).toEqual([{ start: 5, end: 6, newText: "bbbb" }]);
+    expect(next!.end).toBe(9);
+  });
+
+  it("escolher dentro de um ancestral mantém ancestrais e espelhos coerentes", () => {
+    const s = session("${1:pre ${2|a,b|} post} - ${1} ${2}");
+    expect(s.text).toBe("pre a post - pre a post a");
+    const next = chooseSnippetOption(s, 2, 1);
+    expect(next).not.toBeNull();
+    // Primeiro o espelho do índice 2, depois o do ancestral (índice 1).
+    expect(next!.updates).toEqual([
+      { start: 24, end: 25, newText: "b" },
+      { start: 13, end: 23, newText: "pre b post" },
+    ]);
+    expect(next!.text).toBe("pre b post - pre b post b");
+    const prim1 = next!.fields.find((f) => f.index === 1 && f.isPrimary)!;
+    expect(next!.text.slice(prim1.start, prim1.end)).toBe("pre b post");
+  });
+
+  it("a transformação do espelho continua valendo sobre o texto escolhido", () => {
+    const s = session("${1|a,b|} ${1/(.*)/[$1]/}");
+    expect(s.text).toBe("a [a]");
+    const next = chooseSnippetOption(s, 1, 1);
+    expect(next).not.toBeNull();
+    expect(next!.updates).toEqual([{ start: 2, end: 5, newText: "[b]" }]);
+    expect(next!.text).toBe("b [b]");
+  });
+
+  it("escolher em parada que não é escolha (ou índice inválido) devolve null", () => {
+    const s = session("${1:x} ${2|a,b|}");
+    expect(chooseSnippetOption(s, 1, 0)).toBeNull();  // parada 1 não é escolha
+    expect(chooseSnippetOption(s, 2, 5)).toBeNull();  // opção inexistente
+    expect(chooseSnippetOption(s, 9, 0)).toBeNull();  // índice inexistente
+  });
+
+  it("a sessão é imutável: escolher devolve uma sessão nova", () => {
+    const s = session("${1|a,b|}");
+    const next = chooseSnippetOption(s, 1, 1);
+    expect(next).not.toBe(s);
+    expect(s.text).toBe("a");
+    expect(next!.text).toBe("b");
   });
 });
 

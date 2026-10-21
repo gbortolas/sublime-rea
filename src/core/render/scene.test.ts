@@ -4,7 +4,7 @@
 import { describe, expect, it } from "vitest";
 import type { RGBA, Scope, ScopeStyle, SearchMatch, TextStyle, ThemeResolver } from "../../shared";
 import { GlyphAtlas } from "./atlas";
-import { buildInstances, type LineLayout, type LineSource } from "./scene";
+import { buildInstances, type LineLayout, type LineSource, type SceneInstances } from "./scene";
 
 /** Resolvedor de tema mínimo local ao teste (evita import cruzado entre módulos de `core`). */
 function prefixTheme(rules: Readonly<Record<string, RGBA>>): ThemeResolver {
@@ -57,6 +57,39 @@ function layout(scrollOffsetPx = 0): LineLayout {
     bracketMatchColor: 0xffffffff,
     wrapWidth: 0,
   };
+}
+
+/** Layout com soft wrap ativo (`wrapWidth > 0`). */
+function wrapLayout(wrapWidth: number, scrollOffsetPx = 0): LineLayout {
+  return { ...layout(scrollOffsetPx), wrapWidth };
+}
+
+/**
+ * `buildInstances` com `measureWidth` injetado (13º parâmetro da assinatura).
+ * A medição é determinística (10px por caractere) e independente do atlas.
+ */
+function buildWithMeasure(
+  source: LineSource,
+  lineLayout: LineLayout,
+  atlas: GlyphAtlas,
+  range: { first: number; count: number },
+  measure: (text: string) => number,
+): SceneInstances {
+  return buildInstances(
+    source,
+    lineLayout,
+    atlas,
+    style,
+    range,
+    undefined, // caret
+    undefined, // highlight
+    undefined, // searchHighlight
+    undefined, // selection
+    undefined, // extraCarets
+    undefined, // extraSelections
+    undefined, // bracketMatch
+    measure,
+  );
 }
 
 describe("buildInstances — virtualização", () => {
@@ -255,5 +288,103 @@ describe("buildInstances — destaque de busca (P3.11)", () => {
     );
     expect(scene.rects).toHaveLength(1);
     expect(scene.rects[0]?.color).toBe(0x1e1f22ff);
+  });
+});
+
+describe("buildInstances — soft wrap (row visual)", () => {
+  const atlas = new GlyphAtlas();
+  /** Medição determinística: 10px por caractere. */
+  const measure = (text: string): number => text.length * 10;
+
+  it("linha que cabe na largura não é quebrada (1 segmento, 1 row)", () => {
+    const scene = buildWithMeasure(
+      sourceOf(["hello world"]),
+      wrapLayout(200),
+      atlas,
+      { first: 0, count: 1 },
+      measure,
+    );
+    // "hello world" = 11 chars (110px) — cabe em 200px: 10 glifos, **uma** row.
+    expect(scene.glyphs).toHaveLength(10);
+    expect([...new Set(scene.glyphs.map((g) => g.y))]).toEqual([4]);
+  });
+
+  it("linha longa quebra em N segmentos com rows distintas e crescentes", () => {
+    const scene = buildWithMeasure(
+      sourceOf(["abcdefghijklmnopqrstuvwxyz"]),
+      wrapLayout(100),
+      atlas,
+      { first: 0, count: 1 },
+      measure,
+    );
+    // 26 chars = 260px → segmentos de 10, 10 e 6 chars → rows 0, 1, 2.
+    expect(scene.glyphs).toHaveLength(26);
+    expect([...new Set(scene.glyphs.map((g) => g.y))]).toEqual([4, 24, 44]);
+  });
+
+  it("linhas lógicas consecutivas não compartilham row (sem overlap)", () => {
+    const scene = buildWithMeasure(
+      sourceOf(["abcdefghijklmnopqrstuvwxyz", "XYZ"]),
+      wrapLayout(100),
+      atlas,
+      { first: 0, count: 2 },
+      measure,
+    );
+    // Linha 0 → rows 0,1,2 · linha 1 → row 3. Cada row é exclusiva de um segmento.
+    expect([...new Set(scene.glyphs.map((g) => g.y))]).toEqual([4, 24, 44, 64]);
+    // Ys monótonos na ordem de desenho.
+    const ys = scene.glyphs.map((g) => g.y);
+    expect(ys).toEqual([...ys].sort((a, b) => a - b));
+  });
+
+  it("invariante: rows contíguas, sem buracos e sem repetição entre linhas", () => {
+    const lines = [
+      "short",
+      "uma linha bem mais longa que precisa quebrar em varios segmentos",
+      "x",
+      "outra linha longa para forcar mais um wrap no meio do range",
+    ];
+    const scene = buildWithMeasure(
+      sourceOf(lines),
+      wrapLayout(120),
+      atlas,
+      { first: 0, count: lines.length },
+      measure,
+    );
+    const rows = [...new Set(scene.glyphs.map((g) => g.y))].sort((a, b) => a - b);
+    // Row visual r ⇒ Y = paddingTop + r * lineHeight (contíguas, sem colisão).
+    rows.forEach((y, i) => {
+      expect(y).toBe(4 + i * 20);
+    });
+    // Monótono na ordem de desenho.
+    const ys = scene.glyphs.map((g) => g.y);
+    expect(ys).toEqual([...ys].sort((a, b) => a - b));
+  });
+
+  it("o texto da linha quebrada é preservado (nenhum caractere perdido)", () => {
+    const text = "abcdefghijklmnopqrstuvwxyz";
+    const scene = buildWithMeasure(
+      sourceOf([text]),
+      wrapLayout(100),
+      atlas,
+      { first: 0, count: 1 },
+      measure,
+    );
+    // 1 glifo por caractere (26) — a quebra só muda o Y, nunca o conteúdo.
+    expect(scene.glyphs).toHaveLength(text.length);
+    // Cada um dos 3 segmentos recomeça em x = paddingLeft.
+    expect(scene.glyphs.filter((g) => g.x === 8)).toHaveLength(3);
+  });
+
+  it("visualRowOffset desloca a row base da primeira linha visível", () => {
+    const scene = buildWithMeasure(
+      sourceOf(["abc", "def"]),
+      { ...wrapLayout(100), visualRowOffset: 10 },
+      atlas,
+      { first: 0, count: 2 },
+      measure,
+    );
+    // Row base 10 → Y = paddingTop + 10 * lineHeight = 204; a linha seguinte → 224.
+    expect([...new Set(scene.glyphs.map((g) => g.y))]).toEqual([204, 224]);
   });
 });

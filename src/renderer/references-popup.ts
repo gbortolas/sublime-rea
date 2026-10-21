@@ -14,6 +14,17 @@ export interface ReferencesPopupBinding {
   dispose(): void;
 }
 
+/**
+ * Alterna a visibilidade do popup.
+ *
+ * `hidden` é a **única fonte da verdade**: o atributo é colocado/removido e o CSS global
+ * (`[hidden]{display:none!important}`) vence o `display:flex` inline do popup — sem isso o
+ * popup aparecia no boot. O `display` inline não é alternado aqui.
+ */
+function setVisible(element: HTMLElement, visible: boolean): void {
+  element.hidden = !visible;
+}
+
 export function createReferencesPopup(): ReferencesPopupBinding {
   let isOpenValue = false;
   let allItems: LspLocation[] = [];
@@ -24,6 +35,7 @@ export function createReferencesPopup(): ReferencesPopupBinding {
   // Cria o DOM do popup dinamicamente
   const popup = document.createElement("div");
   popup.id = "references-popup";
+  popup.className = "scribe-panel";
   popup.role = "dialog";
   popup.setAttribute("aria-label", "Referências do símbolo");
   popup.hidden = true;
@@ -44,7 +56,11 @@ export function createReferencesPopup(): ReferencesPopupBinding {
     "color: var(--fg, #ccc);",
     "font-family: inherit;",
     "font-size: 13px;",
+    // O pai (`#ui-overlay`) é `pointer-events:none` — sem isto o popup é inerte
+    // (o input do filtro não recebia foco por clique e os itens não clicavam).
+    "pointer-events: auto;",
   ].join(" ");
+  setVisible(popup, false);
 
   const input = document.createElement("input");
   input.type = "text";
@@ -229,7 +245,7 @@ export function createReferencesPopup(): ReferencesPopupBinding {
     selectedIndex = 0;
     onSelect = callback;
     isOpenValue = true;
-    popup.hidden = false;
+    setVisible(popup, true);
     input.value = "";
     input.focus();
     filterItems();
@@ -238,7 +254,7 @@ export function createReferencesPopup(): ReferencesPopupBinding {
 
   function close(): void {
     if (!isOpenValue) return;
-    popup.hidden = true;
+    setVisible(popup, false);
     allItems = [];
     filtered = [];
     onSelect = undefined;

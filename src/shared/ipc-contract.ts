@@ -74,7 +74,9 @@ export interface DocumentInsertResult {
  * Estado observável de undo/redo de um documento — é o payload que o renderer usa para atualizar
  * a status bar (DEC-TR-3). `revision` é a revisão do buffer após a operação; `caret` é a posição
  * que o `UndoStack` restaurou (o cursor do documento, em code units UTF-16); `selection` é o
- * estado de seleção (colapsado = só cursor) que o `UndoStack` restaurou (P1#1).
+ * estado de seleção (colapsado = só cursor) que o `UndoStack` restaurou (P1#1); `selections` é o
+ * **conjunto** de cursores restaurado (multi-cursor, P2#5) — é ele que devolve os N cursores
+ * aos pontos originais depois de um `Ctrl+Z`.
  */
 export interface DocumentUndoState {
   readonly canUndo: boolean;
@@ -96,23 +98,52 @@ export interface IpcMethods {
   "document.revision"(handle: DocumentHandle): number;
   "document.save"(handle: DocumentHandle): void;
   "document.isDirty"(handle: DocumentHandle): boolean;
+  /**
+   * Insere `text` em `at`.
+   *
+   * `selections` é o conjunto de cursores **antes** da edição (multi-cursor, P2#5): é o
+   * contexto que o undo restaura — um `Ctrl+Z` devolve os N cursores às posições originais.
+   * Opcional: um cliente antigo (sem o parâmetro) continua funcionando (o core infere um cursor
+   * único na posição da edição).
+   */
   "document.insert"(
     handle: DocumentHandle,
     at: number,
     text: string,
     origin: "plugin" | "user",
+    selections?: SelectionSet,
   ): DocumentInsertResult;
   /**
-   * Lote de inserções: aplica múltiplos `{at, text}` como uma transação única.
-   * Cada `at` é absoluto (considera inserts anteriores do lote).
-   * Retorna o resultado consolidado (revisão final, texto final, undo/redo).
+   * Lote de inserções: aplica múltiplos `{at, text, remove?}` como uma transação única
+   * (um `Ctrl+Z` desfaz o lote inteiro).
+   *
+   * Cada `at` é **absoluto no estado do buffer após as entradas anteriores do lote** ⇒ um lote
+   * multi-cursor deve entrar em ordem **descendente** para os offsets continuarem válidos.
+   * `remove` (padrão `""`) é o trecho a apagar em `at` — permite apagar em N cursores de uma vez.
+   *
+   * `selections` é o conjunto de cursores **antes** do lote (o que o undo restaura).
    */
   "document.batchInsert"(
     handle: DocumentHandle,
-    inserts: ReadonlyArray<{ readonly at: number; readonly text: string }>,
+    inserts: ReadonlyArray<{
+      readonly at: number;
+      readonly text: string;
+      readonly remove?: string;
+    }>,
     origin: "plugin" | "user",
+    selections?: SelectionSet,
   ): DocumentInsertResult;
-  "document.replaceOne"(handle: DocumentHandle, at: number, remove: number, insert: string): DocumentInsertResult;
+  /**
+   * Substitui `remove` caracteres a partir de `at` por `insert`.
+   * `selections` é o conjunto de cursores **antes** da edição (o que o undo restaura).
+   */
+  "document.replaceOne"(
+    handle: DocumentHandle,
+    at: number,
+    remove: number,
+    insert: string,
+    selections?: SelectionSet,
+  ): DocumentInsertResult;
   "editor.undo"(handle: DocumentHandle): DocumentUndoState;
   "editor.redo"(handle: DocumentHandle): DocumentUndoState;
   "editor.undoState"(handle: DocumentHandle): DocumentUndoState;

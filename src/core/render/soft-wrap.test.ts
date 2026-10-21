@@ -30,6 +30,17 @@ describe("wrapLine", () => {
     expect(segs[0]!.text).toBe("hi");
   });
 
+  it("linha com espaço que cabe não é quebrada no espaço (early-exit)", () => {
+    // "hello world" = 105px, maxWidth=200 → cabe inteira: **1** segmento.
+    // (O render depende disso: sem o early-exit, linhas que cabem seriam quebradas
+    //  no último espaço e desenhariam rows duplicadas.)
+    const segs = wrapLine("hello world", 200, measure);
+    expect(segs).toHaveLength(1);
+    expect(segs[0]!.text).toBe("hello world");
+    expect(segs[0]!.start).toBe(0);
+    expect(segs[0]!.end).toBe("hello world".length);
+  });
+
   it("linha longa quebra por caractere quando não tem espaço", () => {
     // "abcdef" = 60px, maxWidth=25: quebra em "ab" (20px), "cd" (20px), "ef" (20px)
     const segs = wrapLine("abcdef", 25, measure);

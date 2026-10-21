@@ -13,7 +13,7 @@ import type { DapManager } from "../src/core/dap/dap-manager";
 import { handleIpcRequest, registerIpcHandlers } from "../src/main/index";
 import type { IpcEventBroadcaster, MainIpcHost } from "../src/main/index";
 import { IPC_CHANNEL, IPC_VERSION } from "../src/shared";
-import type { DocumentHandle, IpcResponse } from "../src/shared";
+import type { DocumentHandle, DocumentUndoState, IpcResponse } from "../src/shared";
 import { MAX_EVALUATION_LENGTH } from "../src/shared/dap-contract";
 import {
   MAX_EVALUATION_VALUE_LENGTH,
@@ -110,6 +110,90 @@ describe("main — despacho de IPC sem Electron", () => {
     }
 
     expect(ipc.handlers.has(IPC_CHANNEL.request)).toBe(false);
+  });
+
+  it("multi-cursor: 'selections' vai no wire e o undo devolve os N cursores", async () => {
+    const core = createEditorCore({
+      fileSystem: memoryFs({ "/a.txt": "abc def" }),
+      availableParallelism: 4,
+    });
+    try {
+      const opened = await handleIpcRequest(core, {
+        v: IPC_VERSION,
+        id: 10,
+        method: "document.open",
+        args: ["/a.txt"],
+      });
+      expect(opened.ok).toBe(true);
+      const handle = (opened.ok ? opened.value : 0) as DocumentHandle;
+
+      // Lote multi-cursor: 2 entradas em ordem descendente + os 2 cursores "antes".
+      const inserted = await handleIpcRequest(core, {
+        v: IPC_VERSION,
+        id: 11,
+        method: "document.batchInsert",
+        args: [
+          handle,
+          [
+            { at: 5, text: "X" },
+            { at: 2, text: "Y" },
+          ],
+          "user",
+          [
+            { anchor: 2, active: 2 },
+            { anchor: 5, active: 5 },
+          ],
+        ],
+      });
+      expect(inserted.ok).toBe(true);
+      expect(core.documentText(handle)).toBe("abYc dXef");
+
+      // 1 Ctrl+Z: desfaz as 2 inserções e restaura os 2 cursores.
+      const undone = await handleIpcRequest(core, {
+        v: IPC_VERSION,
+        id: 12,
+        method: "editor.undo",
+        args: [handle],
+      });
+      expect(undone.ok).toBe(true);
+      expect(core.documentText(handle)).toBe("abc def");
+      if (!undone.ok) return;
+      const state = undone.value as DocumentUndoState;
+      expect(state.selections).toEqual([
+        { anchor: 2, active: 2 },
+        { anchor: 5, active: 5 },
+      ]);
+    } finally {
+      core.dispose();
+    }
+  });
+
+  it("multi-cursor: 'selections' malformado é invalid-args (nunca aceito em silêncio)", async () => {
+    const core = createEditorCore({
+      fileSystem: memoryFs({ "/a.txt": "abc" }),
+      availableParallelism: 4,
+    });
+    try {
+      const opened = await handleIpcRequest(core, {
+        v: IPC_VERSION,
+        id: 20,
+        method: "document.open",
+        args: ["/a.txt"],
+      });
+      const handle = (opened.ok ? opened.value : 0) as DocumentHandle;
+
+      const bad = await handleIpcRequest(core, {
+        v: IPC_VERSION,
+        id: 21,
+        method: "document.insert",
+        args: [handle, 0, "x", "user", [{ anchor: "zero", active: 0 }]],
+      });
+      expect(bad.ok).toBe(false);
+      if (bad.ok) return;
+      expect(bad.error.code).toBe("invalid-args");
+    } finally {
+      core.dispose();
+    }
   });
 
   it("command.list devolve o envelope { commands } (a palette lê result.commands)", async () => {

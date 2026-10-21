@@ -35,6 +35,7 @@ import type {
   ReplaceAllResult,
   SearchDocumentResult,
   SearchQuery,
+  SelectionSet,
   DapBreakpoint,
   DapBreakpointSpec,
   DapEvaluation,
@@ -67,19 +68,44 @@ export interface ScribePreloadApi {
   revision(handle: DocumentHandle): Promise<number>;
   save(handle: DocumentHandle): Promise<void>;
   isDirty(handle: DocumentHandle): Promise<boolean>;
+  /**
+   * Insere `text` em `at`. `selections` é o conjunto de cursores **antes** da edição
+   * (multi-cursor) — é o contexto que o undo restaura. Opcional (compatibilidade).
+   */
   insert(
     handle: DocumentHandle,
     at: number,
     text: string,
     origin?: InsertOrigin,
+    selections?: SelectionSet,
   ): Promise<DocumentInsertResult>;
-  /** Lote de inserções: aplica tudo como transação única. */
+  /**
+   * Lote de inserções: aplica tudo como transação única (um `Ctrl+Z` desfaz o lote inteiro).
+   *
+   * O `at` de cada entrada é absoluto **no estado do buffer após as entradas anteriores** ⇒ um
+   * lote multi-cursor deve entrar em ordem **descendente**. `remove` (padrão `""`) apaga em `at`.
+   */
   batchInsert(
     handle: DocumentHandle,
-    inserts: ReadonlyArray<{ readonly at: number; readonly text: string }>,
+    inserts: ReadonlyArray<{
+      readonly at: number;
+      readonly text: string;
+      readonly remove?: string;
+    }>,
     origin?: InsertOrigin,
+    selections?: SelectionSet,
   ): Promise<DocumentInsertResult>;
-  replaceOne(handle: DocumentHandle, at: number, remove: number, insert: string): Promise<DocumentInsertResult>;
+  /**
+   * Substitui `remove` caracteres em `at` por `insert`. `selections` é o conjunto de cursores
+   * **antes** da edição (o que o undo restaura). Opcional (compatibilidade).
+   */
+  replaceOne(
+    handle: DocumentHandle,
+    at: number,
+    remove: number,
+    insert: string,
+    selections?: SelectionSet,
+  ): Promise<DocumentInsertResult>;
   undo(handle: DocumentHandle): Promise<DocumentUndoState>;
   redo(handle: DocumentHandle): Promise<DocumentUndoState>;
   undoState(handle: DocumentHandle): Promise<DocumentUndoState>;
@@ -256,20 +282,46 @@ const api: ScribePreloadApi = {
     call<void>("document.save", [handle]),
   isDirty: (handle: DocumentHandle): Promise<boolean> =>
     call<boolean>("document.isDirty", [handle]),
+  // `selections` só entra no wire quando existe — assim um cliente antigo (ou uma chamada sem
+  // o parâmetro) continua mandando exatamente os mesmos argumentos de antes.
   insert: (
     handle: DocumentHandle,
     at: number,
     text: string,
     origin: InsertOrigin = "user",
-  ): Promise<DocumentInsertResult> => call<DocumentInsertResult>("document.insert", [handle, at, text, origin]),
-  replaceOne: (handle: DocumentHandle, at: number, remove: number, insert: string): Promise<DocumentInsertResult> =>
-    call<DocumentInsertResult>("document.replaceOne", [handle, at, remove, insert]),
+    selections?: SelectionSet,
+  ): Promise<DocumentInsertResult> =>
+    call<DocumentInsertResult>(
+      "document.insert",
+      selections === undefined ? [handle, at, text, origin] : [handle, at, text, origin, selections],
+    ),
+  replaceOne: (
+    handle: DocumentHandle,
+    at: number,
+    remove: number,
+    insert: string,
+    selections?: SelectionSet,
+  ): Promise<DocumentInsertResult> =>
+    call<DocumentInsertResult>(
+      "document.replaceOne",
+      selections === undefined
+        ? [handle, at, remove, insert]
+        : [handle, at, remove, insert, selections],
+    ),
   batchInsert: (
     handle: DocumentHandle,
-    inserts: ReadonlyArray<{ readonly at: number; readonly text: string }>,
+    inserts: ReadonlyArray<{
+      readonly at: number;
+      readonly text: string;
+      readonly remove?: string;
+    }>,
     origin: InsertOrigin = "user",
+    selections?: SelectionSet,
   ): Promise<DocumentInsertResult> =>
-    call<DocumentInsertResult>("document.batchInsert", [handle, inserts, origin]),
+    call<DocumentInsertResult>(
+      "document.batchInsert",
+      selections === undefined ? [handle, inserts, origin] : [handle, inserts, origin, selections],
+    ),
   undo: (handle: DocumentHandle): Promise<DocumentUndoState> =>
     call<DocumentUndoState>("editor.undo", [handle]),
   redo: (handle: DocumentHandle): Promise<DocumentUndoState> =>

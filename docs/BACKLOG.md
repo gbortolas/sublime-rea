@@ -749,6 +749,27 @@ Problemas identificados ao testar o AppImage pela primeira vez:
   - **Limitações**: `hitCondition`/`logMessage` sem UI · watch só reavalia na parada · hover some
     se o adaptador recusar a expressão · watch não persiste entre janelas · sem condição cross-file
 
+## 🐛 Varredura de usabilidade + 3 features (2026-10-21, noite)
+
+- [x] **🐛 Varredura de usabilidade** ✅ **fechado (2026-10-21)**. Partindo do relato do usuário
+      ("zona completa e total: não dá pra ler nem editar, popups sobrepostos, fontes
+      frankenstein"), 7 bugs corrigidos (soft wrap sobreposto, foco do canvas, o app **morrendo**
+      ao fechar o painel de depuração, overlays no boot, tipografia, minimap em blocos, texto sob
+      o minimap) + 3 extras (plugin host nunca subia, janela 1024→1280, realocação de canvas).
+      **E2E por CDP: 10/10** (`/tmp/opencode/cdp-usable.mjs`) · **824 testes / 64 arquivos**.
+- [x] **🔍 Lupa de código no minimap** ✅ **fechado (2026-10-21)** — preview **ampliado (×2.5)**
+      e **colorido** do código sob o mouse, segue o arrasto; o minimap passou a ser colorido
+      (janela = range visível). `src/renderer/code-loupe.ts` (novo) + 23 testes.
+- [x] **🖱️ Multi-cursor + undo/redo por cursor** ✅ **fechado (2026-10-21)** — N cursores editam
+      nos N lugares, sobrevivem à edição e **um Ctrl+Z desfaz tudo e restaura o conjunto**
+      (`selectionsBefore/After` no passo de undo + `advanceSelections` como fonte única). 23 testes.
+- [x] **📝 Snippets — escolhas + variáveis TM** ✅ **fechado (2026-10-21, parser/sessão)** —
+      `${1|a,b,c|}` vira escolha (popup pronto, `snippet-choice.ts`) e `$TM_*` são resolvidas.
+      29 testes. ⚠️ **falta a fiação no `main.ts`** (próximo item).
+- [ ] **📝 Fiar o dropdown de escolhas no renderer** — `main.ts` ainda não chama
+      `showSnippetChoice`; falta abrir o popup ao entrar numa tab stop com escolhas e aplicar
+      `chooseSnippetOption` ao escolher.
+
 ## 🏠 P3 — Housekeeping (2026-10-20, bootstrap)
 
 - [x] **P3.13 — 3 bugs do `setup.py`** ✅ **fechado** (2026-10-20, achados ao rodar o bootstrap

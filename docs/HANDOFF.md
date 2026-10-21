@@ -1,8 +1,8 @@
 # HANDOFF — sublime-rea
 
-> **Documento de handoff entre sessões** (leia antes de retomar). Atualizado em **2026-10-20**.
-> Status: **🧩 DAP — expansões ✅**<br>
-> Próximo: **undo/redo por cursor (multi-cursor)** ou **adaptador Node (vscode-js-debug)**
+> **Documento de handoff entre sessões** (leia antes de retomar). Atualizado em **2026-10-21**.
+> Status: **🐛 varredura de usabilidade ✅ · ✨ 3 features (lupa, multi-cursor, snippets) ✅**<br>
+> Próximo: **snippets (fiação do dropdown) · Ctrl+D (criar cursores) · pilha de undo por documento**
 
 ---
 
@@ -54,20 +54,20 @@ Sem o deadline maior, `open_binary`/`analyze` **via MCP** volta a estourar os 33
 
 **Próximas tarefas:**
 
-> A sessão de 2026-10-20 (noite) **entregou as expansões do DAP** (P4#27 — ver seção própria):
-> breakpoint **condicional**, **watch expressions**, **hover de valor** durante a parada e caret
-> seguindo a linha da parada. O E2E por CDP com o **debugpy real** validou **9/9** no app
-> (`/tmp/opencode/cdp-dap.mjs`) — e no caminho **3 bugs de contrato** foram corrigidos (paleta
-> de comandos vazia, deadlock do `launch` no DAP e LSP quebrando a abertura de arquivos).
+> A sessão de 2026-10-21 (noite) fez uma **varredura completa de usabilidade** a partir do
+> relato do usuário ("o app tá uma zona: não dá pra ler nem editar, popups sobrepostos, fontes
+> frankenstein") e entregou, no mesmo dia, **3 features**: **lupa colorida no minimap**,
+> **multi-cursor com undo/redo por cursor** e **snippets com dropdown de escolhas + variáveis TM**.
+> Os 7 bugs de usabilidade achados (e o crash que matava o app) estão em
+> [§🐛 Varredura de usabilidade](#-varredura-de-usabilidade-2026-10-21).
 
-1. **🔄 Undo/redo por cursor** — histórico granular para múltiplos cursores (expansão do P2#5).
-2. **🧩 DAP — adaptador Node** — `vscode-js-debug` (o `dapDebugServer.js` não vem no `PATH`;
-   exige download/empacotamento — decidir antes).
-3. **📝 Snippets — follow-ups declarados** — dropdown para `${N|a,b,c|}` (hoje usa a 1ª
-   escolha), variáveis TM (`$TM_FILENAME` etc.), snippets de pacotes (`.sublime-snippet` via
-   `PackageResolver`) e expansão de snippets LSP (`insertTextFormat: 2`) no popup de completação.
-4. **🧩 DAP — follow-ups declarados** — logpoints (`logMessage`) na UI, `hitCondition` na UI,
-   REPL interativo (contexto `repl`) e breakpoints condicionais **cross-file**.
+1. **📝 Snippets — fiação do dropdown** — o parser e a sessão já sabem lidar com
+   `${1|a,b,c|}` e as variáveis TM; falta **cablear** no renderer (`main.ts`) o popup de escolha
+   (`src/renderer/snippet-choice.ts` já existe, com a API `showSnippetChoice`).
+2. **⌨️ Ctrl+D / Alt+Shift+Up** — criar cursores extras (hoje só o **Ctrl+click** cria).
+3. **🗃️ Pilha de undo por documento** — hoje a pilha é **global**: desfazer na aba B pode
+   aplicar deltas da aba A no buffer de B (bug pré-existente, **não** corrigido).
+4. **🧩 DAP — adaptador Node** (`vscode-js-debug`) — exige download/empacotamento; decidir antes.
 
 > ✅ **Pegadinha resolvida (2026-10-16, P3.9):** o `setup.py` agora **detecta** um JDK ≥ 21
 > compatível (`JAVA_HOME`, PATH, sdkman, `/usr/lib/jvm`) e escreve um **`export JAVA_HOME=…` ativo**
@@ -974,6 +974,79 @@ bin/ghidra-preanalyze.sh        # cria/atualiza o projeto; ver o header do scrip
 ```
 
 Material de apoio: skill `reverse-engineer-anything` (+ `references/native-and-artifacts.md`).
+
+---
+
+## 🐛 Varredura de usabilidade (2026-10-21, noite)
+
+O usuário reportou: *"acabei de abrir o scribe, e sinceramente tá uma zona completa e total. Nada
+funciona, não dá nem pra ler o arquivo de texto que eu abri. Não dá pra editar tb. Tem popups
+sobrepostos em todo lugar. Tem menus e labels com fontes estranhas em estilo frankenstein."*
+
+**Reprodução** (CDP + screenshot, `/tmp/opencode/cdp-doctor.mjs`): o app abria com o **painel de
+depuração e o popup de referências por cima do texto**, as **linhas quebradas se sobrepunham**
+(texto ilegível), o **minimap** era uma coluna de **blocos cinzas**, e os **botões caíam no Arial
+13.33px do UA**.
+
+### Os 7 bugs (todos corrigidos)
+
+| # | Sev | Bug | Causa | Correção |
+|---|---|---|---|---|
+| 1 | **crítico** | linhas quebradas **por cima** do texto | `scene.ts`: Y = `docLine*lh + segIdx*lh` ⇒ a continuação caía na row da linha seguinte | **rows visuais acumuladas** (`scene.ts`) + `wrapLine` canônico (early-exit "cabe tudo") |
+| 2 | **crítico** | **não dava pra editar** | o teclado vive no `<canvas>` e o foco **não voltava** ao abrir/trocar documento | `focusEditorSurface()` ao abrir/ativar/fechar find bar/painel |
+| 3 | **crítico** | **o app morria** ao fechar o painel de depuração | o "×" chamava `close()` → no escopo do painel resolve para o **`window.close()` global** ⇒ janela fecha ⇒ app sai (exit 0) | `openPanel()`/`closePanel()` locais |
+| 4 | alto | painel de depuração + popup de referências **abertos no boot** | `display:flex` **inline** vencia o `[hidden]` do UA | `[hidden]{display:none!important}` global + `hidden` como fonte da verdade |
+| 5 | alto | **fontes frankenstein** | sem `font: inherit` ⇒ UA aplica Arial 13.33px; token `--s-font` inexistente | 1 família + 1 escala para toda a casca |
+| 6 | alto | minimap em **blocos cinzas** | `lineH = h/lineCount` (altura escalava) + barra de largura total | altura **fixa** (3px) + largura **proporcional** à linha |
+| 7 | médio | texto por baixo do minimap; popups coexistindo; code-actions órfão | largura útil não desconta o minimap; nenhum popup fecha o outro | helper de largura útil; `closeContextPopups()`; remoção do órfão |
+
+**Bônus** (achados no caminho): o **plugin host nunca subia** (`utilityProcess.postMessage` **não
+clona** `MessagePortMain` ⇒ "An object could not be cloned" em todo boot) — o transporte passou ao
+**canal nativo** (`process.parentPort`); a janela foi de 1024×768 para **1280×820**; e o
+`resize()`/`paint()` do minimap pararam de **reatribuir `canvas.width`** a cada quadro (realocar o
+backing store derrubava o raster).
+
+### Verificação
+
+- Gates: `typecheck`/`lint`/`test`/`build` exit 0 · **824 testes / 64 arquivos**.
+- **E2E por CDP** (`/tmp/opencode/cdp-usable.mjs`): **10/10** — nenhum overlay indevido no boot,
+  **zero** controles em Arial, digitar funciona **sem clicar antes** (o bug #2), o texto é
+  pixelado no canvas, e o app **sobrevive** ao fechar o painel de depuração
+  (`/tmp/opencode/cdp-panel.mjs`).
+
+---
+
+## ✨ 3 features (2026-10-21, noite)
+
+### 1. 🔍 Lupa de código no minimap (o "zoom colorido" do usuário)
+
+`src/renderer/code-loupe.ts` (novo, puro) + `minimap.ts`: ao passar o mouse sobre o minimap, um
+painel flutuante **à esquerda** dele mostra **~14 linhas × 2.5×** com **cores de sintaxe**, a linha
+sob o cursor destacada e o marcador do caret; **arrastar** move a lupa e rola o documento. O
+minimap passou a ser **colorido** de verdade: a janela dele é o **range visível** (o mesmo que o
+`HighlightStore` cobre) ⇒ os spans existem. 23 testes das funções puras.
+
+### 2. 🖱️ Multi-cursor de verdade + undo/redo por cursor
+
+- **shared** — `advanceSelections(selections, edits)` (regra cumulativa, **fonte única** core↔renderer);
+  os 3 métodos de edição do IPC ganharam `selections?: SelectionSet` (o conjunto **antes** da
+  edição) e o lote ganhou `remove?: string` por entrada.
+- **core** — o `CommandBus` grava `selectionsBefore/After` no passo de undo (o `UndoStack` já
+  suportava, mas **ninguém preenchia**); o `applyEdits` desloca cursores e caret; o ramo
+  multi-cursor do `runInsert` foi removido (a edição passou a ser **explícita**).
+- **renderer** — `insertText`/Backspace/Delete com N cursores geram N edits (ordem **descendente**
+  ⇒ offsets válidos), o splice local e o lote seguem a mesma ordem, e o `runHistory` **restaura o
+  conjunto de cursores** (clampado) em vez de colapsar para 1.
+- 16 testes no renderer + 7 no core (round-trip undo/redo com 2 cursores).
+
+### 3. 📝 Snippets — dropdown de escolhas + variáveis TM
+
+`${1|a,b,c|}` passa a produzir uma **escolha** (o popup `src/renderer/snippet-choice.ts` já
+existe, com setas/Enter/Esc) e `$TM_FILENAME`, `$TM_FILENAME_BASE`, `$TM_DIRECTORY`,
+`$TM_SELECTED_TEXT`, `$TM_CURRENT_LINE`, `$TM_CURRENT_WORD`, `$TM_LINE_INDEX` são resolvidas na
+expansão (variável desconhecida ou sem contexto fica **literal**). 29 testes novos.
+
+> ⚠️ **Pendente:** a **fiação no renderer** (o `main.ts` ainda não chama `showSnippetChoice`).
 
 ---
 

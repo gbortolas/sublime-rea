@@ -314,11 +314,27 @@ export class CommandBusImpl implements CommandBus, EditScopeHost {
     const target = this.resolveTarget?.();
     if (target === undefined) return;
 
+    // O "antes" é lido **antes** de aplicar os deltas; o "depois", **depois** — o alvo
+    // (o `EditorCore`) desloca os cursores junto com o texto, então o "depois" já vem
+    // posicionado. É isso que faz o undo restaurar o **conjunto** de cursores (multi-cursor,
+    // P2#5) e não só o caret.
     const caretBefore = target.caret();
+    const selectionBefore = target.selection();
+    const selectionsBefore = [...target.selections()];
     target.applyEdits(edits, origin);
     const caretAfter = target.caret();
+    const selectionAfter = target.selection();
+    const selectionsAfter = [...target.selections()];
 
-    const base: UndoRecordOptions = { origin, caretBefore, caretAfter };
+    const base: UndoRecordOptions = {
+      origin,
+      caretBefore,
+      caretAfter,
+      selectionBefore,
+      selectionAfter,
+      selectionsBefore,
+      selectionsAfter,
+    };
     if (group === undefined) {
       this.history.record(record.label, edits, base);
     } else {

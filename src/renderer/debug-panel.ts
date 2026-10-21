@@ -76,6 +76,15 @@ export interface DebugViewBinding {
   open(): void;
   close(): void;
   dispose(): void;
+  /**
+   * Notifica a **mudança de visibilidade** do painel (abriu/fechou).
+   *
+   * O renderer usa isto para sincronizar o minimap (que divide a faixa direita com o
+   * painel) e recalcular o wrap do texto. É um **evento**, e não um gancho por frame:
+   * um gancho por frame que marcasse o layout como sujo realimentava o próprio frame
+   * (loop de layout) e travava o renderer.
+   */
+  onVisibilityChange(callback: (open: boolean) => void): void;
 }
 
 const FRAME_ICON_SVG =
@@ -92,6 +101,61 @@ const CHEVRON_DOWN =
   '<svg viewBox="0 0 16 16" width="10" height="10" fill="none" stroke="currentColor" ' +
   'stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">' +
   '<path d="M4 6l4 4 4-4"/></svg>';
+
+/**
+ * Monta um ícone **SVG inline** no padrão do repo (viewBox 16×16, `currentColor`, `fill:none`).
+ *
+ * Antes o painel usava glifos Unicode (triângulo de play, pausa, setas de passo, quadrado de
+ * stop,times, mais e refresh) — eles caíam numa **fonte de fallback** do sistema (o "glifo
+ * estranho" reportado). SVG inline herda a cor do tema e escala com o zoom, sem depender de
+ * nenhuma fonte instalada.
+ */
+function icon(body: string, size = 14): string {
+  return (
+    `<svg viewBox="0 0 16 16" width="${size}" height="${size}" fill="none" stroke="currentColor" ` +
+    `stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false">` +
+    body +
+    `</svg>`
+  );
+}
+
+/** Iniciar / continuar. */
+const ICON_PLAY = icon('<path d="M5.6 3.6 12.4 8l-6.8 4.4z"/>');
+/** Pausar. */
+const ICON_PAUSE = icon('<path d="M6.3 3.8v8.4M9.7 3.8v8.4"/>');
+/** Passo por cima: reta para a direita que **desce** em curva. */
+const ICON_STEP_OVER = icon('<path d="M2.8 4.4h5a2.6 2.6 0 0 1 0 5.2"/><path d="M6.6 8 7.8 9.6 9 8"/>');
+/** Passo para dentro: reta para **baixo** que vira para a direita. */
+const ICON_STEP_INTO = icon('<path d="M8 2.6v6h5.2"/><path d="M11.4 6.8 13.4 8.6 11.4 10.4"/>');
+/** Passo para fora: reta para a direita que **sobe** em curva. */
+const ICON_STEP_OUT = icon('<path d="M2.8 11.6h5a2.6 2.6 0 0 0 0-5.2"/><path d="M6.6 8 7.8 6.4 9 8"/>');
+/** Encerrar. */
+const ICON_STOP = icon('<rect x="4.3" y="4.3" width="7.4" height="7.4" rx="1.2"/>');
+/** Fechar (painel). */
+const ICON_CLOSE = icon('<path d="M4.6 4.6l6.8 6.8M11.4 4.6l-6.8 6.8"/>');
+/** Fechar / remover (linhas). */
+const ICON_CLOSE_SMALL = icon('<path d="M4.6 4.6l6.8 6.8M11.4 4.6l-6.8 6.8"/>', 12);
+/** Adicionar expressão de observação. */
+const ICON_PLUS = icon('<path d="M8 3.4v9.2M3.4 8h9.2"/>', 12);
+/** Reavaliar expressões de observação. */
+const ICON_REFRESH = icon(
+  '<path d="M14 8a6 6 0 1 1-6-6c1.68 0 3.29.67 4.49 1.83L14 5.33"/>' +
+  '<path d="M14 2v3.33h-3.33"/>',
+  12,
+);
+/** Separador / valor ausente. */
+const ICON_DASH = icon('<path d="M4 8h8"/>', 12);
+
+/**
+ * Alterna a visibilidade de um painel.
+ *
+ * `hidden` é a **única fonte da verdade**: o atributo é colocado/removido e o CSS global
+ * (`[hidden]{display:none!important}`) vence o `display:flex` inline do painel — sem isso o
+ * painel aparecia no boot. O `display` inline não é alternado aqui.
+ */
+function setVisible(element: HTMLElement, visible: boolean): void {
+  element.hidden = !visible;
+}
 
 /** Cria a interface de depuração (barra + painel) e injeta no `#ui-overlay`. */
 export function createDebugView(): DebugViewBinding {
@@ -120,6 +184,12 @@ export function createDebugView(): DebugViewBinding {
 
   let onAction: ((action: DebugAction) => void) | undefined;
   let onFrameSelect: ((frame: DapStackFrame) => void) | undefined;
+  /** Notificado quando o painel abre/fecha (o renderer sincroniza o minimap com ele). */
+  let visibilityCallback: ((open: boolean) => void) | undefined;
+
+  function notifyVisibility(): void {
+    visibilityCallback?.(isOpenValue);
+  }
   let onScopesRequest: ((frame: DapStackFrame) => void) | undefined;
   let onVariablesRequest: ((reference: number) => void) | undefined;
   let onBreakpointConditionChange: ((line: number, condition: string) => void) | undefined;
@@ -133,14 +203,15 @@ export function createDebugView(): DebugViewBinding {
   // ── Barra de ferramentas ──────────────────────────────────────────────────────────────────
   const toolbar = document.createElement("div");
   toolbar.id = "debug-toolbar";
+  toolbar.className = "scribe-panel";
   toolbar.role = "toolbar";
   toolbar.setAttribute("aria-label", "Depuração");
   toolbar.hidden = true;
   toolbar.style.cssText = [
     "position: absolute;",
     "top: 8px;",
-    "left: 50%;",
-    "transform: translateX(-50%);",
+    // Canto direito da área de texto, à direita do minimap (mesma convenção do find bar).
+    "right: calc(var(--s-minimap-w, 72px) + 12px);",
     "display: flex;",
     "align-items: center;",
     "gap: 4px;",
@@ -153,7 +224,10 @@ export function createDebugView(): DebugViewBinding {
     "font-family: inherit;",
     "font-size: 12px;",
     "color: var(--s-fg, #ccc);",
+    // O pai (`#ui-overlay`) é `pointer-events:none` — sem isto a barra é inerte.
+    "pointer-events: auto;",
   ].join(" ");
+  setVisible(toolbar, false);
 
   const stateLabel = document.createElement("span");
   stateLabel.style.cssText = [
@@ -164,30 +238,34 @@ export function createDebugView(): DebugViewBinding {
   ].join(" ");
   toolbar.appendChild(stateLabel);
 
-  const buttons: { action: DebugAction; label: string; title: string; id: string }[] = [
-    { action: "continue", label: "▶", title: "Continuar (F5)", id: "debug-continue" },
-    { action: "pause", label: "⏸", title: "Pausar", id: "debug-pause" },
-    { action: "stepOver", label: "⤵", title: "Passo por cima (F10)", id: "debug-step-over" },
-    { action: "stepInto", label: "⤓", title: "Passo para dentro (F11)", id: "debug-step-into" },
-    { action: "stepOut", label: "⤴", title: "Passo para fora (Shift+F11)", id: "debug-step-out" },
-    { action: "stop", label: "■", title: "Encerrar (Shift+F5)", id: "debug-stop" },
+  const buttons: { action: DebugAction; icon: string; title: string; id: string }[] = [
+    { action: "continue", icon: ICON_PLAY, title: "Continuar (F5)", id: "debug-continue" },
+    { action: "pause", icon: ICON_PAUSE, title: "Pausar", id: "debug-pause" },
+    { action: "stepOver", icon: ICON_STEP_OVER, title: "Passo por cima (F10)", id: "debug-step-over" },
+    { action: "stepInto", icon: ICON_STEP_INTO, title: "Passo para dentro (F11)", id: "debug-step-into" },
+    { action: "stepOut", icon: ICON_STEP_OUT, title: "Passo para fora (Shift+F11)", id: "debug-step-out" },
+    { action: "stop", icon: ICON_STOP, title: "Encerrar (Shift+F5)", id: "debug-stop" },
   ];
   const buttonById = new Map<string, HTMLButtonElement>();
   for (const spec of buttons) {
     const button = document.createElement("button");
     button.id = spec.id;
     button.type = "button";
-    button.textContent = spec.label;
+    button.innerHTML = spec.icon;
     button.title = spec.title;
+    button.setAttribute("aria-label", spec.title);
     button.style.cssText = [
       "min-width: 24px;",
       "height: 22px;",
+      "display: inline-flex;",
+      "align-items: center;",
+      "justify-content: center;",
+      "padding: 0 3px;",
       "border: none;",
       "border-radius: 4px;",
       "background: transparent;",
       "color: inherit;",
       "cursor: pointer;",
-      "font-size: 13px;",
       "line-height: 1;",
     ].join(" ");
     button.addEventListener("click", () => onAction?.(spec.action));
@@ -199,13 +277,16 @@ export function createDebugView(): DebugViewBinding {
   // ── Painel ────────────────────────────────────────────────────────────────────────────────
   const panel = document.createElement("div");
   panel.id = "debug-panel";
+  panel.className = "scribe-panel";
   panel.role = "complementary";
   panel.setAttribute("aria-label", "Depuração — pilha e variáveis");
   panel.hidden = true;
   panel.style.cssText = [
     "position: absolute;",
+    // Logo abaixo da barra de ferramentas (top: 8px + ~30px de altura).
     "top: 44px;",
-    "right: 12px;",
+    // Canto direito da área de texto, à direita do minimap (mesma convenção do find bar).
+    "right: calc(var(--s-minimap-w, 72px) + 12px);",
     "width: 340px;",
     "max-height: 62vh;",
     "display: flex;",
@@ -218,8 +299,27 @@ export function createDebugView(): DebugViewBinding {
     "color: var(--s-fg, #ccc);",
     "font-family: inherit;",
     "font-size: 12px;",
+    // O conteúdo grande rola **dentro** do painel (o corpo tem `overflow-y:auto`).
     "overflow: hidden;",
+    // O pai (`#ui-overlay`) é `pointer-events:none` — sem isto o painel é inerte.
+    "pointer-events: auto;",
   ].join(" ");
+  setVisible(panel, false);
+
+  /**
+   * Recalcula o recuo à direita da barra e do painel.
+   *
+   * A faixa da direita é disputada pelo **minimap** (`--s-minimap-w`, 72px). Com o painel de
+   * depuração aberto o `main.ts` esconde o minimap (`applyMinimapVisibility`) — a faixa fica
+   * livre e os painéis encostam na borda; com o minimap visível (painel fechado, sessão ativa)
+   * eles ficam à **direita** dele, como o find bar.
+   */
+  function applyRightOffset(): void {
+    const offset = isOpenValue ? "12px" : "calc(var(--s-minimap-w, 72px) + 12px)";
+    toolbar.style.right = offset;
+    panel.style.right = offset;
+  }
+  applyRightOffset();
 
   const header = document.createElement("div");
   header.style.cssText = [
@@ -233,17 +333,24 @@ export function createDebugView(): DebugViewBinding {
   header.textContent = "Depuração";
   const closeButton = document.createElement("button");
   closeButton.type = "button";
-  closeButton.textContent = "×";
+  closeButton.id = "debug-close";
+  closeButton.innerHTML = ICON_CLOSE;
   closeButton.title = "Fechar painel";
+  closeButton.setAttribute("aria-label", "Fechar painel");
   closeButton.style.cssText = [
+    "display: inline-flex;",
+    "align-items: center;",
+    "justify-content: center;",
+    "width: 20px;",
+    "height: 20px;",
+    "padding: 0;",
     "border: none;",
     "background: transparent;",
     "color: inherit;",
     "cursor: pointer;",
-    "font-size: 15px;",
     "line-height: 1;",
   ].join(" ");
-  closeButton.addEventListener("click", () => close());
+  closeButton.addEventListener("click", () => closePanel());
   header.appendChild(closeButton);
   panel.appendChild(header);
 
@@ -287,6 +394,7 @@ export function createDebugView(): DebugViewBinding {
     "white-space: pre-wrap;",
   ].join(" ");
   overlay?.appendChild(valueTip);
+  setVisible(valueTip, false);
 
   // ── Helpers de render ─────────────────────────────────────────────────────────────────────
   function sectionLabel(text: string): HTMLElement {
@@ -415,15 +523,21 @@ export function createDebugView(): DebugViewBinding {
 
       const remove = document.createElement("button");
       remove.type = "button";
-      remove.textContent = "×";
+      remove.innerHTML = ICON_CLOSE_SMALL;
       remove.title = "Remover breakpoint";
+      remove.setAttribute("aria-label", "Remover breakpoint");
       remove.style.cssText = [
         "flex: 0 0 auto;",
+        "display: inline-flex;",
+        "align-items: center;",
+        "justify-content: center;",
+        "width: 18px;",
+        "height: 18px;",
+        "padding: 0;",
         "border: none;",
         "background: transparent;",
         "color: var(--s-fg-muted, #999);",
         "cursor: pointer;",
-        "font-size: 13px;",
         "line-height: 1;",
       ].join(" ");
       remove.addEventListener("click", () => onBreakpointRemove?.(spec.line));
@@ -489,18 +603,22 @@ export function createDebugView(): DebugViewBinding {
 
   const watchAddButton = document.createElement("button");
   watchAddButton.type = "button";
-  watchAddButton.textContent = "＋";
+  watchAddButton.innerHTML = ICON_PLUS;
   watchAddButton.title = "Adicionar expressão de observação";
+  watchAddButton.setAttribute("aria-label", "Adicionar expressão de observação");
   watchAddButton.style.cssText = [
     "flex: 0 0 auto;",
+    "display: inline-flex;",
+    "align-items: center;",
+    "justify-content: center;",
     "height: 20px;",
     "width: 22px;",
+    "padding: 0;",
     "border: 1px solid var(--s-border, #3c3c3c);",
     "border-radius: 3px;",
     "background: transparent;",
     "color: var(--s-fg, #ccc);",
     "cursor: pointer;",
-    "font-size: 12px;",
     "line-height: 1;",
   ].join(" ");
 
@@ -521,18 +639,22 @@ export function createDebugView(): DebugViewBinding {
 
   const watchRefreshButton = document.createElement("button");
   watchRefreshButton.type = "button";
-  watchRefreshButton.textContent = "⟳";
+  watchRefreshButton.innerHTML = ICON_REFRESH;
   watchRefreshButton.title = "Reavaliar expressões";
+  watchRefreshButton.setAttribute("aria-label", "Reavaliar expressões");
   watchRefreshButton.style.cssText = [
     "flex: 0 0 auto;",
+    "display: inline-flex;",
+    "align-items: center;",
+    "justify-content: center;",
     "height: 20px;",
     "width: 22px;",
+    "padding: 0;",
     "border: 1px solid var(--s-border, #3c3c3c);",
     "border-radius: 3px;",
     "background: transparent;",
     "color: var(--s-fg, #ccc);",
     "cursor: pointer;",
-    "font-size: 12px;",
     "line-height: 1;",
   ].join(" ");
   watchRefreshButton.addEventListener("click", () => onWatchRefresh?.());
@@ -579,30 +701,50 @@ export function createDebugView(): DebugViewBinding {
       el.appendChild(name);
 
       const value = document.createElement("span");
-      value.textContent = watchValues.get(expression) ?? "—";
-      value.title = watchValues.get(expression) ?? "";
-      value.style.cssText = [
-        "flex: 1 1 auto;",
-        "min-width: 0;",
-        "color: var(--s-accent, #3794ff);",
-        "font-family: ui-monospace, monospace;",
-        "overflow: hidden;",
-        "text-overflow: ellipsis;",
-        "white-space: nowrap;",
-      ].join(" ");
+      const evaluated = watchValues.get(expression);
+      if (evaluated === undefined) {
+        // Sem valor avaliado: um traço (SVG) no lugar do glifo Unicode.
+        value.innerHTML = ICON_DASH;
+        value.title = "sem valor avaliado";
+        value.setAttribute("aria-label", "sem valor avaliado");
+        value.style.cssText = [
+          "flex: 0 0 auto;",
+          "display: inline-flex;",
+          "align-items: center;",
+          "opacity: .6;",
+        ].join(" ");
+      } else {
+        value.textContent = evaluated;
+        value.title = evaluated;
+        value.style.cssText = [
+          "flex: 1 1 auto;",
+          "min-width: 0;",
+          "color: var(--s-accent, #3794ff);",
+          "font-family: ui-monospace, monospace;",
+          "overflow: hidden;",
+          "text-overflow: ellipsis;",
+          "white-space: nowrap;",
+        ].join(" ");
+      }
       el.appendChild(value);
 
       const remove = document.createElement("button");
       remove.type = "button";
-      remove.textContent = "×";
+      remove.innerHTML = ICON_CLOSE_SMALL;
       remove.title = "Remover expressão";
+      remove.setAttribute("aria-label", "Remover expressão");
       remove.style.cssText = [
         "flex: 0 0 auto;",
+        "display: inline-flex;",
+        "align-items: center;",
+        "justify-content: center;",
+        "width: 18px;",
+        "height: 18px;",
+        "padding: 0;",
         "border: none;",
         "background: transparent;",
         "color: var(--s-fg-muted, #999);",
         "cursor: pointer;",
-        "font-size: 13px;",
         "line-height: 1;",
       ].join(" ");
       remove.addEventListener("click", () => onWatchRemove?.(expression));
@@ -644,10 +786,10 @@ export function createDebugView(): DebugViewBinding {
           onFrameSelect?.(frame);
           requestScopes(frame);
         });
-        const icon = document.createElement("span");
-        icon.innerHTML = FRAME_ICON_SVG;
-        icon.style.cssText = "flex-shrink: 0; opacity: .7; display: inline-flex;";
-        el.insertBefore(icon, el.children[1] ?? null);
+        const frameIcon = document.createElement("span");
+        frameIcon.innerHTML = FRAME_ICON_SVG;
+        frameIcon.style.cssText = "flex-shrink: 0; opacity: .7; display: inline-flex;";
+        el.insertBefore(frameIcon, el.children[1] ?? null);
         stackHost.appendChild(el);
       }
 
@@ -726,6 +868,32 @@ export function createDebugView(): DebugViewBinding {
     if (isOpenValue && state === "stopped") render();
   }
 
+  /**
+   * Abre/fecha o painel.
+   *
+   * ⚠️ O nome local é `openPanel`/`closePanel` (e **não** `close`): um `close()` solto
+   * neste escopo resolveria para o **`window.close()` global** e o botão "×" fecharia a
+   * **janela** — o app inteiro saía (exit 0) ao fechar o painel de depuração.
+   */
+  function openPanel(): void {
+    isOpenValue = true;
+    setVisible(panel, true);
+    setVisible(toolbar, true);
+    applyRightOffset();
+    render();
+    notifyVisibility();
+  }
+
+  function closePanel(): void {
+    isOpenValue = false;
+    setVisible(panel, false);
+    const active = state !== "inactive" && state !== "terminated" && state !== "errored";
+    setVisible(toolbar, active);
+    applyRightOffset();
+    render();
+    notifyVisibility();
+  }
+
   return {
     get isOpen(): boolean {
       return isOpenValue;
@@ -734,7 +902,8 @@ export function createDebugView(): DebugViewBinding {
       state = next;
       const active = state !== "inactive" && state !== "terminated" && state !== "errored";
       // A barra fica visível enquanto o painel estiver aberto (mesmo sem sessão).
-      toolbar.hidden = !isOpenValue && !active;
+      setVisible(toolbar, isOpenValue || active);
+      applyRightOffset();
       if (!active) {
         if (state === "inactive" || state === "terminated") {
           scopesByFrame.clear();
@@ -757,8 +926,9 @@ export function createDebugView(): DebugViewBinding {
       variablesByRef.clear();
       expandedRefs.clear();
       isOpenValue = true;
-      panel.hidden = false;
-      toolbar.hidden = false;
+      setVisible(panel, true);
+      setVisible(toolbar, true);
+      applyRightOffset();
       render();
       const first = frames[0];
       if (first !== undefined) {
@@ -842,7 +1012,7 @@ export function createDebugView(): DebugViewBinding {
     },
     showDebugValue(text: string, x: number, y: number): void {
       valueTip.textContent = text;
-      valueTip.hidden = false;
+      setVisible(valueTip, true);
       const width = valueTip.offsetWidth;
       const height = valueTip.offsetHeight;
       const left = Math.min(x + 12, Math.max(0, window.innerWidth - width - 8));
@@ -851,10 +1021,13 @@ export function createDebugView(): DebugViewBinding {
       valueTip.style.top = `${top}px`;
     },
     hideDebugValue(): void {
-      valueTip.hidden = true;
+      setVisible(valueTip, false);
     },
     onAction(callback: (action: DebugAction) => void): void {
       onAction = callback;
+    },
+    onVisibilityChange(callback: (open: boolean) => void): void {
+      visibilityCallback = callback;
     },
     onFrameSelect(callback: (frame: DapStackFrame) => void): void {
       onFrameSelect = callback;
@@ -866,17 +1039,10 @@ export function createDebugView(): DebugViewBinding {
       onVariablesRequest = callback;
     },
     open(): void {
-      isOpenValue = true;
-      panel.hidden = false;
-      toolbar.hidden = false;
-      render();
+      openPanel();
     },
     close(): void {
-      isOpenValue = false;
-      panel.hidden = true;
-      const active = state !== "inactive" && state !== "terminated" && state !== "errored";
-      toolbar.hidden = !active;
-      render();
+      closePanel();
     },
     dispose(): void {
       toolbar.remove();

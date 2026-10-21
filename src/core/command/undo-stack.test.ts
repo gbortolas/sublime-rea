@@ -103,6 +103,57 @@ describe("UndoStack — agrupamento", () => {
   });
 });
 
+describe("UndoStack — multi-cursor (conjunto de seleções)", () => {
+  it("undo/redo restauram o conjunto de seleções, não só o caret", () => {
+    const stack = new UndoStack();
+    const target = new FakeTarget();
+
+    const before = [
+      { anchor: 2, active: 2 },
+      { anchor: 5, active: 5 },
+    ];
+    const after = [
+      { anchor: 3, active: 3 },
+      { anchor: 7, active: 7 },
+    ];
+
+    stack.record("Insert", [{ at: 5, remove: "", insert: "x" }], {
+      caretBefore: 5,
+      caretAfter: 7,
+      selectionBefore: before[0]!,
+      selectionAfter: after[0]!,
+      selectionsBefore: before,
+      selectionsAfter: after,
+    });
+
+    // O undo devolve os N cursores às posições originais (não colapsa para 1 cursor).
+    target.setSelections(after);
+    expect(stack.undo(target)).toBe(true);
+    expect(target.selections()).toEqual(before);
+    expect(target.caret()).toBe(5);
+
+    // O redo devolve os N cursores avançados.
+    expect(stack.redo(target)).toBe(true);
+    expect(target.selections()).toEqual(after);
+    expect(target.caret()).toBe(7);
+  });
+
+  it("sem 'selections' explícitas o passo assume o cursor único da seleção", () => {
+    const stack = new UndoStack();
+    const target = new FakeTarget();
+
+    stack.record("Insert", [{ at: 0, remove: "", insert: "a" }], {
+      caretBefore: 0,
+      caretAfter: 1,
+      selectionBefore: { anchor: 0, active: 0 },
+      selectionAfter: { anchor: 1, active: 1 },
+    });
+
+    expect(stack.undo(target)).toBe(true);
+    expect(target.selections()).toEqual([{ anchor: 0, active: 0 }]);
+  });
+});
+
 describe("UndoStack — glue e soft", () => {
   it("funde grupos marcados num único passo", () => {
     const stack = new UndoStack();

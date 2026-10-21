@@ -61,6 +61,7 @@ import {
   SearchInputError,
   SelectionOps,
   SelectionSetOps,
+  advanceSelections,
   parseResourceUri,
 } from "../../shared";
 import { availableParallelism as osAvailableParallelism } from "node:os";
@@ -180,26 +181,47 @@ export interface EditorCore {
   /**
    * Insere texto na posição `at` do documento, devolvendo resultado rico
    * (revisão, texto completo, estado de undo/redo) para eliminar roundtrips.
+   *
+   * `selections` é o conjunto de cursores **antes** da edição (multi-cursor, P2#5) — é o
+   * contexto que o undo restaura. Opcional (cliente antigo continua funcionando).
    */
   insertText(
     handle: DocumentHandle,
     at: number,
     text: string,
     origin?: "plugin" | "user",
+    selections?: SelectionSet,
   ): Promise<DocumentInsertResult>;
   /**
    * Substitui `remove` caracteres a partir de `at` por `insert`.
    * Devolve resultado rico (revisão, texto completo, undo/redo).
+   *
+   * `selections` é o conjunto de cursores **antes** da edição (o que o undo restaura).
    */
-  replaceOne(handle: DocumentHandle, at: number, remove: number, insert: string): Promise<DocumentInsertResult>;
+  replaceOne(
+    handle: DocumentHandle,
+    at: number,
+    remove: number,
+    insert: string,
+    selections?: SelectionSet,
+  ): Promise<DocumentInsertResult>;
   /**
-   * Lote de inserções atômicas: aplica cada `{at, text}` em sequência, como
+   * Lote de inserções atômicas: aplica cada `{at, text, remove?}` em sequência, como
    * uma única transação de undo. Retorna o resultado consolidado.
+   *
+   * O `at` de cada entrada é absoluto **no estado do buffer após as entradas anteriores** ⇒ um
+   * lote multi-cursor deve entrar em ordem **descendente**.
+   * `selections` é o conjunto de cursores **antes** do lote (o que o undo restaura).
    */
   batchInsert(
     handle: DocumentHandle,
-    inserts: ReadonlyArray<{ readonly at: number; readonly text: string }>,
+    inserts: ReadonlyArray<{
+      readonly at: number;
+      readonly text: string;
+      readonly remove?: string;
+    }>,
     origin?: "plugin" | "user",
+    selections?: SelectionSet,
   ): Promise<DocumentInsertResult>;
   revisionOf(handle: DocumentHandle): number;
   saveDocument(handle: DocumentHandle, signal?: AbortSignal): Promise<void>;
@@ -742,6 +764,15 @@ export function createEditorCore(options: EditorCoreOptions = {}): EditorCore {
         for (const edit of edits) {
           buffer.apply({ from: edit.at, removed: edit.remove, inserted: edit.insert }, origin);
         }
+        // Os cursores **andam com o texto**: um delta desloca as posições (multi-cursor, P2#5).
+        // É esta regra que faz o "depois" do undo/redo sair posicionado — e o `CommandBus`
+        // grava justamente o estado lido aqui (antes/depois) na transação.
+        state.selections = advanceSelections(state.selections, edits);
+        const primary = state.selections[0];
+        if (primary !== undefined) {
+          state.selection = primary;
+          state.caret = primary.active;
+        }
       },
       caret(): number {
         return state.caret;
@@ -1149,72 +1180,79 @@ export function createEditorCore(options: EditorCoreOptions = {}): EditorCore {
     return { revision, text, result };
   }
 
+  /**
+   * Fixa o conjunto de cursores do núcleo — é o estado **antes** da edição, ou seja, o que o
+   * undo vai restaurar. Mantém `selection`/`caret` coerentes com a seleção primária.
+   */
+  function applySelectionSet(sels: SelectionSet): void {
+    state.selections = sels;
+    const primary = sels[0];
+    state.selection = primary ?? SelectionOps.collapsed(0);
+    state.caret = primary?.active ?? 0;
+  }
+
+  /**
+   * Conjunto de cursores "antes" para quem **não** mandou um (cliente antigo): a seleção
+   * corrente do núcleo (quando é uma única faixa) ou um cursor único na posição da edição.
+   */
+  function legacyCursorsBefore(at: number): SelectionSet {
+    const current = state.selections;
+    if (current.length === 1 && !SelectionOps.isCollapsed(current[0]!)) return current;
+    return SelectionSetOps.singular(at);
+  }
+
+  /**
+   * Insere `text` em `at` do documento.
+   *
+   * `selections` (opcional) é o conjunto de cursores **antes** da edição: é o "before" que o
+   * undo restaura (P2#5 — multi-cursor). Sem ele, o core infere um cursor único (compatibilidade
+   * com clientes antigos).
+   *
+   * **Por que não existe um ramo multi-cursor aqui:** a edição é **explícita** — quem manda diz
+   * *o que* editar (`at`/`text`/`remove`). O core não decide "inserir em cada cursor"; ele
+   * apenas carrega o conjunto de cursores para o undo. Para editar em N cursores, o cliente
+   * manda um `document.batchInsert` com uma entrada por cursor (em ordem descendente).
+   */
   async function runInsert(
     handle: DocumentHandle,
     at: number,
     text: string,
     origin: "plugin" | "user",
+    selections?: SelectionSet,
   ): Promise<DocumentInsertResult> {
     assertNotDisposed();
     const buffer = resolveBuffer(handle);
     state.pendingHandle = handle;
+    // O "antes": o conjunto de cursores que o undo vai restaurar.
+    const before = selections ?? legacyCursorsBefore(at);
+    applySelectionSet(before);
     let actualAt = at;
     let removeText: string | undefined;
+    const primary = before[0];
+    if (primary !== undefined && !SelectionOps.isCollapsed(primary)) {
+      // Digitação sobre uma seleção substitui o trecho selecionado (semântica de editor).
+      const { start, end } = SelectionOps.normalized(primary);
+      actualAt = start;
+      removeText = buffer.text().slice(start, end);
+    }
     try {
-      if (state.selections.length > 1) {
-        // Multi-cursor: aplica inserção em cada seleção, da última para a primeira (preserva offsets)
-        const sels = [...state.selections].sort((a, b) => b.active - a.active);
-        for (const sel of sels) {
-          const { start, end } = SelectionOps.normalized(sel);
-          const rText = start < end ? buffer.text().slice(start, end) : undefined;
-          const cmdArgs: Record<string, unknown> = { handle, at: start, text };
-          if (rText !== undefined) cmdArgs["remove"] = rText;
-          const result = await commands.run(
-            INSERT_COMMAND_ID,
-            cmdArgs,
-            { origin, group: `type:${handle}` },
-          );
-          if (!result.handled) {
-            throw new EditorArgumentError(
-              "command-missing",
-              `comando não registrado: ${INSERT_COMMAND_ID}`,
-            );
-          }
-        }
-      } else {
-        // Seleção única ou sem cursor: usa o comportamento original (backward compat)
-        if (state.selections.length === 1 && !SelectionOps.isCollapsed(state.selections[0]!)) {
-          const { start, end } = SelectionOps.normalized(state.selections[0]!);
-          actualAt = start;
-          removeText = buffer.text().slice(start, end);
-        }
-        const result = await commands.run(
-          INSERT_COMMAND_ID,
-          { handle, at: actualAt, text, ...(removeText !== undefined ? { remove: removeText } : {}) },
-          { origin, group: `type:${handle}` },
+      const result = await commands.run(
+        INSERT_COMMAND_ID,
+        { handle, at: actualAt, text, ...(removeText !== undefined ? { remove: removeText } : {}) },
+        { origin, group: `type:${handle}` },
+      );
+      if (!result.handled) {
+        throw new EditorArgumentError(
+          "command-missing",
+          `comando não registrado: ${INSERT_COMMAND_ID}`,
         );
-        if (!result.handled) {
-          throw new EditorArgumentError(
-            "command-missing",
-            `comando não registrado: ${INSERT_COMMAND_ID}`,
-          );
-        }
       }
     } finally {
       state.pendingHandle = undefined;
     }
     state.activeHandle = handle;
-    // Atualiza caret e selections APÓS a inserção
-    if (state.selections.length > 1) {
-      const lastSel = state.selections[state.selections.length - 1]!;
-      state.caret = lastSel.active;
-      state.selection = SelectionOps.collapsed(lastSel.active);
-      state.selections = SelectionSetOps.singular(lastSel.active);
-    } else {
-      state.caret = actualAt + text.length;
-      state.selection = SelectionOps.collapsed(state.caret);
-      state.selections = SelectionSetOps.singular(state.caret);
-    }
+    // O cursor/seleções **já** saíram posicionados: o `applyEdits` do alvo desloca os cursores
+    // junto com o texto (mesma regra do `advanceSelections` do renderer).
     // BLOCKER-1 (P2.5 review): toda edição de usuário suja o documento.
     registry.setDirty(handle, true);
     // Notifica LSP sobre a mudança
@@ -1238,31 +1276,40 @@ export function createEditorCore(options: EditorCoreOptions = {}): EditorCore {
    * Extrai o texto removido do buffer e usa o mesmo comando `INSERT_COMMAND_ID`
    * com a opção `remove` para que a substituição seja registrada como uma única
    * transação de undo.
+   *
+   * `selections` (opcional) é o conjunto de cursores **antes** da edição — é o "before" que o
+   * undo restaura (multi-cursor, P2#5).
    */
   async function runReplaceOne(
     handle: DocumentHandle,
     at: number,
     remove: number,
     insert: string,
+    selections?: SelectionSet,
   ): Promise<DocumentInsertResult> {
     assertNotDisposed();
     const buffer = resolveBuffer(handle);
     state.pendingHandle = handle;
+    // O "antes": o conjunto de cursores que o undo vai restaurar.
+    applySelectionSet(selections ?? SelectionSetOps.singular(at));
     const removeText = buffer.text().slice(at, at + remove);
-    const result = await commands.run(
-      INSERT_COMMAND_ID,
-      { handle, at, text: insert, remove: removeText },
-      { origin: "user", group: `type:${handle}` },
-    );
-    if (!result.handled) {
-      throw new EditorArgumentError(
-        "command-missing",
-        `comando não registrado: ${INSERT_COMMAND_ID}`,
+    try {
+      const result = await commands.run(
+        INSERT_COMMAND_ID,
+        { handle, at, text: insert, remove: removeText },
+        { origin: "user", group: `type:${handle}` },
       );
+      if (!result.handled) {
+        throw new EditorArgumentError(
+          "command-missing",
+          `comando não registrado: ${INSERT_COMMAND_ID}`,
+        );
+      }
+    } finally {
+      state.pendingHandle = undefined;
     }
-    state.caret = at + insert.length;
-    state.selection = SelectionOps.collapsed(state.caret);
-    state.selections = SelectionSetOps.singular(state.caret);
+    state.activeHandle = handle;
+    // O cursor/seleções saíram deslocados pelo próprio delta (ver `applyEdits` do alvo).
     registry.setDirty(handle, true);
     // Notifica LSP sobre a substituição
     if (lspManager !== null) {
@@ -1281,23 +1328,46 @@ export function createEditorCore(options: EditorCoreOptions = {}): EditorCore {
   }
 
   /**
-   * Lote de inserções atômicas: aplica cada `{at, text}` em sequência, tudo
-   * dentro de um único `coalesceDocumentChanges` (1 evento `document.changed`).
+   * Lote de inserções atômicas: aplica cada `{at, text, remove?}` em sequência, tudo
+   * dentro de um único `coalesceDocumentChanges` (1 evento `document.changed`) e num
+   * **único** passo de undo (o grupo `type:<handle>` funde os N comandos).
+   *
+   * O `at` de cada entrada é absoluto **no estado do buffer após as entradas anteriores** ⇒
+   * um lote multi-cursor deve entrar em ordem **descendente**.
+   *
+   * `selections` (opcional) é o conjunto de cursores **antes** do lote — é o "before" que o
+   * undo restaura (multi-cursor, P2#5). Sem ele, o core assume um cursor único no início do
+   * lote (onde a digitação começou).
    */
   async function runBatchInsert(
     handle: DocumentHandle,
-    inserts: ReadonlyArray<{ readonly at: number; readonly text: string }>,
+    inserts: ReadonlyArray<{
+      readonly at: number;
+      readonly text: string;
+      readonly remove?: string;
+    }>,
     origin: "plugin" | "user",
+    selections?: SelectionSet,
   ): Promise<DocumentInsertResult> {
     assertNotDisposed();
     const buffer = resolveBuffer(handle);
+    if (inserts.length === 0) {
+      throw new EditorArgumentError("invalid-args", "batchInsert: 'inserts' não pode ser vazio");
+    }
     state.pendingHandle = handle;
+    // O "antes": o conjunto de cursores que o undo vai restaurar.
+    applySelectionSet(selections ?? SelectionSetOps.singular(inserts[0]!.at));
     try {
       return await coalesceDocumentChanges(handle, async () => {
-        for (const { at, text } of inserts) {
+        for (const { at, text, remove } of inserts) {
           const result = await commands.run(
             INSERT_COMMAND_ID,
-            { handle, at, text },
+            {
+              handle,
+              at,
+              text,
+              ...(remove !== undefined && remove.length > 0 ? { remove } : {}),
+            },
             { origin, group: `type:${handle}` },
           );
           if (!result.handled) {
@@ -1307,9 +1377,7 @@ export function createEditorCore(options: EditorCoreOptions = {}): EditorCore {
             );
           }
         }
-        state.caret = inserts[inserts.length - 1]!.at + inserts[inserts.length - 1]!.text.length;
-        state.selection = SelectionOps.collapsed(state.caret);
-        state.selections = SelectionSetOps.singular(state.caret);
+        // O cursor/seleções saíram deslocados pelo próprio lote (ver `applyEdits` do alvo).
         registry.setDirty(handle, true);
         if (lspManager !== null) {
           const st = registry.get(handle);
@@ -1333,6 +1401,9 @@ export function createEditorCore(options: EditorCoreOptions = {}): EditorCore {
   /**
    * Estado de undo/redo do documento + cursor. A pilha (`UndoStack`) é do `CommandBus`; aqui só
    * lemos as profundidades (não inventamos API que o núcleo não suporta).
+   *
+   * `selections` é o **conjunto** de cursores corrente (multi-cursor, P2#5) — depois de um
+   * `Ctrl+Z` são os N cursores restaurados às posições originais.
    */
   function undoStateOf(handle: DocumentHandle): DocumentUndoState {
     const buffer = resolveBuffer(handle);
@@ -1435,8 +1506,9 @@ export function createEditorCore(options: EditorCoreOptions = {}): EditorCore {
       at: number,
       text: string,
       origin: "plugin" | "user" = "user",
+      selections?: SelectionSet,
     ): Promise<DocumentInsertResult> {
-      return enqueue(() => runInsert(handle, at, text, origin));
+      return enqueue(() => runInsert(handle, at, text, origin, selections));
     },
 
     replaceOne(
@@ -1444,16 +1516,22 @@ export function createEditorCore(options: EditorCoreOptions = {}): EditorCore {
       at: number,
       remove: number,
       insert: string,
+      selections?: SelectionSet,
     ): Promise<DocumentInsertResult> {
-      return enqueue(() => runReplaceOne(handle, at, remove, insert));
+      return enqueue(() => runReplaceOne(handle, at, remove, insert, selections));
     },
 
     batchInsert(
       handle: DocumentHandle,
-      inserts: ReadonlyArray<{ readonly at: number; readonly text: string }>,
+      inserts: ReadonlyArray<{
+        readonly at: number;
+        readonly text: string;
+        readonly remove?: string;
+      }>,
       origin: "plugin" | "user" = "user",
+      selections?: SelectionSet,
     ): Promise<DocumentInsertResult> {
-      return enqueue(() => runBatchInsert(handle, inserts, origin));
+      return enqueue(() => runBatchInsert(handle, inserts, origin, selections));
     },
 
     revisionOf(handle: DocumentHandle): number {
@@ -1571,8 +1649,11 @@ export function createEditorCore(options: EditorCoreOptions = {}): EditorCore {
             state.pendingHandle = undefined;
           }
           state.activeHandle = handle;
-          state.caret = Math.min(state.caret, buffer.text().length);
-          state.selection = SelectionOps.collapsed(state.caret);
+          // O cursor acompanha o texto: o `applyEdits` do alvo desloca as seleções, e o caret é
+          // o `active` da seleção primária (mesma regra do `applyEdits`).
+          const primary = state.selections[0];
+          state.caret = primary !== undefined ? primary.active : 0;
+          state.selection = primary ?? SelectionOps.collapsed(state.caret);
           // Blocker-1 (P2.5 review): replaceAll também suja o documento.
           registry.setDirty(handle, true);
           // Notifica LSP após todas as substituições

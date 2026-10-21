@@ -4,6 +4,50 @@ Todas as mudanças notáveis neste projeto.
 
 ---
 
+## [0.4.1] — 2026-10-21
+
+### 🐛 Varredura de usabilidade (o app estava "inutilizável")
+
+- **Soft wrap sobreposto** — a continuação de uma linha quebrada era desenhada **na mesma
+  coordenada Y** da linha seguinte (texto ilegível) e as linhas que cabiam eram quebradas à toa
+  (cópia do algoritmo de wrap sem o early-exit). Agora as rows visuais são **acumuladas** e o
+  render usa a implementação canônica `wrapLine`.
+- **Overlays no boot** — o painel de depuração, a barra de depuração e o popup de referências
+  abriam **por cima do editor** (`display:flex` inline vencia o `[hidden]` do UA). Regra global
+  `[hidden]{display:none!important}` + o atributo `hidden` voltou a ser a fonte da verdade.
+- **Tipografia "frankenstein"** — botões/inputs caíam no **Arial 13.33px** do UA (sem
+  `font: inherit`); token `--s-font` inexistente; escalas divergentes. Agora há **uma** família e
+  **uma** escala para toda a casca (a escala do canvas é separada, por design).
+- **Não dava para editar** — o teclado vive no `<canvas>` e o foco **não** voltava para ele ao
+  abrir/trocar de documento ⇒ digitar não fazia nada. Agora o foco volta ao canvas (abrir,
+  trocar de aba, fechar find bar/painel).
+- **O app morria ao fechar o painel de depuração** — o botão "×" chamava `close()`, que no
+  escopo do painel resolve para o **`window.close()` global** ⇒ a janela fechava e o app saía
+  (exit 0). Agora são `openPanel()`/`closePanel()` locais.
+- **Minimap em blocos cinzas** — a altura da linha escalava com o documento (`h/lineCount`) e a
+  barra ocupava a largura toda. Agora: altura **fixa** (3px) e largura **proporcional** à linha.
+- **Texto por baixo do minimap** — a largura útil do texto agora desconta a faixa do minimap.
+- **Popups sobrepostos** — completion, hover, signature, references e symbols podem coexistir;
+  agora **um popup de contexto por vez** (e o de code actions não fica órfão no DOM).
+- **Plugin host nunca subia** — `utilityProcess.postMessage` **não clona** `MessagePortMain`
+  (nem `MessagePort` do worker_threads) ⇒ "An object could not be cloned" em todo boot. O
+  transporte passou a ser o **canal nativo** do `utilityProcess` (`process.parentPort`).
+- **Janela** — 1024×768 → 1280×820 (com `minWidth`/`minHeight`).
+
+### ✨ Novas features
+
+- **Lupa de código no minimap** — preview **ampliado (×2.5)** e **colorido** do código sob o
+  mouse, com a linha sob o cursor destacada e o marcador do caret; segue o arrasto. O minimap
+  passou a ser **colorido** (janela = range visível ⇒ os spans de sintaxe existem).
+- **Multi-cursor de verdade** — digitar/apagar com **N cursores** edita nos N lugares, os N
+  cursores sobrevivem à edição e **um Ctrl+Z desfaz tudo e restaura o conjunto de cursores**
+  (o `CommandBus` passou a gravar `selectionsBefore/After` no passo de undo).
+- **Snippets: dropdown de escolhas + variáveis TM** — `${1|a,b,c|}` abre um popup de escolha
+  (antes usava sempre a 1ª) e `$TM_FILENAME`, `$TM_SELECTED_TEXT`, `$TM_CURRENT_LINE`… são
+  resolvidas na expansão.
+
+---
+
 ## [0.4.0] — 2026-10-18
 
 ### 🚀 Performance

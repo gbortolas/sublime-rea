@@ -4,7 +4,8 @@
  * Verifica o pipeline: `EditorCore.startPluginHost` → gerência de sessão →
  * notificação de `document.changed` propagada como evento ao host.
  *
- * Usa um **processo falso** injetado (sem Electron).
+ * Usa um **processo falso** injetado (sem Electron) — o canal é o **nativo do processo**
+ * (`postMessage`/`on("message")`), sem portas transferidas.
  */
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
@@ -12,121 +13,26 @@ import type { DocumentHandle } from "../../shared";
 import { EXTENSION_BRIDGE_VERSION } from "../../shared";
 
 import { createEditorCore } from "../editor";
-import { OPS_HASH } from "./ops";
-import { createBridgeInternal } from "./bridge";
-import type { MethodHandlers } from "./bridge";
-import type { BridgePort, ExtensionMethods } from "../../shared";
-import type { HostProcess, HostProcessEventName, HostProcessEvents, HostSpawner, PortPair } from "./host";
+import { ExtensionHostImpl, type HostProcess, type HostSpawner } from "./host";
+import { MemoryHostProcess, type MemoryHostOptions } from "./__tests__/support";
 
 // ── processo falso com escuta de mensagens ─────────────────────────────────────────────────
 
-interface FakeOpts {
-  readonly apiVersion?: string;
-  readonly opsHash?: string;
-  readonly hostVersion?: string;
-  readonly handlers?: Partial<MethodHandlers<ExtensionMethods>>;
-}
-
-class FakePluginProcess implements HostProcess {
-  readonly pid = 4242;
-  killed = false;
-  private readonly listeners = new Map<HostProcessEventName, Set<(...args: never[]) => void>>();
-  private readonly opts: FakeOpts;
-  /** Mensagens recebidas na porta do host (para inspeção). */
-  readonly hostMessages: unknown[] = [];
-  /** Se `true`, não envia `ready` (testa timeout). */
-  silent = false;
-
-  constructor(opts: FakeOpts) {
-    this.opts = opts;
-  }
-
-  postMessage(message: unknown): void {
-    const record = message as { kind?: string; port?: BridgePort };
-    if (record.kind !== "bootstrap" || record.port === undefined) return;
-    const port = record.port;
-
-    // Escuta tudo que chega na porta do host (incluindo `emit` do core)
-    port.on("message", (msg: unknown) => {
-      this.hostMessages.push(msg);
-    });
-
-    const handlers = this.opts.handlers ?? {};
-    createBridgeInternal<ExtensionMethods, ExtensionMethods>(port, {
-      handlers,
-      initialState: "spawned",
-    });
-
-    if (!this.silent) {
-      queueMicrotask(() => {
-        port.postMessage({
-          kind: "ready",
-          hostVersion: this.opts.hostVersion ?? "fake-plugin-host/0.1.0",
-          apiVersion: this.opts.apiVersion ?? EXTENSION_BRIDGE_VERSION,
-          opsHash: this.opts.opsHash ?? OPS_HASH,
-        });
-      });
-    }
-  }
-
-  on<E extends HostProcessEventName>(event: E, listener: HostProcessEvents[E]): void {
-    let set = this.listeners.get(event);
-    if (!set) {
-      set = new Set();
-      this.listeners.set(event, set);
-    }
-    set.add(listener as unknown as (...args: never[]) => void);
-  }
-
-  kill(): void {
-    if (this.killed) return;
-    this.killed = true;
-    this.emit("exit", 0);
-  }
-
-  emit(event: HostProcessEventName, ...args: unknown[]): void {
-    const set = this.listeners.get(event);
-    if (!set) return;
-    for (const listener of [...set]) (listener as unknown as (...a: unknown[]) => void)(...args);
-  }
-}
-
-function fakeSpawner(opts: FakeOpts = {}): {
+function fakeSpawner(opts: MemoryHostOptions = {}): {
   spawner: HostSpawner;
-  processes: FakePluginProcess[];
+  processes: MemoryHostProcess[];
 } {
-  const processes: FakePluginProcess[] = [];
+  const processes: MemoryHostProcess[] = [];
   return {
     spawner: {
-      spawn: (): FakePluginProcess => {
-        const proc = new FakePluginProcess(opts);
+      spawn: (): HostProcess => {
+        const proc = new MemoryHostProcess(opts);
         processes.push(proc);
         return proc;
       },
     },
     processes,
   };
-}
-
-function memoryPortPair(): PortPair {
-  const aListeners = new Set<(value: unknown) => void>();
-  const bListeners = new Set<(value: unknown) => void>();
-  const makePort = (own: Set<(value: unknown) => void>, peer: Set<(value: unknown) => void>): BridgePort => ({
-    postMessage: (message: unknown): void => {
-      for (const listener of [...peer]) queueMicrotask(() => listener(message));
-    },
-    on: (event: "message", listener: (value: unknown) => void): BridgePort => {
-      if (event === "message") own.add(listener);
-      return null as unknown as BridgePort;
-    },
-    off: (event: "message", listener: (value: unknown) => void): BridgePort => {
-      if (event === "message") own.delete(listener);
-      return null as unknown as BridgePort;
-    },
-    start: (): void => { /* no-op */ },
-    close: (): void => { own.clear(); },
-  });
-  return { core: makePort(aListeners, bListeners), host: makePort(bListeners, aListeners) };
 }
 
 describe("P3#10 — Plugin host integração", () => {
@@ -162,11 +68,9 @@ describe("P3#10 — Plugin host integração", () => {
     // Cenário: o core emite um evento `changed` via `emit` envelope,
     // e o host (falso) o recebe na sua porta.
     const { spawner, processes } = fakeSpawner({ handlers: { ping: () => "pong" as const } });
-    const { ExtensionHostImpl } = await import("./host");
 
     const host = new ExtensionHostImpl({
       spawner,
-      createPortPair: memoryPortPair,
       handshakeTimeoutMs: 500,
     });
     const session = await host.spawn({ name: "test", entry: "/x.js" });
@@ -200,7 +104,6 @@ describe("P3#10 — Plugin host integração", () => {
     // Testa o pipeline: inserir texto → document.changed → forward para o host.
     // Usamos spawner fake + verificamos que a porta do host recebe o emit.
     const { spawner, processes } = fakeSpawner({ handlers: { ping: () => "pong" as const } });
-    const { ExtensionHostImpl } = await import("./host");
 
     // Injeta o ExtensionHost no core via startPluginHost.
     // Como o core não expõe injeção de spawner, criamos um helper:
@@ -211,7 +114,6 @@ describe("P3#10 — Plugin host integração", () => {
 
     const host = new ExtensionHostImpl({
       spawner,
-      createPortPair: memoryPortPair,
       handshakeTimeoutMs: 500,
     });
     const session = await host.spawn({ name: "test", entry: "/x.js" });
@@ -233,6 +135,16 @@ describe("P3#10 — Plugin host integração", () => {
       (m) => (m as Record<string, unknown>).kind === "emit",
     );
     expect(emits.length).toBeGreaterThan(0);
+
+    await host.shutdown();
+  });
+
+  it("handshake do host carrega a versão do contrato em produção", async () => {
+    const { spawner } = fakeSpawner({});
+    const host = new ExtensionHostImpl({ spawner, handshakeTimeoutMs: 500 });
+
+    const session = await host.spawn({ name: "test", entry: "/x.js" });
+    expect(session.bridge.version).toBe(EXTENSION_BRIDGE_VERSION);
 
     await host.shutdown();
   });

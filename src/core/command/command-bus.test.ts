@@ -3,7 +3,8 @@
  * `dispatch` (nativo e por tupla de extensão), eventos e soft undo/redo.
  */
 import { describe, expect, it } from "vitest";
-import type { Edit } from "../../shared";
+import type { Edit, EditOrigin, Selection } from "../../shared";
+import { advanceSelections } from "../../shared";
 import {
   CommandBusImpl,
   DuplicateCommandError,
@@ -12,6 +13,56 @@ import {
 import { FakeRegistry, FakeScheduler } from "./__tests__/fakes";
 import type { PingEvent } from "./__tests__/fakes";
 import { FakeTarget } from "./__tests__/fakes";
+import type { UndoTarget } from "./undo-stack";
+
+/**
+ * Alvo que desloca os cursores junto com o texto — como o `EditorCore` faz (mesma regra do
+ * `advanceSelections`, a fonte única). O `FakeTarget` só mexe no caret, então não serve para
+ * provar que o bus grava o **conjunto** de seleções.
+ */
+class AdvancingTarget implements UndoTarget {
+  text = "";
+  private cursor = 0;
+  private sel: Selection = { anchor: 0, active: 0 };
+  private sels: Selection[] = [{ anchor: 0, active: 0 }];
+
+  applyEdits(edits: readonly Edit[], _origin: EditOrigin): void {
+    for (const e of edits) {
+      this.text = this.text.slice(0, e.at) + e.insert + this.text.slice(e.at + e.remove.length);
+    }
+    this.sels = [...advanceSelections(this.sels, edits)];
+    const primary = this.sels[0];
+    if (primary !== undefined) {
+      this.sel = primary;
+      this.cursor = primary.active;
+    }
+  }
+
+  caret(): number {
+    return this.cursor;
+  }
+
+  setCaret(n: number): void {
+    this.cursor = n;
+  }
+
+  selection(): Selection {
+    return this.sel;
+  }
+
+  setSelection(s: Selection): void {
+    this.sel = s;
+  }
+
+  selections(): readonly Selection[] {
+    return this.sels;
+  }
+
+  setSelections(sels: readonly Selection[]): void {
+    this.sels = [...sels];
+    this.sel = this.sels[0] ?? { anchor: 0, active: 0 };
+  }
+}
 
 function makeBus(): { bus: CommandBusImpl; target: FakeTarget } {
   const target = new FakeTarget();
@@ -105,6 +156,46 @@ describe("CommandBus.run", () => {
     await bus.run("noop");
     expect(target.text).toBe("");
     expect(bus.undoStack.undoDepth).toBe(0);
+  });
+});
+
+describe("CommandBus — multi-cursor (conjunto de seleções no undo)", () => {
+  it("recordResult grava 'selectionsBefore'/'selectionsAfter' (undo/redo restauram os N cursores)", async () => {
+    const target = new AdvancingTarget();
+    const bus = new CommandBusImpl({
+      registry: new FakeRegistry(),
+      scheduler: new FakeScheduler(),
+      target: () => target,
+    });
+    bus.register("ins", "Insert", () => [{ at: 5, remove: "", insert: "X" }]);
+
+    // Dois cursores antes da edição.
+    target.setSelections([
+      { anchor: 2, active: 2 },
+      { anchor: 5, active: 5 },
+    ]);
+
+    await bus.run("ins");
+
+    // O alvo desloca os cursores junto com o texto (mesma regra do `EditorCore`).
+    expect(target.selections()).toEqual([
+      { anchor: 2, active: 2 },
+      { anchor: 6, active: 6 },
+    ]);
+
+    // O "antes" foi gravado ⇒ o undo devolve os 2 cursores às posições originais.
+    expect(bus.undo()).toBe(true);
+    expect(target.selections()).toEqual([
+      { anchor: 2, active: 2 },
+      { anchor: 5, active: 5 },
+    ]);
+
+    // O "depois" foi gravado ⇒ o redo devolve os 2 cursores avançados.
+    expect(bus.redo()).toBe(true);
+    expect(target.selections()).toEqual([
+      { anchor: 2, active: 2 },
+      { anchor: 6, active: 6 },
+    ]);
   });
 });
 

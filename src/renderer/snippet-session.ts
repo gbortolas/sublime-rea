@@ -13,6 +13,11 @@
  * sobreposição de ranges — dois campos irmãos podem encostar no mesmo offset e ranges planos
  * não os distinguem de um ancestral verdadeiro.
  *
+ * **Escolhas**: uma parada declarada como `${N|a,b,c|}` carrega a lista de opções
+ * (`SnippetField.choices`) e a opção escolhida (`choiceIndex`); `currentChoice` expõe o estado
+ * da parada atual e `chooseSnippetOption` troca a opção (re-renderizando espelhos/ancestrais
+ * como um `applyEdit`).
+ *
  * Testado direto em `test/renderer-snippet-session.test.ts`.
  */
 import { renderTransform } from "./snippets";
@@ -31,6 +36,10 @@ export interface SnippetField {
   readonly end: number;
   readonly isPrimary: boolean;
   readonly transform?: SnippetTransform;
+  /** Opções da escolha (`${1|a,b,c|}`) — ausente quando o campo não é uma escolha. */
+  readonly choices?: readonly string[];
+  /** Índice da opção **escolhida** (0-based) — presente só em campos com `choices`. */
+  readonly choiceIndex?: number;
 }
 
 /** Substituição a aplicar via ponte (espelho/ancestral re-renderizado). */
@@ -62,6 +71,23 @@ export interface SnippetStop {
   readonly index: number;
   readonly start: number;
   readonly end: number;
+  /** Opções quando a parada é uma **escolha** (`${1|a,b,c|}`). */
+  readonly choices?: readonly string[];
+  /** Índice da opção escolhida (0-based). */
+  readonly choiceIndex?: number;
+}
+
+/** Estado de "esta tab stop é uma escolha" (opções + opção escolhida). */
+export interface SnippetChoice {
+  /** Índice do tab stop (`$N`) da escolha. */
+  readonly index: number;
+  /** Opções declaradas no template. */
+  readonly choices: readonly string[];
+  /** Índice da opção **escolhida** (0-based). */
+  readonly selected: number;
+  /** Intervalo absoluto do campo (primária) da escolha. */
+  readonly start: number;
+  readonly end: number;
 }
 
 /** Resultado da navegação: sessão já avançada + parada a selecionar. */
@@ -85,6 +111,7 @@ function fieldOf(occ: SnippetOccurrence, base: number): SnippetField {
     end: base + occ.end,
     isPrimary: occ.isPrimary,
     ...(occ.transform !== undefined ? { transform: occ.transform } : {}),
+    ...(occ.choices !== undefined ? { choices: occ.choices, choiceIndex: occ.choiceIndex ?? 0 } : {}),
   };
 }
 
@@ -115,7 +142,12 @@ export function currentStop(s: SnippetSession): SnippetStop | null {
   if (index === undefined) return null;
   const field = s.fields.find((f) => f.index === index && f.isPrimary);
   if (field === undefined) return null;
-  return { index: field.index, start: field.start, end: field.end };
+  return {
+    index: field.index,
+    start: field.start,
+    end: field.end,
+    ...(field.choices !== undefined ? { choices: field.choices, choiceIndex: field.choiceIndex ?? 0 } : {}),
+  };
 }
 
 function targetFor(s: SnippetSession, position: number): SnippetStopTarget | null {
@@ -125,7 +157,14 @@ function targetFor(s: SnippetSession, position: number): SnippetStopTarget | nul
   if (field === undefined) return null;
   return {
     session: { ...s, current: position },
-    stop: { index: field.index, start: field.start, end: field.end },
+    stop: {
+      index: field.index,
+      start: field.start,
+      end: field.end,
+      ...(field.choices !== undefined
+        ? { choices: field.choices, choiceIndex: field.choiceIndex ?? 0 }
+        : {}),
+    },
   };
 }
 
@@ -298,4 +337,53 @@ export function applyEdit(
     current: s.current,
     updates,
   };
+}
+
+// ---- escolhas ---------------------------------------------------------------------------------------
+
+/**
+ * Estado de escolha da parada **atual** (`null` se a parada atual não é uma escolha).
+ *
+ * Uma parada é escolha quando o template declarou `${N|a,b,c|}` — a **primária** do índice carrega
+ * a lista de opções e o índice da opção escolhida (a 1ª é o default da expansão).
+ */
+export function currentChoice(s: SnippetSession): SnippetChoice | null {
+  const stop = currentStop(s);
+  if (stop === null || stop.choices === undefined) return null;
+  return {
+    index: stop.index,
+    choices: stop.choices,
+    selected: stop.choiceIndex ?? 0,
+    start: stop.start,
+    end: stop.end,
+  };
+}
+
+/**
+ * Troca a **opção escolhida** de uma tab stop que é uma escolha (`${1|a,b,c|}`).
+ *
+ * O texto do campo (primária) passa a ser a opção escolhida e os offsets são ajustados **como
+ * num `applyEdit`** (delta + re-render dos espelhos/ancestrais). A sessão é **imutável**: devolve
+ * uma sessão nova; `null` quando a parada não é escolha, o índice da opção é inválido ou a troca
+ * engoliria outro campo.
+ *
+ * O chamador deve **aplicar no documento** a troca do campo primário
+ * (`[start, end)` → texto da opção) **antes** de aplicar `session.updates` — a mesma sequência
+ * de `propagateSnippetEdit`.
+ */
+export function chooseSnippetOption(
+  s: SnippetSession,
+  index: number,
+  optionIndex: number,
+): SnippetSession | null {
+  const field = s.fields.find((f) => f.index === index && f.isPrimary);
+  if (field === undefined || field.choices === undefined) return null;
+  const text = field.choices[optionIndex];
+  if (text === undefined) return null;
+  const next = applyEdit(s, { start: field.start, end: field.end }, text);
+  if (next === null) return null;
+  const fields = next.fields.map((f) =>
+    f.id === field.id ? { ...f, choiceIndex: optionIndex } : f,
+  );
+  return { ...next, fields };
 }

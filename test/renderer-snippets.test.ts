@@ -9,8 +9,8 @@
  */
 import { afterEach, describe, expect, it, vi } from "vitest";
 
-import { findSnippet, parseSnippet } from "../src/renderer/snippets";
-import type { SnippetOccurrence } from "../src/renderer/snippets";
+import { findSnippet, parseSnippet, resolveSnippetVariables } from "../src/renderer/snippets";
+import type { SnippetOccurrence, SnippetVariableContext } from "../src/renderer/snippets";
 
 /** Primária de um índice (a região editável). */
 function primary(occurrences: readonly SnippetOccurrence[], index: number): SnippetOccurrence {
@@ -100,6 +100,41 @@ describe("parseSnippet — escolhas e transformações", () => {
     expect(expansion.tabStops[0]).toMatchObject({ index: 1, start: 3, end: 4, defaultValue: "a" });
   });
 
+  it("escolha ${1|a,b,c|} carrega a lista de opções (3 opções, default = 1ª)", () => {
+    const expansion = parseSnippet("go ${1|a,b,c|}");
+    const stop = primary(expansion.occurrences, 1);
+    expect(stop.choices).toEqual(["a", "b", "c"]);
+    expect(stop.choiceIndex).toBe(0);
+    // O texto inserido continua sendo a 1ª opção (compatibilidade).
+    expect(expansion.text).toBe("go a");
+    expect(stop.defaultValue).toBe("a");
+  });
+
+  it("o | interno escapa: ${1|a\\|b,c|} ⇒ 2 opções (a|b e c)", () => {
+    const expansion = parseSnippet("${1|a\\|b,c|}");
+    expect(primary(expansion.occurrences, 1).choices).toEqual(["a|b", "c"]);
+    expect(expansion.text).toBe("a|b");
+  });
+
+  it("escolha com escape de vírgula: ${1|a\\,b,c|} ⇒ 2 opções", () => {
+    const expansion = parseSnippet("${1|a\\,b,c|}");
+    expect(primary(expansion.occurrences, 1).choices).toEqual(["a,b", "c"]);
+  });
+
+  it("escolha aninhada em default: ${1:pre ${2|a,b|} pos}", () => {
+    const expansion = parseSnippet("${1:pre ${2|a,b|} pos}");
+    expect(expansion.text).toBe("pre a pos");
+    expect(primary(expansion.occurrences, 2).choices).toEqual(["a", "b"]);
+    expect(primary(expansion.occurrences, 2).parentId).toBe(primary(expansion.occurrences, 1).id);
+  });
+
+  it("transform de uma escolha continua valendo sobre o texto escolhido", () => {
+    const expansion = parseSnippet("${1|a,b|} ${1/(.*)/[$1]/}");
+    expect(expansion.text).toBe("a [a]");
+    const mirror = mirrors(expansion.occurrences, 1)[0]!;
+    expect(mirror.transform).toMatchObject({ regex: "(.*)", format: "[$1]" });
+  });
+
   it("transform com captura ${1/(.*)/$1/} espelha o valor da primária", () => {
     const expansion = parseSnippet("${1:abc} ${1/(.*)/$1/}");
     expect(expansion.text).toBe("abc abc");
@@ -175,5 +210,99 @@ describe("parseSnippet — espelhos e ordem de visita", () => {
     expect(expansion).toMatchObject({ text: "plain text", visitOrder: [] });
     expect(expansion.occurrences).toHaveLength(0);
     expect(expansion.tabStops).toHaveLength(0);
+  });
+});
+
+describe("parseSnippet — variáveis TM", () => {
+  const ctx: SnippetVariableContext = {
+    fileName: "notes.md",
+    fileNameBase: "notes",
+    filePath: "/caminho/notas.md",
+    directory: "/caminho",
+    selectedText: "selecionado",
+    currentLine: "linha atual",
+    currentWord: "palavra",
+    lineIndex: 42,
+  };
+
+  it("variável TM com contexto é resolvida ($NOME e ${NOME})", () => {
+    expect(parseSnippet("$TM_FILENAME", ctx).text).toBe("notes.md");
+    expect(parseSnippet("${TM_FILENAME}", ctx).text).toBe("notes.md");
+    expect(parseSnippet("$TM_FILENAME_BASE", ctx).text).toBe("notes");
+    expect(parseSnippet("$TM_DIRECTORY", ctx).text).toBe("/caminho");
+    expect(parseSnippet("$TM_SELECTED_TEXT", ctx).text).toBe("selecionado");
+    expect(parseSnippet("$TM_CURRENT_LINE", ctx).text).toBe("linha atual");
+    expect(parseSnippet("$TM_CURRENT_WORD", ctx).text).toBe("palavra");
+    expect(parseSnippet("$TM_LINE_INDEX", ctx).text).toBe("42");
+  });
+
+  it("variável TM sem contexto fica literal (não vira string vazia)", () => {
+    expect(parseSnippet("$TM_FILENAME").text).toBe("$TM_FILENAME");
+    expect(parseSnippet("${TM_FILENAME}").text).toBe("${TM_FILENAME}");
+    expect(parseSnippet("$TM_SELECTED_TEXT").text).toBe("$TM_SELECTED_TEXT");
+    expect(parseSnippet("$TM_LINE_INDEX").text).toBe("$TM_LINE_INDEX");
+    // Contexto vazio = sem contexto.
+    expect(parseSnippet("$TM_FILENAME", {}).text).toBe("$TM_FILENAME");
+    // Seleção vazia conta como ausente.
+    expect(parseSnippet("$TM_SELECTED_TEXT", { ...ctx, selectedText: "" }).text)
+      .toBe("$TM_SELECTED_TEXT");
+  });
+
+  it("variável TM desconhecida fica literal", () => {
+    expect(parseSnippet("$TM_DESCONHECIDA", ctx).text).toBe("$TM_DESCONHECIDA");
+    expect(parseSnippet("${TM_DESCONHECIDA}", ctx).text).toBe("${TM_DESCONHECIDA}");
+    expect(parseSnippet("${FOO}", ctx).text).toBe("${FOO}");
+    expect(parseSnippet("$FOO", ctx).text).toBe("$FOO");
+  });
+
+  it("${TM_FILENAME:default} usa o valor; sem valor, usa o default", () => {
+    expect(parseSnippet("${TM_FILENAME:default}", ctx).text).toBe("notes.md");
+    expect(parseSnippet("${TM_FILENAME:default}").text).toBe("default");
+    expect(parseSnippet("${TM_SELECTED_TEXT:x}", {}).text).toBe("x");
+  });
+
+  it("variável TM dentro do default de uma tab stop", () => {
+    const expansion = parseSnippet("${1:arquivo $TM_FILENAME}", ctx);
+    expect(expansion.text).toBe("arquivo notes.md");
+    expect(expansion.tabStops[0]).toMatchObject({ start: 0, end: 16, defaultValue: "arquivo notes.md" });
+  });
+
+  it("variável resolvida não quebra os offsets das tab stops", () => {
+    const expansion = parseSnippet("$TM_FILENAME: ${1:x}", ctx);
+    expect(expansion.text).toBe("notes.md: x");
+    expect(expansion.tabStops[0]).toMatchObject({ index: 1, start: 10, end: 11 });
+  });
+
+  it("filePath deriva fileName/directory quando não vêm explícitos", () => {
+    const expansion = parseSnippet("$TM_FILENAME $TM_FILENAME_BASE $TM_DIRECTORY", {
+      filePath: "/caminho/notas.md",
+    });
+    expect(expansion.text).toBe("notas.md notas /caminho");
+  });
+
+  it("$$ protege a variável seguinte (fica literal)", () => {
+    expect(parseSnippet("$$TM_FILENAME", ctx).text).toBe("$TM_FILENAME");
+  });
+});
+
+describe("resolveSnippetVariables (texto puro)", () => {
+  const ctx: SnippetVariableContext = { fileName: "notes.md", lineIndex: 7 };
+
+  it("substitui as formas $NOME, ${NOME} e ${NOME:default}", () => {
+    expect(resolveSnippetVariables("a $TM_FILENAME b", ctx)).toBe("a notes.md b");
+    expect(resolveSnippetVariables("a ${TM_FILENAME} b", ctx)).toBe("a notes.md b");
+    expect(resolveSnippetVariables("a ${TM_FILENAME:def} b", ctx)).toBe("a notes.md b");
+    expect(resolveSnippetVariables("a ${TM_LINE_INDEX:0} b", ctx)).toBe("a 7 b");
+  });
+
+  it("variável desconhecida ou sem valor fica literal", () => {
+    expect(resolveSnippetVariables("$TM_X", ctx)).toBe("$TM_X");
+    expect(resolveSnippetVariables("${TM_X}", ctx)).toBe("${TM_X}");
+    expect(resolveSnippetVariables("$TM_SELECTED_TEXT", ctx)).toBe("$TM_SELECTED_TEXT");
+  });
+
+  it("não mexe em $N (tab stop) nem em texto comum", () => {
+    expect(resolveSnippetVariables("$1 e $2", ctx)).toBe("$1 e $2");
+    expect(resolveSnippetVariables("nada aqui", ctx)).toBe("nada aqui");
   });
 });

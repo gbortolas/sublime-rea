@@ -17,6 +17,7 @@ import {
   RENDER_BACKEND_PROPERTY,
   SelectionOps,
   SelectionSetOps,
+  advanceSelections,
   toDisposable,
   DARK_THEME,
   LIGHT_THEME,
@@ -60,6 +61,7 @@ import type {
   SearchMatch,
   SearchQuery,
   Selection,
+  SelectionEdit,
   SelectionSet,
   TextStyle,
 } from "../shared";
@@ -72,7 +74,7 @@ import { attachCommandPalette } from "./command-palette";
 import type { CommandPaletteApi, CommandPaletteBinding } from "./command-palette";
 import { createCompletionPopup } from "./completions";
 import type { CompletionPopupBinding } from "./completions";
-import { attachMinimapHover } from "./minimap";
+import { attachCodeLoupe } from "./code-loupe";
 import { createHoverTooltip } from "./hover-tooltip";
 import type { HoverTooltipBinding } from "./hover-tooltip";
 import { createSignatureHelp } from "./signature-help";
@@ -464,6 +466,16 @@ interface UndoStateDto {
   readonly canRedo: boolean;
   readonly revision: number;
   readonly caret: number;
+  /**
+   * Estado de seleção **restaurado** (P1#1) e o **conjunto** de cursores (P2#5) — é o que
+   * devolve os N cursores aos pontos originais depois de um `Ctrl+Z`.
+   *
+   * Opcionais de propósito: um preload mais antigo que o contrato multi-cursor simplesmente
+   * não os expõe — o renderer degrada para 1 cursor, sem crash (mesma política do resto da
+   * ponte).
+   */
+  readonly selection?: Selection;
+  readonly selections?: SelectionSet;
 }
 
 /** Superfície do preload consumida pelo renderer (subconjunto de `window.scribe`). */
@@ -472,13 +484,36 @@ interface ScribeBridge {
   openDialog(): Promise<string | null>;
   text(handle: number): Promise<string>;
   revision(handle: number): Promise<number>;
-  insert(handle: number, at: number, text: string, origin?: "plugin" | "user"): Promise<DocumentInsertResult>;
+  insert(
+    handle: number,
+    at: number,
+    text: string,
+    origin?: "plugin" | "user",
+    selections?: SelectionSet,
+  ): Promise<DocumentInsertResult>;
+  /**
+   * Lote de inserções (multi-cursor, P2#5): cada entrada é `{at, text, remove?}` e o `at` é
+   * **absoluto no estado do buffer após as entradas anteriores** ⇒ o lote multi-cursor entra em
+   * ordem **descendente**. `selections` é o conjunto de cursores **antes** do lote (o que o
+   * undo restaura).
+   */
   batchInsert(
     handle: number,
-    inserts: ReadonlyArray<{ readonly at: number; readonly text: string }>,
+    inserts: ReadonlyArray<{
+      readonly at: number;
+      readonly text: string;
+      readonly remove?: string;
+    }>,
     origin?: "plugin" | "user",
+    selections?: SelectionSet,
   ): Promise<DocumentInsertResult>;
-  replaceOne(handle: number, at: number, remove: number, insert: string): Promise<DocumentInsertResult>;
+  replaceOne(
+    handle: number,
+    at: number,
+    remove: number,
+    insert: string,
+    selections?: SelectionSet,
+  ): Promise<DocumentInsertResult>;
   undo(handle: number): Promise<UndoStateDto>;
   redo(handle: number): Promise<UndoStateDto>;
   undoState(handle: number): Promise<UndoStateDto>;
@@ -1043,13 +1078,187 @@ async function fetchInlayHints(
   }
 }
 
+// ---- multi-cursor (P2#5) — matemática pura (testável sem DOM) ----------------------------------
+
+/**
+ * Monta **1 edição por cursor** para a digitação multi-cursor: cada edição substitui o
+ * trecho selecionado pelo cursor (vazio, se colapsado) pelo texto digitado.
+ *
+ * As edições saem em ordem **descendente** por `at` — é a ordem que o `document.batchInsert`
+ * exige (o `at` de cada entrada é absoluto no buffer **após** as entradas anteriores) e a
+ * mesma que o splice local aplica (os offsets abaixo continuam válidos).
+ */
+export function buildTypingEdits(
+  selections: SelectionSet,
+  text: string,
+  source: string,
+): SelectionEdit[] {
+  return selections
+    .map((sel): SelectionEdit => {
+      const { start, end } = SelectionOps.normalized(sel);
+      return { at: start, remove: source.slice(start, end), insert: text };
+    })
+    .sort((a, b) => b.at - a.at);
+}
+
+/**
+ * Monta as edições de **apagar** (Backspace/Delete) em N cursores — uma por cursor, na ordem
+ * descendente:
+ *
+ * - cursor com seleção expandida ⇒ apaga o range selecionado;
+ * - `backward` ⇒ apaga o caractere anterior (ou o **par vazio**, como o caminho de 1 cursor);
+ * - `forward` ⇒ apaga o caractere seguinte.
+ *
+ * Cursors sem nada a apagar (no início/fim do documento) são **omitidos** — o resto do
+ * conjunto continua vivo.
+ */
+export function buildDeleteEdits(
+  selections: SelectionSet,
+  source: string,
+  direction: "backward" | "forward",
+): SelectionEdit[] {
+  const edits: SelectionEdit[] = [];
+  for (const sel of selections) {
+    const { start, end } = SelectionOps.normalized(sel);
+    if (start !== end) {
+      edits.push({ at: start, remove: source.slice(start, end), insert: "" });
+      continue;
+    }
+    const pos = sel.active;
+    if (direction === "backward") {
+      if (pos <= 0) continue;
+      const prev = source[pos - 1] ?? "";
+      const next = source[pos] ?? "";
+      // Par vazio: o cursor está **entre** os delimitadores ⇒ apaga os dois (mesma regra do
+      // caminho de 1 cursor: `replaceText(pos - 1, 2, "")`).
+      const isPair = AUTO_PAIRS[prev] === next;
+      const at = pos - 1;
+      const end = isPair ? pos + 1 : pos;
+      edits.push({ at, remove: source.slice(at, end), insert: "" });
+    } else {
+      if (pos >= source.length) continue;
+      edits.push({ at: pos, remove: source.slice(pos, pos + 1), insert: "" });
+    }
+  }
+  return edits.sort((a, b) => b.at - a.at);
+}
+
+/**
+ * Monta as edições de uma **tecla** em N cursores.
+ *
+ * - `close !== undefined` ⇒ é um **par** (ex.: `(` + `)`): o par entra em todos os cursores;
+ * - `close === undefined` ⇒ é uma tecla de **fechamento** (ex.: `)`): num cursor cujo próximo
+ *   caractere já é a tecla, o cursor apenas **pula** (nada é inserido) — a mesma regra do
+ *   caminho de 1 cursor; nos demais, a tecla é inserida.
+ *
+ * As edições saem em ordem **descendente** por `at`; `skipped` traz os **índices** dos
+ * cursores que só pularam (eles não produzem edição, mas o cursor anda 1 à frente).
+ */
+export function buildKeyEdits(
+  selections: SelectionSet,
+  key: string,
+  close: string | undefined,
+  source: string,
+): { readonly edits: SelectionEdit[]; readonly skipped: readonly number[] } {
+  const edits: SelectionEdit[] = [];
+  const skipped: number[] = [];
+  selections.forEach((sel, index) => {
+    const { start, end } = SelectionOps.normalized(sel);
+    if (close === undefined && sel.active < source.length && source[sel.active] === key) {
+      // O fechamento já está lá: o cursor só pula (nada é inserido).
+      skipped.push(index);
+      return;
+    }
+    edits.push({
+      at: start,
+      remove: source.slice(start, end),
+      insert: close === undefined ? key : key + close,
+    });
+  });
+  edits.sort((a, b) => b.at - a.at);
+  return { edits, skipped };
+}
+
+/**
+ * Aplica as edições (ordem **descendente**) no texto local — o splice de latência zero.
+ *
+ * Cada edição toca uma faixa **abaixo** das anteriores, então os offsets continuam válidos
+ * durante a aplicação (é o mesmo raciocínio do `document.batchInsert`).
+ */
+export function applyEditsToText(source: string, edits: readonly SelectionEdit[]): string {
+  let out = source;
+  for (const edit of edits) {
+    out = out.slice(0, edit.at) + edit.insert + out.slice(edit.at + edit.remove.length);
+  }
+  return out;
+}
+
+/**
+ * Calcula o conjunto de cursores **depois** das edições multi-cursor.
+ *
+ * `advanceSelections` (fonte única da regra, em `src/shared`) desloca os cursores; `cursorBack`
+ * puxa o cursor para **antes** do fim do texto inserido (o auto-pair deixa o cursor **entre**
+ * os delimitadores) e os cursores que **pularam** um fechamento já existente avançam 1.
+ */
+export function advanceCursorSet(
+  before: SelectionSet,
+  edits: readonly SelectionEdit[],
+  cursorBack: number,
+  skipped: readonly number[],
+): SelectionSet {
+  const advanced = advanceSelections(before, edits);
+  const skipSet = new Set(skipped);
+  return advanced.map((sel, index) => {
+    if (skipSet.has(index)) {
+      return { anchor: sel.anchor + 1, active: sel.active + 1 };
+    }
+    if (cursorBack <= 0) return sel;
+    return {
+      anchor: Math.max(0, sel.anchor - cursorBack),
+      active: Math.max(0, sel.active - cursorBack),
+    };
+  });
+}
+
+/** Clampa um offset ao documento (`[0, length]`). */
+export function clampOffset(offset: number, length: number): number {
+  if (!Number.isFinite(offset)) return 0;
+  return Math.max(0, Math.min(Math.trunc(offset), length));
+}
+
+/**
+ * Clampa um conjunto de seleções ao tamanho do texto — o undo/redo devolve offsets que podem
+ * estar fora do documento (o texto encolheu desde a edição).
+ */
+export function clampSelections(
+  selections: SelectionSet | undefined,
+  length: number,
+): SelectionSet {
+  if (selections === undefined) return [];
+  return selections.map((sel) => ({
+    anchor: clampOffset(sel.anchor, length),
+    active: clampOffset(sel.active, length),
+  }));
+}
+
 class DocumentController {
   private sessions: TabSession[] = [];
   private activeIndex = -1;
   private opening: { readonly signalId: number; readonly path: string } | undefined;
 
-  /** Lote de inserções pendentes — acumula keystrokes entre frames. */
-  private pendingBatch: Array<{ at: number; text: string }> | null = null;
+  /**
+   * Lote de inserções pendentes — acumula keystrokes entre frames.
+   *
+   * Cada entrada é `{at, text, remove?}`: o `at` é **absoluto no buffer após as entradas
+   * anteriores** (semântica do `document.batchInsert`) ⇒ um lote multi-cursor entra em ordem
+   * **descendente**.
+   */
+  private pendingBatch: Array<{ at: number; text: string; remove?: string }> | null = null;
+  /**
+   * Snapshot do conjunto de cursores **no início do lote** — é o "before" que o undo restaura
+   * (um `Ctrl+Z` devolve os N cursores às posições originais).
+   */
+  private pendingBatchSelections: SelectionSet | null = null;
   /** Revisão local estimada (incrementada a cada keystroke batched). */
   private batchLocalRevision = 0;
   /** Timer do rAF para flush do lote. */
@@ -1195,6 +1404,10 @@ class DocumentController {
     }
     console.info(`Scribe: documento ligado via preload "${path}" (handle ${handle})`);
     this.onActiveDocumentChanged?.(session);
+    // O teclado do editor vive no <canvas> (listener de keydown). Sem devolver o foco para
+    // ele, abrir um arquivo pelo diálogo (ou duplo clique) deixa o foco no diálogo/menu e
+    // **digitar não faz nada** — sintoma "não dá pra editar".
+    focusEditorSurface();
     return true;
   }
 
@@ -1238,6 +1451,8 @@ class DocumentController {
     void fetchDebugBreakpoints(this.bridge, this.renderer, session.handle);
     this.renderer.start();
     this.onActiveDocumentChanged?.(session);
+    // Trocar de aba devolve o foco ao canvas (o teclado do editor vive nele).
+    focusEditorSurface();
   }
 
   close(index: number): void {
@@ -1393,6 +1608,17 @@ class DocumentController {
         }
         return;
       }
+      // Multi-cursor (P2#5): N cursores ⇒ N edições (uma por cursor) num **único** lote —
+      // um `Ctrl+Z` desfaz as N edições e restaura os N cursores.
+      if (session.selections.length > 1) {
+        this.applyCursorEdits(
+          session,
+          buildTypingEdits(session.selections, text, session.source.text),
+          [],
+          0,
+        );
+        return;
+      }
       if (!SelectionOps.isCollapsed(s)) {
         // Seleção expandida: flush + replaceText imediato
         await this.flushBatch();
@@ -1402,6 +1628,8 @@ class DocumentController {
       }
       // Aplica splice local (zero latência!)
       const insertAt = session.caret;
+      // O "before" do lote: o conjunto de cursores **antes** desta tecla (o undo restaura ele).
+      const before = session.selections;
       const oldText = session.source.text;
       const newText = oldText.slice(0, insertAt) + text + oldText.slice(insertAt);
       this.batchLocalRevision += 1;
@@ -1417,12 +1645,124 @@ class DocumentController {
       session.dirty = true;
       // Undo status fica indeterminado até o flush — mantém o anterior.
       // Acumula no lote e agenda flush
-      (this.pendingBatch ??= []).push({ at: insertAt, text });
+      this.pushBatch({ at: insertAt, text }, before);
       this.scheduleBatchFlush();
       this.renderer.start();
     } catch (error) {
       console.error("Scribe: falha ao inserir texto no documento", error);
     }
+  }
+
+  /**
+   * Auto-pair (P2#5) com **N cursores**: a tecla entra em **todos** os cursores.
+   *
+   * - `close !== undefined` ⇒ é um **par** (ex.: `(` + `)`): o par entra em todos os cursores e
+   *   cada cursor fica **entre** os delimitadores (`at + 1`);
+   * - `close === undefined` ⇒ é uma tecla de **fechamento** (ex.: `)`): num cursor cujo próximo
+   *   caractere já é a tecla, o cursor apenas **pula** (mesma regra do caminho de 1 cursor); nos
+   *   demais, a tecla é inserida.
+   */
+  async insertKeyAtCursors(key: string, close: string | undefined): Promise<void> {
+    const session = this.current;
+    if (session === undefined) return;
+    try {
+      if (session.selections.length <= 1) {
+        // 1 cursor: o caminho histórico (o teclado reposiciona o caret).
+        await this.insertText(close === undefined ? key : key + close);
+        return;
+      }
+      const { edits, skipped } = buildKeyEdits(
+        session.selections,
+        key,
+        close,
+        session.source.text,
+      );
+      // O par tem 2 caracteres ⇒ o cursor volta 1 (fica **entre** os delimitadores).
+      this.applyCursorEdits(session, edits, skipped, close === undefined ? 0 : 1);
+    } catch (error) {
+      console.error("Scribe: falha ao inserir tecla em múltiplos cursores", error);
+    }
+  }
+
+  /**
+   * Backspace/Delete em **N cursores** (P2#5): apaga em todos os cursores — o range
+   * selecionado, o caractere anterior/posterior ou o **par vazio** (como o caminho de 1
+   * cursor) — e empurra **N entradas** no lote (ordem descendente).
+   */
+  async deleteAtCursors(direction: "backward" | "forward"): Promise<void> {
+    const session = this.current;
+    if (session === undefined) return;
+    try {
+      const edits = buildDeleteEdits(session.selections, session.source.text, direction);
+      if (edits.length === 0) return;
+      this.applyCursorEdits(session, edits, [], 0);
+    } catch (error) {
+      console.error("Scribe: falha ao apagar em múltiplos cursores", error);
+    }
+  }
+
+  /**
+   * Aplica um conjunto de edições multi-cursor: splice local (latência zero), avanço dos
+   * cursores e **N entradas** no lote pendente (ordem descendente).
+   *
+   * O snapshot do lote (`pendingBatchSelections`) é o conjunto de cursores **antes** da 1ª
+   * edição do lote — é o que o undo restaura.
+   */
+  private applyCursorEdits(
+    session: TabSession,
+    edits: readonly SelectionEdit[],
+    skipped: readonly number[],
+    cursorBack: number,
+  ): void {
+    if (edits.length === 0 && skipped.length === 0) return;
+    const before = session.selections;
+    if (edits.length > 0) {
+      // Splice local (latência zero).
+      const newText = applyEditsToText(session.source.text, edits);
+      this.batchLocalRevision += 1;
+      session.source.setText(newText, this.batchLocalRevision);
+    }
+    // Os cursores andam com o texto (regra única: `advanceSelections`, de `src/shared`).
+    const advanced = advanceCursorSet(before, edits, cursorBack, skipped);
+    session.selections = advanced;
+    const primary = advanced[0];
+    // O caret é o `active` da seleção **primária** — o resto continua um conjunto vivo.
+    session.caret = primary !== undefined ? primary.active : session.caret;
+    session.selection = primary ?? SelectionOps.collapsed(session.caret);
+    this.renderer.setSelection(session.selection);
+    this.renderer.setSelections(session.selections);
+    this.viewport.setMetrics({ lineCount: session.source.lineCount() });
+    updateCaretStatus(session.source, session.caret);
+    if (edits.length > 0) {
+      session.dirty = true;
+      // N entradas no lote (ordem descendente) — um `Ctrl+Z` desfaz todas.
+      for (const edit of edits) {
+        this.pushBatch(
+          { at: edit.at, text: edit.insert, remove: edit.remove },
+          before,
+        );
+      }
+      this.scheduleBatchFlush();
+    }
+    this.renderer.start();
+  }
+
+  /**
+   * Empilha uma entrada no lote pendente.
+   *
+   * O **snapshot** do conjunto de cursores é guardado no **primeiro** push do lote: o undo de
+   * um lote restaura o estado **antes da 1ª tecla** do lote (e não o de cada tecla) — é o que
+   * o usuário espera ao dar `Ctrl+Z` num lote de teclas.
+   */
+  private pushBatch(
+    entry: { readonly at: number; readonly text: string; readonly remove?: string },
+    selections: SelectionSet,
+  ): void {
+    if (this.pendingBatch === null) {
+      this.pendingBatch = [];
+      this.pendingBatchSelections = selections;
+    }
+    this.pendingBatch.push(entry);
   }
 
   /** Agenda flush do lote no próximo rAF. */
@@ -1437,14 +1777,17 @@ class DocumentController {
   /** Envia o lote acumulado para o main e reconcilia. Chamado externamente antes de operações IPC. */
   async flushBatch(): Promise<void> {
     const batch = this.pendingBatch;
+    const snapshot = this.pendingBatchSelections;
     if (batch === null || batch.length === 0) return;
     this.pendingBatch = null;
+    this.pendingBatchSelections = null;
     this.batchLocalRevision = 0;
     const session = this.current;
     if (session === undefined) return;
     try {
+      // O snapshot vai junto: o core grava o "before" do lote e o undo devolve os N cursores.
       const result = await session.bridge.batchInsert(
-        session.handle, batch, "user",
+        session.handle, batch, "user", snapshot ?? undefined,
       );
       // Reconcilia revisão real do servidor
       session.source.setText(result.text, result.revision);
@@ -1559,9 +1902,19 @@ class DocumentController {
           : await session.bridge.redo(session.handle);
       const next = await session.bridge.text(session.handle);
       session.source.setText(next, state.revision);
-      session.caret = Math.min(state.caret, next.length);
-      session.selection = SelectionOps.collapsed(session.caret);
-      session.selections = SelectionSetOps.singular(session.caret);
+      // O undo/redo devolve o **conjunto** de cursores (P2#5): restaura os N cursores
+      // (clampados ao tamanho do texto) em vez de colapsar tudo para 1 cursor.
+      const restored = clampSelections(state.selections, next.length);
+      session.caret = clampOffset(state.caret, next.length);
+      const primary =
+        state.selection !== undefined
+          ? {
+              anchor: clampOffset(state.selection.anchor, next.length),
+              active: clampOffset(state.selection.active, next.length),
+            }
+          : SelectionOps.collapsed(session.caret);
+      session.selection = primary;
+      session.selections = restored.length > 0 ? restored : [primary];
       this.renderer.setSelection(session.selection);
       this.renderer.setSelections(session.selections);
       this.viewport.setMetrics({ lineCount: session.source.lineCount() });
@@ -1617,13 +1970,111 @@ function demoText(): string {
 // Referência explícita para manter a função como fallback disponível (não removida).
 void demoText;
 
+// ---- layout: largura útil, minimap e popups de contexto ----------------------------------------
+
+/** Largura (px) da scrollbar vertical desenhada pelo renderer (mesma do `LineLayout.scrollbarWidth`). */
+const SCROLLBAR_WIDTH_PX = 10;
+
+/** Padding horizontal entre o gutter e o texto (mesma origem usada no desenho). */
+const TEXT_PADDING_LEFT_PX = 8;
+
+/**
+ * Largura padrão do minimap (px) — espelha `--s-minimap-w` do `index.css`.
+ * Só entra como **fallback**: quando o DOM não expõe a largura (elemento ausente/sem layout).
+ */
+const MINIMAP_FALLBACK_WIDTH_PX = 72;
+
+/** `true` enquanto o painel de depuração estiver aberto — ele disputa a faixa do minimap. */
+let debugPanelOpen = false;
+
+/**
+ * Largura (px) da faixa do minimap **quando ele está visível**; `0` quando está oculto.
+ *
+ * Lê o valor real do DOM (o `--s-minimap-w` já resolvido pelo browser) — nada de número
+ * mágico duplicado: se o CSS mudar, a largura útil do texto muda junto.
+ */
+function visibleMinimapWidth(): number {
+  if (typeof document === "undefined") return 0;
+  const mm = document.getElementById("minimap");
+  if (mm === null || mm.hidden) return 0;
+  if (typeof getComputedStyle === "function") {
+    const parsed = Number.parseFloat(getComputedStyle(mm).width);
+    if (Number.isFinite(parsed) && parsed > 0) return parsed;
+  }
+  if (mm.clientWidth > 0) return mm.clientWidth;
+  return MINIMAP_FALLBACK_WIDTH_PX;
+}
+
+/**
+ * Largura útil para o texto: `viewport − scrollbar − (gutter + padding) − minimap visível`.
+ *
+ * **Fonte única**: o soft-wrap (`renderOnce`) e a contagem de linhas visuais (`resize`)
+ * passam por aqui — assim os dois nunca divergem (a rolagem acompanha o wrap).
+ */
+function usefulTextWidth(viewportWidth: number, gutterWidth: number): number {
+  const used = SCROLLBAR_WIDTH_PX + gutterWidth + TEXT_PADDING_LEFT_PX + visibleMinimapWidth();
+  return Math.max(0, viewportWidth - used);
+}
+
+/**
+ * Aplica a visibilidade do minimap: ele some com a welcome screen **e** com o painel de
+ * depuração — os dois ocupam a mesma faixa do canto direito.
+ */
+function applyMinimapVisibility(): void {
+  if (typeof document === "undefined") return;
+  const mm = document.getElementById("minimap");
+  if (mm === null) return;
+  const welcome = document.getElementById("welcome-screen");
+  const welcomeVisible = welcome !== null && !welcome.hidden;
+  mm.hidden = welcomeVisible || debugPanelOpen;
+}
+
 /** Alterna a exibição da tela de boas-vindas (welcome screen). */
 function showWelcome(show: boolean): void {
   const el = document.getElementById("welcome-screen");
   if (el) el.hidden = !show;
-  // Esconde o minimap junto com a welcome screen (ambos têm z-index 10)
-  const mm = document.getElementById("minimap");
-  if (mm) mm.hidden = show;
+  // O minimap divide a faixa com a welcome screen e com o painel de depuração.
+  applyMinimapVisibility();
+}
+
+// ---- popups de contexto (mutuamente exclusivos) -------------------------------------------------
+
+/**
+ * Os popups de **contexto** do editor. São **mutuamente exclusivos**: só um pode ficar
+ * visível por vez (completion, hover, signature help, references, document symbols).
+ */
+interface ContextPopups {
+  readonly completion: CompletionPopupBinding;
+  readonly hoverTooltip: HoverTooltipBinding;
+  readonly signatureHelp: SignatureHelpBinding;
+  readonly references: ReferencesPopupBinding;
+  readonly documentSymbols: DocumentSymbolsBinding;
+}
+
+/**
+ * Fecha (sem destruir) todos os popups de contexto e remove o popup de code actions.
+ *
+ * Idempotente: o `close`/`hide` de cada módulo já é no-op quando o popup não está aberto.
+ * A command palette e a find bar são overlays de **aplicação** — não são tocados aqui.
+ */
+function closeContextPopups(popups: ContextPopups): void {
+  popups.completion.close();
+  popups.hoverTooltip.hide();
+  popups.signatureHelp.close();
+  popups.references.close();
+  popups.documentSymbols.close();
+  removeCodeActionsPopup();
+}
+
+/** `true` se algum popup de contexto (fora o hover) estiver visível. */
+function hasOpenContextPopup(popups: ContextPopups): boolean {
+  return (
+    codeActionsPopup !== undefined ||
+    popups.completion.isOpen ||
+    popups.signatureHelp.isOpen ||
+    popups.references.isOpen ||
+    popups.documentSymbols.isOpen
+  );
 }
 
 // ---- app ------------------------------------------------------------------------------------------
@@ -1662,6 +2113,14 @@ class ScribeRenderer {
   private gitDiffs: readonly GitDiffRange[] = [];
   /** Linhas (1-based) com breakpoint do documento ativo. */
   private breakpointLines: readonly number[] = [];
+  /**
+   * `true` quando o layout mudou (minimap/painel) e o wrap precisa ser recalculado.
+   *
+   * ⚠️ Não reintroduza um gancho **por frame** aqui: um callback chamado no laço de
+   * render que marcasse o layout como sujo realimenta o próprio frame (loop de layout)
+   * e trava o renderer. As mudanças de layout chegam por **evento**.
+   */
+  private layoutDirty = false;
 
   constructor(
     private readonly canvas: HTMLCanvasElement,
@@ -1731,20 +2190,39 @@ class ScribeRenderer {
     this.viewport.scrollTo(0);
   }
 
+  /**
+   * Marca o layout como sujo: a faixa do minimap mudou (painel de depuração abriu/fechou)
+   * e a largura útil do texto precisa ser recalculada no próximo frame.
+   */
+  markLayoutDirty(): void {
+    this.layoutDirty = true;
+  }
+
   resize(cssWidth: number, cssHeight: number): void {
-    this.viewportWidth = Math.max(1, Math.floor(cssWidth));
-    this.viewportHeight = Math.max(1, Math.floor(cssHeight));
-    this.canvas.width = Math.floor(this.viewportWidth * this.dpr);
-    this.canvas.height = Math.floor(this.viewportHeight * this.dpr);
-    if (this.pipeline instanceof Canvas2DBackend) {
-      this.pipeline.setTransform(this.dpr, 0, 0, this.dpr, 0, 0);
+    const nextWidth = Math.max(1, Math.floor(cssWidth));
+    const nextHeight = Math.max(1, Math.floor(cssHeight));
+    // Reatribuir `canvas.width/height` **realoca** o backing store (zera o canvas e, em
+    // máquina sem GPU, pode derrubar o processo de raster). Só o faz quando o tamanho
+    // **muda** de fato — métricas de layout (wrap/rolagem) podem ser recalculadas sem
+    // tocar no canvas (é o caso do painel de depuração abrir/fechar: a faixa livre muda,
+    // o canvas não).
+    const sizeChanged = nextWidth !== this.viewportWidth || nextHeight !== this.viewportHeight;
+    this.viewportWidth = nextWidth;
+    this.viewportHeight = nextHeight;
+    if (sizeChanged) {
+      this.canvas.width = Math.floor(this.viewportWidth * this.dpr);
+      this.canvas.height = Math.floor(this.viewportHeight * this.dpr);
+      if (this.pipeline instanceof Canvas2DBackend) {
+        this.pipeline.setTransform(this.dpr, 0, 0, this.dpr, 0, 0);
+      }
     }
 
     // Atualiza viewport com visualLineCount (soft wrap)
     const lineCount = this.source.lineCount();
     const gutterDigits = Math.max(1, Math.floor(Math.log10(Math.max(1, lineCount))) + 1);
     const gutterWidth = gutterDigits * 9 + 16;
-    const wrapWidth = Math.max(0, this.viewportWidth - 10 - (gutterWidth + 8));
+    // Mesma largura útil do `renderOnce` — wrap e rolagem não podem divergir.
+    const wrapWidth = usefulTextWidth(this.viewportWidth, gutterWidth);
     let vizCount = lineCount;
     if (wrapWidth > 0) {
       vizCount = 0;
@@ -1788,6 +2266,10 @@ class ScribeRenderer {
   };
 
   private renderOnce(): void {
+    if (this.layoutDirty) {
+      this.layoutDirty = false;
+      this.resize(this.viewportWidth, this.viewportHeight);
+    }
     const viewportRect = { x: 0, y: 0, w: this.viewportWidth, h: this.viewportHeight };
     const range = this.viewport.visibleLineRange();
     // Largura dinâmica do gutter: número de dígitos do total de linhas + folga.
@@ -1797,7 +2279,7 @@ class ScribeRenderer {
     const colors = THEME.current.colors;
     const layout: LineLayout = {
       lineHeight: this.lineHeight(),
-      paddingLeft: gutterWidth + 8,
+      paddingLeft: gutterWidth + TEXT_PADDING_LEFT_PX,
       paddingTop: 8,
       tabWidth: 4,
       scrollOffsetPx: this.viewport.scrollOffsetPx(),
@@ -1807,15 +2289,15 @@ class ScribeRenderer {
       gutterWidth,
       gutterBackground: colors.gutter,
       gutterColor: colors.gutterForeground,
-      scrollbarWidth: 10,
+      scrollbarWidth: SCROLLBAR_WIDTH_PX,
       scrollbarTrack: colors.scrollbarTrack,
       scrollbarThumb: colors.scrollbarThumb,
       searchMatchColor: colors.searchMatch,
       searchCurrentColor: colors.searchCurrent,
       selectionColor: colors.selection,
       bracketMatchColor: colors.caret,
-      // Soft wrap (P3#15): largura disponível para o texto = viewport - gutter - scrollbar - padding
-      wrapWidth: Math.max(0, viewportRect.w - 10 - (gutterWidth + 8)),
+      // Soft wrap (P3#15): largura disponível para o texto = viewport - gutter - scrollbar - padding - minimap
+      wrapWidth: usefulTextWidth(viewportRect.w, gutterWidth),
     };
 
     // Computa carets e seleções extras para multi-cursor (P2#5)
@@ -2115,6 +2597,19 @@ function setDirtyStatus(dirty: boolean): void {
   el.classList.toggle("dirty", dirty);
 }
 
+/**
+ * Devolve o **foco ao canvas do editor**.
+ *
+ * O teclado do editor é escutado no `<canvas id="editor-surface">` (`keydown`). Qualquer
+ * ação que tire o foco — abrir um arquivo pelo diálogo nativo, trocar de aba, fechar a
+ * find bar, clicar num painel — deixa o foco no elemento que clicou, e aí **digitar não
+ * faz nada** (sintoma "não dá pra editar"). Chamar isto depois dessas ações.
+ */
+function focusEditorSurface(): void {
+  const el = document.getElementById("editor-surface");
+  if (el instanceof HTMLElement) el.focus();
+}
+
 function updateCaretStatus(source: DocumentLineSource, offset: number): void {
   const status = document.getElementById("status-caret");
   const position = source.positionAt(offset);
@@ -2373,6 +2868,30 @@ export async function bootRenderer(): Promise<boolean> {
     bridge !== undefined && bridge.dapStart !== undefined && bridge.onDapState !== undefined
       ? createDebugView()
       : undefined;
+
+  /**
+   * Mantém o minimap em sintonia com o painel de depuração: os dois disputam a faixa do
+   * canto direito, então com o painel aberto o minimap some (e volta quando ele fecha).
+   *
+   * Idempotente: só age quando o estado do painel muda.
+   */
+  const syncMinimapWithDebugPanel = (): void => {
+    if (debugView === undefined) return;
+    if (debugView.isOpen === debugPanelOpen) return;
+    debugPanelOpen = debugView.isOpen;
+    applyMinimapVisibility();
+    // A faixa livre mudou de largura: o wrap do texto precisa ser recalculado.
+    renderer.markLayoutDirty();
+  };
+  // O painel pode ser fechado pelo botão "×" (fora do toggle) — o **evento** de
+  // visibilidade cobre esse caminho sem depender do DOM do painel.
+  //
+  // ⚠️ Isto **não** pode ser um gancho por frame: um gancho que marcasse o layout como
+  // sujo dentro do próprio laço de render realimentava o frame (loop de layout) e
+  // travava o renderer — era o crash ao fechar o painel de depuração.
+  debugView?.onVisibilityChange(() => {
+    syncMinimapWithDebugPanel();
+  });
 
   /** Thread atual (do último `stopped` ou 1ª conhecida) — necessária a continue/pause/step. */
   const withCurrentThread = (action: (threadId: number) => void): void => {
@@ -2940,9 +3459,15 @@ export async function bootRenderer(): Promise<boolean> {
     if (debugView === undefined) return;
     if (debugView.isOpen) {
       debugView.close();
+      // O minimap volta a ocupar a faixa do canto direito.
+      syncMinimapWithDebugPanel();
+      // Fechar o painel devolve o foco ao canvas (o botão "×" ficou com o foco).
+      focusEditorSurface();
       return;
     }
     debugView.open();
+    // O minimap some: o painel de depuração fica com a faixa.
+    syncMinimapWithDebugPanel();
     // Ao abrir, sincroniza os breakpoints do **documento ativo** (o main é a fonte da
     // verdade). Tolera um preload antigo (que devolvia só as linhas).
     const session = controller?.current;
@@ -3074,11 +3599,11 @@ export async function bootRenderer(): Promise<boolean> {
   });
   renderer.attachMinimap(minimap);
 
-  // Minimap Hover Preview (P2#9b): mostra código real com syntax highlight ao passar o mouse.
-  // ── Minimap Hover Preview (P2#9b) ──────────────────────────────────────
+  // Lupa de código (P2#9b): preview **ampliado** (×2.5) e **colorido** do código sob o mouse
+  // sobre o minimap — a "coluna de código" com zoom que o usuário pediu.
   const minimapCanvas = minimap.container.querySelector<HTMLCanvasElement>("#minimap-surface");
   if (minimapCanvas !== null && bridge?.highlight !== undefined) {
-    const hoverBinding = attachMinimapHover({
+    const loupeBinding = attachCodeLoupe({
       source: {
         lineCount: () => controller?.current?.source.lineCount() ?? source.lineCount(),
         line: (i: number) => controller?.current?.source.line(i) ?? source.line(i),
@@ -3094,9 +3619,14 @@ export async function bootRenderer(): Promise<boolean> {
         if (handle === undefined) return { revision: -1, first: 0, lines: [] };
         return bridge.highlight!(handle, first, count);
       },
+      minimapFirstLine: () => minimap.firstLine() ?? 0,
+      getCaretLine: () => {
+        const cur = controller?.current;
+        return cur === undefined ? 0 : cur.source.positionAt(cur.caret).line;
+      },
     });
     // Cleanup no fechamento da janela
-    window.addEventListener("beforeunload", () => hoverBinding.dispose());
+    window.addEventListener("beforeunload", () => loupeBinding.dispose());
   }
 
   // Toggle tema (Ctrl+Shift+T): casca (CSS vars) e canvas (`THEME.current`) trocam juntos.
@@ -3251,6 +3781,8 @@ export function attachFindBar(deps: FindBarDeps): FindBarBinding | undefined {
   let currentDocKey = "";
   const renderState = (state: FindBarState): void => {
     bar.hidden = !state.open;
+    // Fechar a find bar devolve o foco ao canvas (o input da barra took o foco).
+    if (!state.open) focusEditorSurface();
     count.textContent = `${state.current}/${state.total}${state.truncated ? "+" : ""}`;
     status.textContent = state.status ?? "";
     // Empurra os matches pro renderer pintar no canvas (P3.11).
@@ -3397,6 +3929,15 @@ function attachInputListeners(
 ): void {
   const lineHeight = Math.ceil(TEXT_STYLE.sizePx * 1.4);
   const currentLine = (): number => Math.floor(viewport.scrollOffsetPx() / lineHeight);
+
+  // Os popups de contexto num lugar só — para garantir exclusividade (um por vez).
+  const popups: ContextPopups = {
+    completion,
+    hoverTooltip,
+    signatureHelp: signatureHelpPopup,
+    references: referencesPopup,
+    documentSymbols: documentSymbolsPopup,
+  };
 
   surface.addEventListener(
     "wheel",
@@ -3618,6 +4159,8 @@ function attachInputListeners(
         try {
           const result = await bridge.hover!(session.handle, line, col);
           if (result === null || result.contents.length === 0) return;
+          // Exclusividade: o hover não rouba a tela de outro popup de contexto já aberto.
+          if (hasOpenContextPopup(popups)) return;
           hoverTooltip.show(result.contents, event.clientX, event.clientY);
         } catch {
           // Silencia erro de hover
@@ -3649,6 +4192,8 @@ function attachInputListeners(
           const gutterW = gutterDigits * 9 + 16;
           const x = (gutterW + 8) + pos.column * charW;
           const y = (pos.line * lineHeightVal - scrollPx + lineHeightVal) + 8;
+          // Exclusividade: fecha os popups de contexto abertos (completion, hover, etc.).
+          closeContextPopups(popups);
           completion.open(items, (item) => {
             const text = item.insertText ?? item.label;
             void controller?.replaceText(session.caret, 0, text);
@@ -3720,6 +4265,8 @@ function attachInputListeners(
         try {
           const refs = await bridge.references!(session.handle, pos.line, pos.column);
           if (refs.length === 0) return;
+          // Exclusividade: fecha os popups de contexto abertos antes de abrir este.
+          closeContextPopups(popups);
           referencesPopup.open(refs, (loc) => {
             // Se for no mesmo arquivo, navega o caret
             const targetLine = loc.range.startLine;
@@ -3776,6 +4323,8 @@ function attachInputListeners(
             const gutterW = gutterDigits * 9 + 16;
             const x = (gutterW + 8) + pos.column * charW;
             const y = (pos.line * lineHeightVal - scrollPx + lineHeightVal) + 8;
+            // Exclusividade: fecha os popups de contexto abertos antes de abrir este.
+            closeContextPopups(popups);
             signatureHelpPopup.show(help, x, y);
           } catch {
             // Silencia falha de signatureHelp
@@ -3793,6 +4342,8 @@ function attachInputListeners(
         try {
           const symbols = await bridge.documentSymbols!(session.handle);
           if (symbols.length === 0) return;
+          // Exclusividade: fecha os popups de contexto abertos antes de abrir este.
+          closeContextPopups(popups);
           documentSymbolsPopup.open(symbols, (sym) => {
             if (sym.range.startLine < session.source.lineCount()) {
               const offset = session.source.offsetOf(sym.range.startLine, sym.range.startCol);
@@ -3822,6 +4373,8 @@ function attachInputListeners(
         try {
           const actions = await bridge.codeActions!(session.handle, pos.line, pos.column);
           if (actions.length === 0) return;
+          // Exclusividade: fecha os popups de contexto abertos (e remove o code actions órfão).
+          closeContextPopups(popups);
           showCodeActionsPopup(actions, session, viewport, controller, bridge);
         } catch (error) {
           console.warn("Scribe: falha ao buscar code actions", error);
@@ -4021,6 +4574,12 @@ function attachInputListeners(
     if (event.key === "Backspace" && controller?.current) {
       event.preventDefault();
       const session = controller.current;
+      // Multi-cursor (P2#5): apaga em **todos** os cursores (1 entrada por cursor no lote).
+      if (session.selections.length > 1) {
+        void controller.deleteAtCursors("backward");
+        renderer.start();
+        return;
+      }
       const s = session.selection;
       if (!SelectionOps.isCollapsed(s)) {
         void controller.insertText("");
@@ -4049,6 +4608,12 @@ function attachInputListeners(
     if (event.key === "Delete" && controller?.current) {
       event.preventDefault();
       const session = controller.current;
+      // Multi-cursor (P2#5): apaga em **todos** os cursores (1 entrada por cursor no lote).
+      if (session.selections.length > 1) {
+        void controller.deleteAtCursors("forward");
+        renderer.start();
+        return;
+      }
       const s = session.selection;
       if (!SelectionOps.isCollapsed(s)) {
         void controller.insertText("");
@@ -4129,6 +4694,12 @@ function attachInputListeners(
       const close = AUTO_PAIRS[key];
 
       if (close !== undefined) {
+        // Multi-cursor (P2#5): o par entra em **todos** os cursores e cada cursor fica
+        // **entre** os delimitadores.
+        if (session.selections.length > 1) {
+          void controller.insertKeyAtCursors(key, close);
+          return;
+        }
         // Auto-pair: insere par e reposiciona cursor no meio
         const at = session.caret;
         void controller.insertText(key + close).then(() => {
@@ -4142,6 +4713,12 @@ function attachInputListeners(
           renderer.start();
         });
       } else if (CLOSING.has(key)) {
+        // Multi-cursor (P2#5): cada cursor pula o fechamento que já está à sua frente; os
+        // demais insertem a tecla.
+        if (session.selections.length > 1) {
+          void controller.insertKeyAtCursors(key, undefined);
+          return;
+        }
         // Se o próximo caractere é o fechamento, só pula (não insere duplicado)
         const text = session.source.text;
         if (session.caret < text.length && text[session.caret] === key) {
@@ -4254,6 +4831,27 @@ function applyFormattingEdits(
 
 // ── Code Actions Popup ──────────────────────────────────────────────────────────────────────────
 
+/** Popup de code actions ativo (criado sob demanda) — some com `removeCodeActionsPopup()`. */
+let codeActionsPopup: HTMLElement | undefined;
+
+/** Handler de "clicar fora" do popup de code actions (desregistrado junto com o popup). */
+let codeActionsCloseHandler: ((event: MouseEvent) => void) | undefined;
+
+/**
+ * Remove o popup de code actions da tela — **idempotente**.
+ *
+ * O popup é criado sob demanda e antes ficava órfão na tela: agora ele sai do DOM quando
+ * é fechado (clique no item, clique fora) ou quando outro popup de contexto abre.
+ */
+function removeCodeActionsPopup(): void {
+  if (codeActionsCloseHandler !== undefined) {
+    document.removeEventListener("mousedown", codeActionsCloseHandler);
+    codeActionsCloseHandler = undefined;
+  }
+  codeActionsPopup?.remove();
+  codeActionsPopup = undefined;
+}
+
 /**
  * Mostra um popup DOM simples listando as code actions disponíveis.
  * Ao clicar em uma action, se tiver `edit`, aplica as TextEdits no documento.
@@ -4266,9 +4864,8 @@ function showCodeActionsPopup(
   controller: DocumentController | undefined,
   bridge: ScribeBridge | undefined,
 ): void {
-  // Remove popup anterior se existir
-  const existing = document.getElementById("code-actions-popup");
-  if (existing !== null) existing.remove();
+  // Remove o popup anterior (se houver) — nunca dois code actions na tela.
+  removeCodeActionsPopup();
 
   const popup = document.createElement("div");
   popup.id = "code-actions-popup";
@@ -4344,7 +4941,7 @@ function showCodeActionsPopup(
     item.addEventListener("mousedown", (e: MouseEvent) => {
       e.preventDefault();
       e.stopPropagation();
-      popup.remove();
+      removeCodeActionsPopup();
       void applyCodeAction(action, session, controller, bridge);
     });
 
@@ -4355,16 +4952,20 @@ function showCodeActionsPopup(
   const closeHandler = (e: MouseEvent): void => {
     const target = e.target as Node | null;
     if (target !== null && !popup.contains(target)) {
-      popup.remove();
-      document.removeEventListener("mousedown", closeHandler);
+      removeCodeActionsPopup();
     }
   };
   // Delay para não fechar imediatamente pelo clique que abriu
   setTimeout(() => {
+    // O popup pode ter sido fechado (outro popup abriu) antes do timeout — não registra
+    // um handler para um popup que já saiu da tela.
+    if (codeActionsPopup !== popup) return;
+    codeActionsCloseHandler = closeHandler;
     document.addEventListener("mousedown", closeHandler);
   }, 0);
 
   document.body.appendChild(popup);
+  codeActionsPopup = popup;
 }
 
 /**

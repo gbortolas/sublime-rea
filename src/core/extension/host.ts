@@ -5,8 +5,14 @@
  * `docs/architecture/06-padroes-transversais.md` §9 (handshake + ciclo de vida).
  *
  * Decisões nossas (escolha nossa; apoiadas nos docs):
- * - **O núcleo cria o par de portas e o transfere** ao processo (`DEC-IPC-2`: núcleo `create`, host
- *   só `open`). Em produção é um `MessageChannelMain`; nos testes, um par em memória injetado.
+ * - **O canal é o nativo do `utilityProcess`** (⚠️ revisão de 2026-10): o desenho original
+ *   (`DEC-IPC-2/3`) previa o núcleo criar um `MessageChannelMain` e **transferir** uma das
+ *   portas ao processo. Isso é **inviável no Electron 38**: `utilityProcess.postMessage` não
+ *   clona `MessagePortMain` (nem ports de `worker_threads`) — falha com
+ *   *"An object could not be cloned."*. Hoje o canal **é** a mensageria do processo: o núcleo
+ *   encapsula o filho como `BridgePort` (`postMessage` → `child.postMessage`,
+ *   `on("message")` → `child.on("message")`) e o filho encapsula o `process.parentPort`.
+ *   O par de portas transferidas (DEC-IPC-2/3) fica, portanto, **só no papel**.
  * - **Processo por port injetável** (`HostSpawner`): produção usa
  *   `electron.utilityProcess.fork(entry, [], { env, stdio: "pipe" })`; teste usa um fake. Por isso
  *   `electron` **não** é importado estaticamente — só dinamicamente dentro das fábricas default.
@@ -49,10 +55,22 @@ import { OPS_HASH } from "./ops";
 
 // ── portas de processo (injetáveis) ────────────────────────────────────────────────────────
 
-/** Par de portas criado **pelo núcleo**; a `host` é transferida ao processo (`DEC-IPC-2`). */
+/**
+ * Par de portas do canal núcleo↔host.
+ *
+ * ⚠️ O par **transferido** (`DEC-IPC-2/3`) não existe mais: nenhuma porta pode ser
+ * transferida via `utilityProcess.postMessage` (Electron 38 clona só dados). O canal é o
+ * **nativo do processo** — o núcleo cria a ponta `core` (adaptador sobre o processo filho)
+ * e o **filho** cria a ponta `host` (o `process.parentPort`).
+ */
 export interface PortPair {
+  /** Lado do núcleo — o `ExtensionHost` fala por aqui. */
   readonly core: BridgePort;
-  readonly host: BridgePort;
+  /**
+   * Lado do host — só existe **dentro do processo filho** (é o `process.parentPort`);
+   * no núcleo é `undefined` (o canal do processo é 1:1).
+   */
+  readonly host?: BridgePort;
 }
 
 /** Eventos que o processo hospedado pode reportar. */
@@ -67,8 +85,14 @@ export type HostProcessEventName = keyof HostProcessEvents;
 /** Handle do processo hospedado — o mínimo que o `ExtensionHost` precisa. */
 export interface HostProcess {
   readonly pid: number | undefined;
-  postMessage(message: unknown, transfer?: readonly unknown[]): void;
+  /**
+   * Envia uma mensagem ao processo. **Sem transferência de portas** — o canal nativo do
+   * `utilityProcess` só clona dados (portas ⇒ *"An object could not be cloned."*).
+   */
+  postMessage(message: unknown): void;
   on<E extends HostProcessEventName>(event: E, listener: HostProcessEvents[E]): void;
+  /** Remove um listener de `"message"` (a ponte desliga o canal no `close()`). */
+  off(event: "message", listener: (message: unknown) => void): void;
   kill(): void;
 }
 
@@ -86,7 +110,12 @@ export interface HostSpawner {
 
 export interface ExtensionHostOptions {
   readonly spawner?: HostSpawner;
-  readonly createPortPair?: () => PortPair | Promise<PortPair>;
+  /**
+   * Fábrica do canal núcleo↔host. Recebe o processo hospedado — o canal padrão **depende**
+   * dele (é a própria mensageria do processo), então a fábrica só pode rodar **depois**
+   * do spawn. Default: {@link createElectronPortPair}.
+   */
+  readonly createPortPair?: (child: HostProcess) => PortPair | Promise<PortPair>;
   /** Handlers dos métodos expostos ao host (`createMethodHandlers(deps)`). */
   readonly handlers?: Partial<MethodHandlers<ExtensionMethods>>;
   readonly apiVersion?: ExtensionBridgeVersion;
@@ -107,11 +136,23 @@ function defaultProtocolErrorSink(error: ProtocolError): void {
   process.emitWarning(error);
 }
 
+/**
+ * Ambiente do processo hospedado: herda o do processo atual (é o default do
+ * `utilityProcess.fork`) e aplica os overrides do caller.
+ */
+function buildEnv(overrides: Record<string, string> | undefined): Record<string, string> {
+  const env: Record<string, string> = {};
+  for (const [key, value] of Object.entries(process.env)) {
+    if (value !== undefined) env[key] = value;
+  }
+  return { ...env, ...(overrides ?? {}) };
+}
+
 // ── implementação ──────────────────────────────────────────────────────────────────────────
 
 export class ExtensionHostImpl implements ExtensionHost {
   private readonly spawner: HostSpawner;
-  private readonly createPortPair: () => PortPair | Promise<PortPair>;
+  private readonly createPortPair: (child: HostProcess) => PortPair | Promise<PortPair>;
   private readonly handlers: Partial<MethodHandlers<ExtensionMethods>> | undefined;
   private readonly apiVersion: ExtensionBridgeVersion;
   private readonly handshakeTimeoutMs: number;
@@ -148,13 +189,30 @@ export class ExtensionHostImpl implements ExtensionHost {
       throw new ProtocolError("host.shutdown", "ExtensionHost já encerrado; spawn recusado");
     }
     const { name, entry } = opts;
-    const env: Record<string, string> = opts.env ? { ...opts.env } : {};
+    // O filho herda o ambiente do processo (default do `utilityProcess`) + overrides.
+    const env: Record<string, string> = buildEnv(opts.env);
     const handle = makeHandle<"HostHandle">(this.nextSlot, 1);
     this.nextSlot += 1;
 
-    const pair = await this.createPortPair();
     const ready = new Deferred<Handshake>();
     const exited = new Deferred<{ readonly code: number | null }>();
+
+    // 1) **O processo primeiro**: o canal padrão é a própria mensageria dele (DEC-IPC-1).
+    let child: HostProcess;
+    try {
+      child = await this.spawner.spawn(entry, { env, name });
+    } catch (err) {
+      throw toError(err);
+    }
+
+    // 2) O canal (ponta `core`) + a ponte — ambos dependem do processo vivo.
+    let pair: PortPair;
+    try {
+      pair = await this.createPortPair(child);
+    } catch (err) {
+      child.kill();
+      throw toError(err);
+    }
 
     const base: BridgeOptions<ExtensionMethods, ExtensionEvents> = {
       initialState: "handshaking",
@@ -175,14 +233,7 @@ export class ExtensionHostImpl implements ExtensionHost {
       ExtensionEvents
     >(pair.core, bridgeOpts);
 
-    let child: HostProcess;
-    try {
-      child = await this.spawner.spawn(entry, { env, name });
-    } catch (err) {
-      await bridge.close();
-      throw toError(err);
-    }
-
+    // 3) Listeners de "exit"/"error" — o filho pode morrer antes (ou logo depois) do ready.
     child.on("exit", (code) => {
       if (!ready.settled) {
         ready.reject(
@@ -201,9 +252,9 @@ export class ExtensionHostImpl implements ExtensionHost {
     // (e.g., postMessage throws before we reach the await).
     ready.promise.catch(() => {});
 
-    // O núcleo cria o canal e o transfere; o host só conecta (DEC-IPC-2).
+    // 4) Bootstrap: **só dados** — o canal é o do processo, nenhuma porta é transferida.
     try {
-      child.postMessage({ kind: "bootstrap", name, port: pair.host }, [pair.host]);
+      child.postMessage({ kind: "bootstrap", name });
     } catch (err) {
       child.kill();
       await bridge.close();
@@ -285,14 +336,45 @@ export class ExtensionHostImpl implements ExtensionHost {
 
 // ── fábricas default (produção) — `electron` só aqui, dinamicamente ─────────────────────────
 
-/** Cria o par de portas do núcleo via `MessageChannelMain` (`DEC-IPC-2/3`). */
-export async function createElectronPortPair(): Promise<PortPair> {
-  const { MessageChannelMain } = await import("electron");
-  const channel = new MessageChannelMain();
-  return {
-    core: channel.port1 as unknown as BridgePort,
-    host: channel.port2 as unknown as BridgePort,
+/**
+ * Adapta o **canal nativo** de um processo hospedado à interface `BridgePort`:
+ * `postMessage` → `child.postMessage`; `on("message")` → `child.on("message")`.
+ *
+ * É o substituto do `MessageChannelMain` transferido (DEC-IPC-2/3): nenhuma porta pode ser
+ * transferida via `utilityProcess.postMessage` (Electron 38 ⇒ *"An object could not be
+ * cloned."*), então o par de pontas **é** o canal do processo — uma ponta aqui (núcleo) e a
+ * outra no filho (o `process.parentPort`).
+ */
+export function createProcessPort(child: HostProcess): BridgePort {
+  const port: BridgePort = {
+    postMessage: (message: unknown): void => {
+      child.postMessage(message);
+    },
+    on: (event: "message", listener: (value: unknown) => void): BridgePort => {
+      if (event === "message") child.on("message", listener);
+      return port;
+    },
+    off: (event: "message", listener: (value: unknown) => void): BridgePort => {
+      if (event === "message") child.off("message", listener);
+      return port;
+    },
+    start: (): void => {
+      /* a mensageria do processo já está ativa */
+    },
+    close: (): void => {
+      /* o processo é encerrado pelo `ExtensionHost` (`child.kill()`) */
+    },
   };
+  return port;
+}
+
+/**
+ * Canal do processo hospedado: a ponta `core` (lado do núcleo) é o adaptador sobre a
+ * mensageria do `utilityProcess`; a ponta `host` é criada **no filho** (o
+ * `process.parentPort`) — por isso não existe no núcleo.
+ */
+export function createElectronPortPair(child: HostProcess): PortPair {
+  return { core: createProcessPort(child) };
 }
 
 /** Spawn por `utilityProcess.fork` — `stdio: "pipe"` para o host não poluir a main (`DEC-IPC-1`). */
@@ -308,8 +390,10 @@ export const electronHostSpawner: HostSpawner = {
       get pid(): number | undefined {
         return child.pid;
       },
-      postMessage(message: unknown, transfer?: readonly unknown[]): void {
-        child.postMessage(message, transfer ? (transfer as never[]) : []);
+      postMessage(message: unknown): void {
+        // **Sem `transfer`**: o Electron 38 não clona `MessagePortMain` no
+        // `utilityProcess.postMessage` (*"An object could not be cloned."*).
+        child.postMessage(message);
       },
       on<E extends HostProcessEventName>(event: E, listener: HostProcessEvents[E]): void {
         if (event === "message") {
@@ -327,6 +411,9 @@ export const electronHostSpawner: HostSpawner = {
             ),
           );
         }
+      },
+      off(_event: "message", listener: (message: unknown) => void): void {
+        child.removeListener("message", listener);
       },
       kill(): void {
         child.kill();

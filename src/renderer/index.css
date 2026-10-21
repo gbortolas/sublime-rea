@@ -63,6 +63,15 @@
   --s-tabactive: #1e1f22;
   --s-tabinactive: #18191b;
 
+  /* Alias de ponte: overlays criados em RUNTIME (popup de referências) ainda referenciam
+     `--fg`/`--border`/`--bg-overlay`/`--bg-input`. Sem estes aliases o `var()` cai no
+     fallback cru e o overlay fica fora do tema. (Ponte temporária: o overlay deve migrar
+     para os tokens `--s-*`.) */
+  --fg: var(--s-fg);
+  --border: var(--s-border);
+  --bg-overlay: var(--s-sidebar);
+  --bg-input: var(--s-bg);
+
   /* ── Derivados (translúcidos, agnósticos de tema) ─────────────────────── */
   --s-muted: color-mix(in srgb, var(--s-fg) 62%, transparent);
   --s-subtle: color-mix(in srgb, var(--s-fg) 40%, transparent);
@@ -88,6 +97,20 @@
   box-sizing: border-box;
 }
 
+/*
+ * Regra global de visibilidade — o atributo `hidden` SEMPRE vence.
+ *
+ * Overlays criados em RUNTIME definem `display` INLINE (`style.cssText`), e o estilo inline
+ * vence o `[hidden] { display: none }` do UA stylesheet: `el.hidden = true` não escondia
+ * NADA (painel/barra de depuração e popup de referências abriam sobre o editor no boot).
+ * Com `!important`, o atributo `hidden` passa a ter precedência sobre qualquer `display`
+ * inline ou de autor. As regras `[hidden]` por componente que existiam aqui foram
+ * REMOVIDAS: a regra global abaixo as cobre (e supera) — mesma semântica, fonte única.
+ */
+[hidden] {
+  display: none !important;
+}
+
 html,
 body {
   margin: 0;
@@ -99,6 +122,26 @@ body {
   font-family: var(--s-font-ui);
   font-size: var(--s-fs-md);
   -webkit-font-smoothing: antialiased;
+}
+
+/*
+ * Tipografia unificada da casca.
+ *
+ * Sem isto, o UA aplica `font: -webkit-small-control` (Arial 13.33px) em <button>/<input>:
+ * a casca virava uma mistura de fontes (a "frankenstein" do usuário). Família e TAMANHO
+ * nunca podem depender do UA — a escala do EDITOR (canvas, monoespaçada 15px) é separada e
+ * não é afetada por esta regra.
+ *
+ * `color: inherit` evita que um controle de formulário caia no `fieldtext` do UA (texto
+ * quase preto) sobre superfícies escuras: o texto herda `var(--s-fg)` do tema.
+ */
+button,
+input,
+select,
+textarea {
+  font-family: var(--s-font-ui);
+  font-size: var(--s-fs-sm);
+  color: inherit;
 }
 
 /* ══ Layout ════════════════════════════════════════════════════════════════ */
@@ -217,10 +260,6 @@ body {
   overflow: hidden;
 }
 
-#sidebar[hidden] {
-  display: none;
-}
-
 .sidebar-header {
   display: flex;
   align-items: center;
@@ -272,10 +311,6 @@ body {
   min-height: 0;
   overflow-y: auto;
   padding-bottom: var(--s-space-2);
-}
-
-.sidebar-list[hidden] {
-  display: none;
 }
 
 .sidebar-item {
@@ -481,6 +516,31 @@ body {
   pointer-events: none;
 }
 
+/* ══ Base de painéis flutuantes ═══════════════════════════════════════════ */
+
+/*
+ * Classe base dos overlays flutuantes criados em RUNTIME (painel/barra de depuração,
+ * popup de referências). Vive no CSS para que a casca inteira compartilhe a mesma
+ * linguagem visual: tokens de cor, raio e sombra do tema + tipografia da casca.
+ *
+ * `position: absolute` posiciona em relação a `#ui-overlay` (a camada de UI) e
+ * `pointer-events: auto` reabilita a interação — o overlay em si é `pointer-events: none`.
+ * As cores/raios/sombras vêm de tokens que já existiam (`--s-sidebar`, `--s-border`,
+ * `--s-radius-lg`, `--s-shadow`), então o painel acompanha o tema claro/escuro.
+ */
+.scribe-panel {
+  position: absolute;
+  z-index: 3;
+  border: 1px solid var(--s-border);
+  border-radius: var(--s-radius-lg);
+  background: var(--s-sidebar);
+  box-shadow: var(--s-shadow);
+  pointer-events: auto;
+  color: var(--s-fg);
+  font-family: var(--s-font-ui);
+  font-size: var(--s-fs-sm);
+}
+
 /* ══ Welcome screen ════════════════════════════════════════════════════════ */
 
 #welcome-screen {
@@ -491,10 +551,6 @@ body {
   display: grid;
   place-items: center;
   background: var(--s-bg);
-}
-
-#welcome-screen[hidden] {
-  display: none;
 }
 
 .welcome-content {
@@ -582,10 +638,6 @@ body {
   pointer-events: auto;
 }
 
-#minimap[hidden] {
-  display: none;
-}
-
 #minimap-surface {
   display: block;
   width: 100%;
@@ -608,10 +660,6 @@ body {
   border-radius: var(--s-radius-lg);
   background: var(--s-sidebar);
   box-shadow: var(--s-shadow);
-}
-
-#find-bar[hidden] {
-  display: none;
 }
 
 .find-row {
@@ -698,6 +746,16 @@ body {
   text-align: center;
 }
 
+/*
+ * O `font: inherit` de `#find-bar button` (especificidade 1,0,1) vence o `font-family`
+ * de `.find-toggle` (0,1,0) — os toggles `Aa .* \b` perdiam a fonte monoespaçada.
+ * Este seletor (1,1,1) vence o `#find-bar button` e restaura o mono (e o line-height).
+ */
+#find-bar button.find-toggle {
+  font-family: var(--s-font-mono);
+  line-height: 1.5;
+}
+
 .find-toggle:hover {
   background: var(--s-hover) !important;
   color: var(--s-fg) !important;
@@ -724,10 +782,6 @@ body {
   background: var(--s-sidebar);
   box-shadow: var(--s-shadow);
   overflow: hidden;
-}
-
-#command-palette[hidden] {
-  display: none;
 }
 
 #palette-input {
@@ -812,10 +866,6 @@ body {
   overflow: hidden;
   display: flex;
   flex-direction: column;
-}
-
-#completion-popup[hidden] {
-  display: none;
 }
 
 .completion-list {
@@ -906,10 +956,6 @@ body {
   color: var(--s-fg);
 }
 
-#hover-tooltip[hidden] {
-  display: none;
-}
-
 /* Minimap Hover Preview — tooltip com código real ao passar mouse no minimap */
 .minimap-hover-tooltip {
   position: fixed;
@@ -977,10 +1023,6 @@ body {
   font-size: var(--s-fs-sm);
   line-height: 1.4;
   color: var(--s-fg);
-}
-
-#signature-popup[hidden] {
-  display: none;
 }
 
 .signature-label {
@@ -1057,10 +1099,6 @@ body {
   transform: translateX(-50%);
 }
 
-#document-symbols-popup[hidden] {
-  display: none;
-}
-
 .symbols-input {
   flex: none;
   width: 100%;
@@ -1069,7 +1107,7 @@ body {
   border-bottom: 1px solid var(--s-border);
   background: transparent;
   color: var(--s-fg);
-  font-family: var(--s-font);
+  font-family: var(--s-font-ui);
   font-size: var(--s-fs-sm);
   outline: none;
   box-sizing: border-box;
@@ -1091,6 +1129,7 @@ body {
   gap: var(--s-space-2);
   padding: 5px var(--s-space-2);
   border-radius: var(--s-radius);
+  font-size: var(--s-fs-sm);
   cursor: pointer;
   user-select: none;
 }

@@ -7,13 +7,17 @@
  * - `$$` → `$` literal; `$N` / `${N}` / `${N:default}`; `$0` é a parada final.
  * - **Aninhamento**: `${1:aaa ${2:bbb} ccc}` com `}` balanceado (só `${` conta profundidade;
  *   `\}` escapa o fechamento) — nada de `indexOf("}")` ingênuo.
- * - **Escolhas**: `${1|a,b,c|}` → default = primeira escolha (**sem dropdown de UI** — limitação
- *   declarada da Scribe).
+ * - **Escolhas**: `${1|a,b,c|}` → default = primeira escolha; a ocorrência carrega a **lista de
+ *   opções** (`choices`) para o dropdown (ver `snippet-session.ts` / `snippet-choice.ts`). O `|`
+ *   interno escapa: `${1|a\|b,c|}` ⇒ 2 opções (`a|b` e `c`).
  * - **Transformações**: `${1/regex/format/flags}` — o regex termina no 1º `/` não-escapado, os
  *   flags começam no **último** `/` não-escapado, o format é o resto. Regex inválida → degrada
  *   para ocorrência simples com **1** `console.warn`.
- * - **Identificador desconhecido** (`${FOO}` / `$FOO`) → texto **literal** (sem variáveis TM de
- *   arquivo — limitação declarada).
+ * - **Variáveis TM**: `$TM_FILENAME`, `${TM_FILENAME}` e `${TM_FILENAME:default}` são resolvidas
+ *   **na parse** (quando há contexto — `SnippetVariableContext`); variável desconhecida **ou sem
+ *   contexto** ⇒ fica **literal**. O texto puro também é resolvível com
+ *   `resolveSnippetVariables(text, ctx)`.
+ * - **Identificador desconhecido** (`${FOO}` / `$FOO`) → texto **literal**.
  *
  * Espelhos: a **primeira ocorrência com default** de um índice é a **primária** (região editável);
  * se nenhuma tem default, a primária é a primeira ocorrência. As demais ocorrências do índice são
@@ -57,6 +61,10 @@ export interface SnippetOccurrence extends TabStop {
   readonly isPrimary: boolean;
   /** Transformação desta ocorrência, quando declarada no template. */
   readonly transform?: SnippetTransform;
+  /** Lista de opções quando a ocorrência é uma **escolha** (`${1|a,b,c|}`). */
+  readonly choices?: readonly string[];
+  /** Índice da opção inicial (sempre `0` na parse — a 1ª é o default). */
+  readonly choiceIndex?: number;
 }
 
 export interface SnippetExpansion {
@@ -98,6 +106,8 @@ export function findSnippet(word: string): Snippet | undefined {
 interface TextNode {
   readonly kind: "text";
   readonly raw: string;
+  /** `true` quando o texto já vem **pronto** (ex.: valor de variável) — não sofre unescape. */
+  readonly verbatim?: boolean;
 }
 
 /** Ocorrência `$N` / `${N:...}` durante a parse (offsets só existem após a emissão). */
@@ -107,11 +117,180 @@ interface StopNode {
   /** `true` para `${N:default}`/`${N|escolhas|}` — define a primária do índice. */
   readonly hasDefault: boolean;
   readonly transform?: SnippetTransform;
+  /** Opções de uma escolha (`${N|a,b,c|}`) — já sem escape de `|`. */
+  readonly choices?: readonly string[];
   /** Conteúdo interno de `${N:...}` já parseado (permite aninhamento). */
   readonly children: readonly ParseNode[];
 }
 
 type ParseNode = TextNode | StopNode;
+
+// ---- variáveis TM ---------------------------------------------------------------------------------
+
+/**
+ * Contexto de resolução das **variáveis TM** de um snippet.
+ *
+ * Todo campo é opcional: o que não for informado deixa a variável **literal** (nunca vira
+ * string vazia). `filePath` serve de fonte para derivar `fileName`/`directory` quando eles não
+ * vierem explicitamente.
+ */
+export interface SnippetVariableContext {
+  /** Nome do arquivo ("notes.md"). */
+  readonly fileName?: string | undefined;
+  /** Nome do arquivo sem extensão ("notes"). */
+  readonly fileNameBase?: string | undefined;
+  /** Caminho completo do arquivo ("/caminho/notas.md"). */
+  readonly filePath?: string | undefined;
+  /** Diretório do arquivo ("/caminho"). */
+  readonly directory?: string | undefined;
+  /** Texto selecionado no momento da expansão. */
+  readonly selectedText?: string | undefined;
+  /** Linha do caret. */
+  readonly currentLine?: string | undefined;
+  /** Palavra sob o caret. */
+  readonly currentWord?: string | undefined;
+  /** Índice da linha (0-based). */
+  readonly lineIndex?: number | undefined;
+}
+
+/** Nomes de variáveis TM reconhecidos (o valor vem do contexto). */
+const TM_VARIABLE_NAMES = [
+  "TM_FILENAME",
+  "TM_FILENAME_BASE",
+  "TM_DIRECTORY",
+  "TM_SELECTED_TEXT",
+  "TM_CURRENT_LINE",
+  "TM_CURRENT_WORD",
+  "TM_LINE_INDEX",
+] as const;
+
+type TmVariableName = (typeof TM_VARIABLE_NAMES)[number];
+
+/** `true` se `name` é uma variável TM reconhecida. */
+function isTmVariable(name: string): name is TmVariableName {
+  return (TM_VARIABLE_NAMES as readonly string[]).includes(name);
+}
+
+/** Último segmento de um caminho (`/a/b/c.md` → `c.md`; `""` → `undefined`). */
+function basenameOf(path: string): string | undefined {
+  if (path.length === 0) return undefined;
+  const idx = path.lastIndexOf("/");
+  return idx === -1 ? path : path.slice(idx + 1);
+}
+
+/** Diretório de um caminho (`/a/b/c.md` → `/a/b`; `c.md` → sem diretório). */
+function dirnameOf(path: string): string | undefined {
+  const idx = path.lastIndexOf("/");
+  if (idx === -1) return undefined;
+  if (idx === 0) return "/";
+  return path.slice(0, idx);
+}
+
+/** Nome do arquivo sem extensão (`notes.md` → `notes`; `.gitignore` → `.gitignore`). */
+function stripExtension(name: string): string {
+  const dot = name.lastIndexOf(".");
+  if (dot <= 0) return name;
+  return name.slice(0, dot);
+}
+
+/**
+ * Valor da variável TM no contexto.
+ *
+ * `undefined` = **sem contexto** (a variável fica literal no texto). String vazia conta como
+ * ausente (seleção/linha vazia) — assim a variável nunca vira texto vazio. `fileName`,
+ * `fileNameBase` e `directory` podem ser **derivados** de `filePath` quando não vierem.
+ */
+function tmValue(name: TmVariableName, ctx: SnippetVariableContext): string | undefined {
+  const nonEmpty = (value: string | undefined): string | undefined =>
+    value !== undefined && value.length > 0 ? value : undefined;
+  const fileName = nonEmpty(ctx.fileName) ?? nonEmpty(basenameOf(ctx.filePath ?? ""));
+  switch (name) {
+    case "TM_FILENAME":
+      return fileName;
+    case "TM_FILENAME_BASE":
+      return nonEmpty(ctx.fileNameBase) ?? nonEmpty(stripExtension(fileName ?? ""));
+    case "TM_DIRECTORY":
+      return nonEmpty(ctx.directory) ?? nonEmpty(dirnameOf(ctx.filePath ?? ""));
+    case "TM_SELECTED_TEXT":
+      return nonEmpty(ctx.selectedText);
+    case "TM_CURRENT_LINE":
+      return nonEmpty(ctx.currentLine);
+    case "TM_CURRENT_WORD":
+      return nonEmpty(ctx.currentWord);
+    case "TM_LINE_INDEX":
+      return ctx.lineIndex === undefined ? undefined : String(ctx.lineIndex);
+  }
+}
+
+/** Resultado da resolução de uma variável: texto bruto + se é emitido verbatim. */
+interface ResolvedVariable {
+  readonly raw: string;
+  readonly verbatim: boolean;
+}
+
+/**
+ * Resolve `${NOME}` / `${NOME:default}` contra o contexto.
+ *
+ * `undefined` = variável desconhecida **ou** sem valor e sem default → o placeholder fica
+ * **literal** (comportamento antigo, preservado).
+ */
+function resolveVariable(inner: string, ctx: SnippetVariableContext): ResolvedVariable | undefined {
+  const colon = inner.indexOf(":");
+  const name = colon === -1 ? inner : inner.slice(0, colon);
+  if (!isTmVariable(name)) return undefined;
+  const value = tmValue(name, ctx);
+  if (value !== undefined) return { raw: value, verbatim: true };
+  if (colon === -1) return undefined;
+  // Sem valor: usa o default (texto puro, ainda escapado — o unescape acontece na emissão).
+  return { raw: inner.slice(colon + 1), verbatim: false };
+}
+
+/**
+ * Substitui as **variáveis TM** de um texto puro.
+ *
+ * Formas reconhecidas: `$TM_FILENAME`, `${TM_FILENAME}` e `${TM_FILENAME:default}`. Variável
+ * desconhecida (ou sem valor no contexto e sem default) fica **literal**; `$$` protege o `$`
+ * seguinte. use `parseSnippet(template, ctx)` para resolver variáveis **e** manter os offsets
+ * das tab stops coerentes — esta função não conhece offsets.
+ */
+export function resolveSnippetVariables(text: string, ctx: SnippetVariableContext): string {
+  let out = "";
+  let i = 0;
+  while (i < text.length) {
+    const c = text[i]!;
+    if (c === "\\") {                                  // escape: o próximo char é literal
+      out += c;
+      if (i + 1 < text.length) out += text[i + 1]!;
+      i += 2;
+      continue;
+    }
+    if (c !== "$") { out += c; i++; continue; }
+    const next = text[i + 1];
+    if (next === undefined) { out += c; i++; continue; }
+    if (next === "$") { out += "$$"; i += 2; continue; }  // "$$" literal — não é variável
+    if (next === "{") {
+      const close = findClosingBrace(text, i + 1);
+      if (close === -1) { out += c; i++; continue; }
+      const inner = text.slice(i + 2, close);
+      const resolved = resolveVariable(inner, ctx);
+      if (resolved === undefined) { out += text.slice(i, close + 1); i = close + 1; continue; }
+      out += resolved.verbatim ? resolved.raw : unescape(resolved.raw);
+      i = close + 1;
+      continue;
+    }
+    const ident = /^[A-Za-z_][A-Za-z0-9_]*/.exec(text.slice(i + 1));
+    if (ident !== null) {
+      const name = ident[0] ?? "";
+      if (isTmVariable(name)) {
+        const value = tmValue(name, ctx);
+        if (value !== undefined) { out += value; i += 1 + name.length; continue; }
+      }
+    }
+    out += c; i++;
+  }
+  return out;
+}
+
 
 // ---- utilidades de sintaxe -----------------------------------------------------------------------
 
@@ -192,10 +371,46 @@ function splitTransform(body: string): SnippetTransform | null {
   };
 }
 
+/**
+ * Divide o corpo de `${N|a,b,c|}` nas opções.
+ *
+ * O `,` separates as opções; `\|` (e `\,`) escapam o delimitador — `${1|a\|b,c|}` ⇒
+ * `["a|b", "c"]`. O `|` que **fecha** o placeholder é o último da linha de template (o corpo
+ * nunca contém `|` cru de propósito: use `\|`).
+ */
+function splitChoices(body: string): string[] {
+  const parts: string[] = [];
+  let current = "";
+  for (let i = 0; i < body.length; i++) {
+    const c = body[i]!;
+    if (c === "\\" && i + 1 < body.length) { current += c + body[i + 1]!; i++; continue; }
+    if (c === ",") { parts.push(current); current = ""; continue; }
+    current += c;
+  }
+  parts.push(current);
+  return parts.map(unescapeChoice);
+}
+
+/** Remove os escapes de delimitador de uma opção: `\|` → `|`, `\,` → `,`, `\\` → `\`. */
+function unescapeChoice(raw: string): string {
+  if (!raw.includes("\\")) return raw;
+  let out = "";
+  for (let i = 0; i < raw.length; i++) {
+    const c = raw[i]!;
+    if (c !== "\\" || i + 1 >= raw.length) { out += c; continue; }
+    const next = raw[i + 1]!;
+    if (next === "|" || next === "," || next === "\\" || next === "$" || next === "}") {
+      out += next;
+      i++;
+    } else out += c;  // sequência desconhecida: preserva a barra
+  }
+  return out;
+}
+
 // ---- parse ----------------------------------------------------------------------------------------
 
 /** Parseia uma região do template (o template inteiro ou o interior de um `${N:...}`). */
-function parseRegion(src: string): ParseNode[] {
+function parseRegion(src: string, ctx: SnippetVariableContext): ParseNode[] {
   const nodes: ParseNode[] = [];
   let textStart = 0;
   let i = 0;
@@ -224,7 +439,7 @@ function parseRegion(src: string): ParseNode[] {
       const close = findClosingBrace(src, i + 1);
       if (close === -1) { i++; continue; }     // sem fechamento → "$" literal
       const inner = src.slice(i + 2, close);
-      const node = parsePlaceholder(inner);
+      const node = parsePlaceholder(inner, ctx);
       flush(i);
       nodes.push(node ?? { kind: "text", raw: "${" + inner + "}" });
       i = close + 1;
@@ -244,31 +459,60 @@ function parseRegion(src: string): ParseNode[] {
       }
     }
 
+    // $NOME — variável TM (só as reconhecidas; as demais e as sem valor ficam literais).
+    const ident = /^[A-Za-z_][A-Za-z0-9_]*/.exec(src.slice(i + 1));
+    if (ident !== null) {
+      const name = ident[0] ?? "";
+      if (isTmVariable(name)) {
+        const value = tmValue(name, ctx);
+        if (value !== undefined) {
+          flush(i);
+          nodes.push({ kind: "text", raw: value, verbatim: true });
+          i += 1 + name.length;
+          textStart = i;
+          continue;
+        }
+      }
+    }
+
     i++; // $ seguido de identificador desconhecido ($FOO) ou char especial → literal
   }
   flush(src.length);
   return nodes;
 }
 
-/** Parseia o interior de um `${...}`. `null` = não é placeholder válido → literal. */
-function parsePlaceholder(inner: string): StopNode | null {
+/**
+ * Parseia o interior de um `${...}`.
+ *
+ * `null` = não é placeholder válido → literal. Devolve um `StopNode` para tab stops e um
+ * `TextNode` (verbatim) para **variáveis TM** resolvidas.
+ */
+function parsePlaceholder(inner: string, ctx: SnippetVariableContext): ParseNode | null {
   const match = /^\d+/.exec(inner);
   const digits = match?.[0];
-  if (digits === undefined) return null;          // ${FOO} → literal
+  if (digits === undefined) {
+    // ${NOME} / ${NOME:default} — variável TM (desconhecida ou sem valor → literal).
+    const resolved = resolveVariable(inner, ctx);
+    if (resolved === undefined) return null;
+    return {
+      kind: "text",
+      raw: resolved.raw,
+      ...(resolved.verbatim ? { verbatim: true } : {}),
+    };
+  }
   const index = parseInt(digits, 10);
   const rest = inner.slice(digits.length);
 
   if (rest.length === 0) return { kind: "stop", index, hasDefault: false, children: [] };
 
   if (rest.startsWith(":")) {                      // ${N:default}
-    return { kind: "stop", index, hasDefault: true, children: parseRegion(rest.slice(1)) };
+    return { kind: "stop", index, hasDefault: true, children: parseRegion(rest.slice(1), ctx) };
   }
 
   if (rest.startsWith("|")) {                      // ${N|a,b,c|} → default = 1ª escolha
     if (rest.length < 2 || !rest.endsWith("|")) return null;
-    const choices = rest.slice(1, rest.length - 1);
-    const first = choices.split(",")[0] ?? "";
-    return { kind: "stop", index, hasDefault: true, children: [{ kind: "text", raw: first }] };
+    const choices = splitChoices(rest.slice(1, rest.length - 1));
+    return { kind: "stop", index, hasDefault: true, choices, children: [] };
   }
 
   if (rest.startsWith("/")) {                      // ${N/regex/format/flags}
@@ -381,7 +625,8 @@ function valueOf(state: EmitState, index: number): string {
   if (state.visiting.has(index)) return ""; // ciclo: `${1:a $1 b}`
   state.visiting.add(index);
   let value: string;
-  if (primary.hasDefault) value = nodesToString(state, primary.children);
+  if (primary.choices !== undefined) value = primary.choices[0] ?? ""; // escolha: default = 1ª
+  else if (primary.hasDefault) value = nodesToString(state, primary.children);
   else if (primary.transform !== undefined) {
     const t = primary.transform;
     value = renderTransform("", t.regex, t.format, t.flags);
@@ -395,13 +640,18 @@ function valueOf(state: EmitState, index: number): string {
 function nodesToString(state: EmitState, nodes: readonly ParseNode[]): string {
   let out = "";
   for (const node of nodes) {
-    if (node.kind === "text") { out += unescape(node.raw); continue; }
+    if (node.kind === "text") {
+      out += node.verbatim === true ? node.raw : unescape(node.raw);
+      continue;
+    }
     const value = valueOf(state, node.index);
     const isPrimary = state.primaries.get(node.index) === node;
     if (!isPrimary) {
       out += node.transform !== undefined
         ? renderTransform(value, node.transform.regex, node.transform.format, node.transform.flags)
         : value;
+    } else if (node.choices !== undefined) {
+      out += node.choices[0] ?? "";
     } else if (node.hasDefault) {
       out += nodesToString(state, node.children);
     } else if (node.transform !== undefined) {
@@ -419,14 +669,18 @@ function nodesToString(state: EmitState, nodes: readonly ParseNode[]): string {
  */
 function emit(state: EmitState, nodes: readonly ParseNode[], parentId: number): void {
   for (const node of nodes) {
-    if (node.kind === "text") { state.text += unescape(node.raw); continue; }
+    if (node.kind === "text") {
+      state.text += node.verbatim === true ? node.raw : unescape(node.raw);
+      continue;
+    }
     const isPrimary = state.primaries.get(node.index) === node;
     const start = state.text.length;
     // Reserva o id ANTES de emitir os filhos: as ocorrências filhas são pushadas primeiro
     // (o range delas fecha antes do da contenedora), e o `parentId` delas aponta para cá.
     const id = state.nextId++;
     if (isPrimary) {
-      if (node.hasDefault) emit(state, node.children, id);
+      if (node.choices !== undefined) state.text += node.choices[0] ?? ""; // default = 1ª opção
+      else if (node.hasDefault) emit(state, node.children, id);
       else if (node.transform !== undefined) {
         const t = node.transform;
         state.text += renderTransform("", t.regex, t.format, t.flags);
@@ -446,6 +700,7 @@ function emit(state: EmitState, nodes: readonly ParseNode[], parentId: number): 
       defaultValue: state.text.slice(start),
       isPrimary,
       ...(node.transform !== undefined ? { transform: node.transform } : {}),
+      ...(node.choices !== undefined ? { choices: node.choices, choiceIndex: 0 } : {}),
     });
   }
 }
@@ -456,9 +711,13 @@ function emit(state: EmitState, nodes: readonly ParseNode[], parentId: number): 
  * `text` já traz espelhos renderizados; `tabStops` são só as **primárias**, na ordem de visita
  * (índices ascendentes, `$0` por último); `occurrences` traz tudo (inclusive espelhos, com
  * ranges) e `visitOrder` dá a sequência de índices que a sessão percorre.
+ *
+ * `ctx` (opcional) resolve as **variáveis TM** durante a parse — assim os offsets das tab stops
+ * continuam coerentes com o texto final. Sem `ctx`, toda variável TM fica **literal**.
  */
-export function parseSnippet(template: string): SnippetExpansion {
-  const root = parseRegion(template);
+export function parseSnippet(template: string, ctx?: SnippetVariableContext): SnippetExpansion {
+  const context: SnippetVariableContext = ctx ?? {};
+  const root = parseRegion(template, context);
   const primaries = new Map<number, StopNode>();
   markPrimaries(root, primaries);
 
