@@ -874,6 +874,18 @@ function untrackOpenDocument(core: EditorCore, handle: DocumentHandle): void {
 }
 
 /**
+ * Há algum documento **aberto** neste core?
+ *
+ * A busca na workspace precisa de uma workspace: as raízes conhecidas são as dos documentos
+ * abertos (o `cwd` é só o **fallback** de `knownWorkspaceRoots` — usá-lo na busca varreria o
+ * repositório do processo **em silêncio**; achado do E2E de 2026-10-21).
+ */
+function hasOpenDocuments(core: EditorCore): boolean {
+  const docs = openDocuments.get(core);
+  return docs !== undefined && docs.size > 0;
+}
+
+/**
  * Caminho do documento **mais recentemente aberto** (o "ativo", na aproximação do `main`).
  *
  * O `EditorCore` guarda o documento ativo **internamente** (não expõe o handle) ⇒ o `main`
@@ -1389,9 +1401,18 @@ async function dispatchIpc(
       const requested = options.roots ?? [];
       let roots: readonly string[];
       let discarded: readonly string[] = [];
+      // `true` = não há **documento aberto** ⇒ a busca não tem workspace (achado do E2E).
+      let semDocumento = false;
       if (requested.length === 0) {
-        // Sem raízes pedidas ⇒ a própria workspace conhecida (o `cwd` como fallback).
-        roots = known;
+        // Sem raízes pedidas ⇒ a workspace dos **documentos abertos**.
+        // ⚠️ `knownWorkspaceRoots` cai no **fallback do `cwd`** quando não há documento ⇒ a
+        // busca varreria o repositório do processo **em silêncio** (o app aberto pelo
+        // `.desktop` tem `cwd = $HOME` ⇒ varreria a casa do usuário!). A busca precisa de
+        // uma workspace ⇒ **sem documento aberto**, ela é **ignorada** (o ramo "nenhuma
+        // raiz" abaixo devolve o resultado vazio **com aviso** — o descarte nunca é
+        // silencioso).
+        semDocumento = !hasOpenDocuments(core);
+        roots = semDocumento ? [] : known;
       } else {
         const confined = await confineSearchRoots(requested, known);
         roots = confined.roots;
@@ -1442,7 +1463,9 @@ async function dispatchIpc(
           ...result,
           warnings: [
             ...(result.warnings ?? []),
-            "nenhuma raiz da busca está dentro da workspace — a busca foi ignorada",
+            semDocumento
+              ? "nenhum documento está aberto — abra um arquivo para buscar na workspace"
+              : "nenhuma raiz da busca está dentro da workspace — a busca foi ignorada",
           ],
         };
       }

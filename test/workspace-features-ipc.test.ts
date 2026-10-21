@@ -157,8 +157,7 @@ describe("main — `search.files` (o grep da workspace)", () => {
     }
   });
 
-  it("a busca cancelada (signal abortado) responde `cancelled` (o grep roda no worker)", async () => {
-    const root = await makeWorkspace();
+  it("a busca cancelada (signal abortado) responde `cancelled` (o grep roda no worker)", async () => {    const root = await makeWorkspace();
     clearWorkspaceIndexCache();
     const signals = createIpcSignalRegistry();
     // O documento aberto torna a workspace uma raiz **conhecida** (o `main` confina a busca)
@@ -183,6 +182,27 @@ describe("main — `search.files` (o grep da workspace)", () => {
     } finally {
       core.dispose();
       await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it("sem documento aberto a busca é ignorada COM AVISO (não varre o `cwd` em silêncio)", async () => {
+    // ⚠️ Achado do E2E (2026-10-21): sem documento aberto, as raízes conhecidas caem no
+    // **fallback do `cwd`** ⇒ a busca varria o repositório do processo **em silêncio** (o
+    // app aberto pelo `.desktop` tem `cwd = $HOME` ⇒ varreria a casa do usuário!).
+    // A busca precisa de uma workspace ⇒ sem documento, ela é **ignorada com aviso**.
+    clearWorkspaceIndexCache();
+    const core = await createEditorCore({ fileSystem: memoryFs({}), availableParallelism: 2 });
+    try {
+      const response = await call("search.files", ["alvo", { roots: [] }], core);
+      expect(response.ok).toBe(true);
+      const value = (response.ok ? response.value : undefined) as GrepResult;
+      expect(value.matches).toEqual([]);
+      expect(value.filesScanned).toBe(0);
+      expect(value.warnings ?? []).toContain(
+        "nenhum documento está aberto — abra um arquivo para buscar na workspace",
+      );
+    } finally {
+      core.dispose();
     }
   });
 });

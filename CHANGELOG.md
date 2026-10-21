@@ -29,7 +29,7 @@ Todas as mudanças notáveis neste projeto.
   documento aberto (um renderer comprometido não varr mais o disco inteiro).
 - **Contrato único** — os tipos do grep vivem em `src/shared/grep-contract.ts` (o IPC e o
   renderer usam o **mesmo** tipo; antes havia dois espelhos).
-- **1626 testes / 112 arquivos** · AppImage `Scribe-0.7.1.AppImage`.
+- **1627 testes / 112 arquivos** · AppImage `Scribe-0.7.1.AppImage`.
 
 ---
 

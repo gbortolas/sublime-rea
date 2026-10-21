@@ -2,7 +2,7 @@
 
 > **Documento de handoff entre sessões** (leia antes de retomar). Atualizado em **2026-10-21**.
 > Status: **🐛 varredura ✅ · ✨ 3+5+5 features ✅ · 🎨 design system ✅ · ✨ 3 features de última geração ✅ · 🐛 LSP de verdade ✅ · 🔍 grep no worker ✅**<br>
-> Versão: **0.7.1** (AppImage gerado e verificado) · **1626 testes / 112 arquivos**<br>
+> Versão: **0.7.1** (AppImage gerado e verificado) · **1627 testes / 112 arquivos**<br>
 > Próximo: **fila aberta no BACKLOG** (multi-root de verdade · split editor · test explorer ·
 > snippets LSP)
 
@@ -57,7 +57,7 @@ criação de arquivo) + 🐛 o `pyright` travava (o cliente LSP ignorava request
 `grep` na lane `grep` do `TaskPool`; leitura + scan no worker; teto duro que mata o worker
 preso; orçamento soft de 20 s; cancelamento que para a varredura no meio; detector de regex
 catastrófico com regra aninhada; confinamento das raízes da busca) + 3 bugs de E2E + 9 achados
-de revisão corrigidos (1626 testes / 112 arquivos)**
+de revisão corrigidos (1627 testes / 112 arquivos)**
 
 **✅ Passo operacional resolvido (2026-10-16).** O `setup.py` foi rodado e o MCP `rea` foi relançado
 **já com `REA_GHIDRA_STARTUP_TIMEOUT_MS=900000`** (confirmado em `/proc/*/environ`) — **não** é mais
@@ -1315,7 +1315,7 @@ o salvar ou o find bar esperassem por ele, o editor "engasgaria". Com `preemptib
 
 ### Verificação
 
-- Gates: `typecheck`/`lint`/`build` exit 0 · **1626 testes / 112 arquivos** (baseline 1585/108).
+- Gates: `typecheck`/`lint`/`build` exit 0 · **1627 testes / 112 arquivos** (baseline 1585/108).
 - **E2E por CDP** (2 rodadas): o app **não congela** com regex patológica (main a 0 % de CPU, worker a
   100 %, rAF a 60 fps, latência de IPC 0,7 ms), o orçamento soft corta aos 20 s, o aviso de
   "interrompida" aparece, o cancelamento **para** o worker e o status do painel mostra
@@ -1335,6 +1335,15 @@ o salvar ou o find bar esperassem por ele, o editor "engasgaria". Com `preemptib
 - O confinamento das raízes é **por raiz pedida**: um **symlink de arquivo** dentro da workspace
   continua sendo seguido (dívida pré-existente).
 - O `RegExp` **não** é interrompível: o corte acontece **entre arquivos**.
+- **Sem documento aberto**, a busca é **ignorada com aviso** (achado do E2E de 2026-10-21): as
+  raízes conhecidas caíam no **fallback do `cwd`** ⇒ a busca varria o repositório do processo
+  **em silêncio** (o app aberto pelo `.desktop` tem `cwd = $HOME` ⇒ varreria a casa do usuário).
+- ⚠️ A preempção pelo **caminho da digitação** não é alcançável na janela padrão: o renderer
+  pede o realce só da **faixa visível** (~37 linhas na janela 1280×820) e
+  `SYNC_SYNTAX_THRESHOLD = 50` ⇒ o realce fica no caminho **síncrono** (sem worker) ⇒ não há
+  slot a tomar. O usuário **não sente** (59 ms medidos) e o grep não "rouba" o slot (termina pelo
+  teto de 30 s). Para a preempção valer no caminho da digitação, o realce teria de ir ao worker
+  (ou o grep receber um sinal explícito da digitação).
 
 ---
 
