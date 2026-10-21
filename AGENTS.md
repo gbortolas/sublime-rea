@@ -3,6 +3,10 @@
 > Carregado automaticamente por agentes que trabalham **neste** repositório.
 > **Frase-gatilho:** se o usuário disser **“pode continuar os trabalhos!”** (ou algo equivalente),
 > basta seguir o bootstrap abaixo — **não** peça contexto: ele está todo em `docs/`.
+>
+> **Trabalho multiagente:** as regras globais (papéis, fluxo, contrato de prompt e
+> guardrails) ficam em `~/.config/opencode/AGENTS.md` e são carregadas automaticamente
+> em todos os projetos. Este arquivo mantém só o que é **específico do sublime-rea**.
 
 ---
 
@@ -60,13 +64,61 @@
 
 ## 🧭 Como trabalhar (economia de contexto + delegação)
 
-- **O orquestrador cloud decide; o trabalho verboso vai para subagente** (contexto isolado,
-  devolve **digest curto** com `file:line`). Ler/varrer/rodar/editar em volume → **delegue**.
 - Navegação barata por código: **`graft` › `serena` › `read` pontual**. Nunca leia arquivo grande
   “só pra conferir”.
 - **Checkpoint:** ao passar de **~150–200k tokens**, atualize `docs/HANDOFF.md` + `docs/BACKLOG.md`,
   **commite** e peça `/new`.
 - **Nunca misture nuvem com local** (subagentes herdam o modelo da sessão).
+
+---
+
+## 🧑‍🤝‍🧑 Delegação — específico deste repo
+
+> Papéis, fluxo, contrato de prompt e guardrails estão no **global**
+> (`~/.config/opencode/AGENTS.md`). Aqui ficam só as regras que mudam neste repo.
+
+- **Clean-room vale para subagentes também:** se o briefing pedir para copiar
+  código, assembly ou pseudocódigo do alvo, o subagente **recusa** e devolve o
+  motivo.
+- **Digest curto:** o retorno é `file:line` + conclusão, nunca o arquivo.
+  Limite prático: **≤ 40 linhas** (≤ 60 para o plano do `oracle`).
+- **Parallelize o discovery, não a escrita:** 2+ frentes independentes → 2
+  `context-retriever`/`explorer` em paralelo. `implementer`/`fixer` do mesmo
+  arquivo nunca em paralelo.
+- **Reviewer e Tester podem rodar em paralelo** depois do Implementer. O
+  `fixer` só entra se algum falhar; depois da correção, o `reviewer` **volta**
+  (precedente P2.4b: a 2ª revisão achou um bug alto que a 1ª não viu).
+- **Background** só quando o orquestrador tiver outra frente independente para
+  tocar; não fique bloqueado esperando.
+- **O orquestrador fica com o contexto da sessão:** `docs/HANDOFF.md`,
+  `docs/BACKLOG.md`, decisão de escopo e resposta ao usuário.
+
+---
+
+## 📦 Build local — AppImage (obrigatório depois de feature/bug)
+
+> **Regra:** toda vez que **implementar uma feature nova** ou **corrigir um bug**, termine
+> o trabalho com um **build local**, para o usuário ter um **AppImage prontinho para usar**.
+
+```bash
+set -a; . ./setup/env.sh; set +a     # o node do PATH padrão é v14 e não roda o npm do projeto
+npm run dist                          # = build (tsc + esbuild + assets) + electron-builder
+```
+
+- **Saída:** `release/Scribe-<versão>-x86_64.AppImage` (`electron-builder.yml`: linux → AppImage).
+  `release/` e `dist/` são **gitignored** — o AppImage **não** vai para o git.
+- **Como usar:** `chmod +x release/*.AppImage && ./release/*.AppImage` (ou o `*.AppImage` direto
+  do gerenciador de arquivos). Roda como AppImage (FUSE) ou extraído (`--appimage-extract`).
+- **Quando rodar:** depois dos gates (`typecheck` + `test` + `lint`) e **antes** do commit —
+  assim o commit sempre corresponde a um AppImage que existe e abre.
+- **Se falhar:** `npm run dist` exige **rede** na 1ª vez (electron-builder baixa binários do
+  electron); depois disso usa o cache em `~/.cache/electron-builder`. Falha de rede ≠ falha de
+  código: reporte e siga com `npm run build` (gera o `dist/`, mas **não** o AppImage).
+- **Verificação mínima do artefato:** o AppImage foi gerado **e** o `dist/` dentro dele é o
+  novo (`ls -la release/*.AppImage` + `date` do arquivo). Rodar o AppImage é opcional
+  (precisa de display; em máquina sem sessão use `xvfb-run -a ./release/*.AppImage --version`).
+- **Não** faça `npm run dist` só para "ver se compila": `npm run build` já cobre isso e é 10×
+  mais rápido. O `dist` é para entregar **executável**.
 
 ---
 
@@ -80,6 +132,8 @@ Esta é a parte que mantém a próxima sessão **limpa e barata**. Ao terminar u
 3. **Evidência nova** → `docs/analysis/<tema>.md` no padrão dos existentes (header com sha256/ranges,
    “Achado central”, seções, e **ledger de evidências** `E<n>`).
 4. **`git commit`** no padrão `feat(analysis): P<id> — <tema> + integração docs`.
-5. **Working tree limpo** — é isso que permite a próxima sessão começar sem arrastar contexto.
+5. **📦 Build local** — `npm run dist` (AppImage em `release/`) depois de feature/bug e **antes**
+   do commit (ver §📦 Build local).
+6. **Working tree limpo** — é isso que permite a próxima sessão começar sem arrastar contexto.
 
 > Índice completo de documentos: seção **🗺️ Mapa de documentos** do [`README.md`](README.md).

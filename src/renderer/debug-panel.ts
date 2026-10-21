@@ -4,11 +4,17 @@
  * Constrói dinamicamente (sem markup estático) a **barra de ferramentas** de depuração e o
  * **painel** com a pilha de chamadas, escopos e variáveis, além do log de saída do programa.
  *
+ * Desde o P4#27 o painel gained mais três partes:
+ * - **Breakpoints** com **condição** editável por breakpoint (breakpoint condicional);
+ * - **Observação** (watch): expressões reavaliadas a cada parada;
+ * - **tooltip de valor**: mostra o valor de uma variável sob o mouse durante a parada.
+ *
  * O widget é "burro": não fala com a ponte. Ele expõe uma API (`DebugViewBinding`) e emite
- * intenções (`onAction`, `onFrameSelect`, `onScopeToggle`, `onVariableToggle`) que o
- * `main.ts` traduz para chamadas IPC.
+ * intenções (`onAction`, `onFrameSelect`, `onScopeToggle`, `onVariableToggle`,
+ * `onBreakpointConditionChange`, `onWatchAdd`, …) que o `main.ts` traduz para chamadas IPC.
  */
 import type {
+  DapBreakpointSpec,
   DapScope,
   DapSessionState,
   DapStackFrame,
@@ -41,6 +47,26 @@ export interface DebugViewBinding {
   appendOutput(category: string, text: string): void;
   /** Atualiza o contador de breakpoints exibido na barra. */
   setBreakpointCount(count: number): void;
+  /** Lista os breakpoints do arquivo (com a condição de cada um). */
+  setBreakpointSpecs(specs: readonly DapBreakpointSpec[], documentKey?: string): void;
+  /** A condição de um breakpoint foi editada pelo usuário. */
+  onBreakpointConditionChange(callback: (line: number, condition: string) => void): void;
+  /** O usuário pediu a remoção de um breakpoint. */
+  onBreakpointRemove(callback: (line: number) => void): void;
+  /** Define as expressões de observação (watch). */
+  setWatchExpressions(expressions: readonly string[]): void;
+  /** Atualiza os valores avaliados das expressões de observação. */
+  setWatchValues(values: ReadonlyMap<string, string>): void;
+  /** O usuário cadastrou uma expressão de observação. */
+  onWatchAdd(callback: (expression: string) => void): void;
+  /** O usuário removeu uma expressão de observação. */
+  onWatchRemove(callback: (expression: string) => void): void;
+  /** O usuário pediu a reavaliação das expressões de observação. */
+  onWatchRefresh(callback: () => void): void;
+  /** Mostra o valor de uma variável sob o mouse (hover de depuração). */
+  showDebugValue(text: string, x: number, y: number): void;
+  /** Esconde o tooltip de valor. */
+  hideDebugValue(): void;
   onAction(callback: (action: DebugAction) => void): void;
   onFrameSelect(callback: (frame: DapStackFrame) => void): void;
   /** Pedido de escopos de um frame (quando ele é selecionado). */
@@ -79,10 +105,28 @@ export function createDebugView(): DebugViewBinding {
   const variablesByRef = new Map<number, readonly DapVariable[]>();
   const expandedRefs = new Set<number>();
 
+  /** Breakpoints do arquivo exibido (com condição). */
+  let breakpointSpecs: readonly DapBreakpointSpec[] = [];
+  /** Assinatura dos specs — evita re-render (e perda de foco) a cada evento. */
+  let breakpointSignature = "";
+  /** Documento cuja lista de breakpoints está no painel (o painel segue o documento ativo). */
+  let breakpointDocumentKey: string | undefined;
+  /** Campos de condição persistentes por linha (recriados só quando a linha muda). */
+  const conditionInputs = new Map<number, HTMLInputElement>();
+
+  /** Expressões de observação e seus últimos valores avaliados. */
+  let watchExpressions: readonly string[] = [];
+  let watchValues = new Map<string, string>();
+
   let onAction: ((action: DebugAction) => void) | undefined;
   let onFrameSelect: ((frame: DapStackFrame) => void) | undefined;
   let onScopesRequest: ((frame: DapStackFrame) => void) | undefined;
   let onVariablesRequest: ((reference: number) => void) | undefined;
+  let onBreakpointConditionChange: ((line: number, condition: string) => void) | undefined;
+  let onBreakpointRemove: ((line: number) => void) | undefined;
+  let onWatchAdd: ((expression: string) => void) | undefined;
+  let onWatchRemove: ((expression: string) => void) | undefined;
+  let onWatchRefresh: (() => void) | undefined;
 
   const overlay = document.getElementById("ui-overlay");
 
@@ -205,9 +249,44 @@ export function createDebugView(): DebugViewBinding {
 
   const body = document.createElement("div");
   body.style.cssText = "overflow-y: auto; padding: 4px 0; flex: 1;";
+
+  /**
+   * Hosts persistentes: cada seção é reconstruída **dentro** do seu host, e os campos de
+   * entrada (condição do breakpoint, expressão de observação) vivem em hosts que **nunca**
+   * são reconstruídos — assim o foco não se perde a cada `render()`.
+   */
+  const stackHost = document.createElement("div");
+  const varsHost = document.createElement("div");
+  const watchControlsHost = document.createElement("div");
+  const watchListHost = document.createElement("div");
+  const bpHost = document.createElement("div");
+  const outHost = document.createElement("div");
+  body.append(stackHost, varsHost, watchControlsHost, watchListHost, bpHost, outHost);
   panel.appendChild(body);
 
   overlay?.appendChild(panel);
+
+  // ── Tooltip de valor (hover de depuração) ─────────────────────────────────────────────────
+  const valueTip = document.createElement("div");
+  valueTip.id = "debug-value-tooltip";
+  valueTip.role = "tooltip";
+  valueTip.hidden = true;
+  valueTip.style.cssText = [
+    "position: fixed;",
+    "z-index: 220;",
+    "max-width: 320px;",
+    "padding: 4px 8px;",
+    "background: var(--s-editor, #1e1e1e);",
+    "border: 1px solid var(--s-border, #3c3c3c);",
+    "border-radius: 4px;",
+    "box-shadow: 0 4px 12px rgba(0,0,0,.4);",
+    "color: var(--s-fg, #ccc);",
+    "font-family: ui-monospace, monospace;",
+    "font-size: 11px;",
+    "pointer-events: none;",
+    "white-space: pre-wrap;",
+  ].join(" ");
+  overlay?.appendChild(valueTip);
 
   // ── Helpers de render ─────────────────────────────────────────────────────────────────────
   function sectionLabel(text: string): HTMLElement {
@@ -298,9 +377,247 @@ export function createDebugView(): DebugViewBinding {
     }
   }
 
+  // ── Breakpoints condicionais ──────────────────────────────────────────────────────────────
+
+  /**
+   * Reconstrói a lista de breakpoints **só quando a assinatura muda** — do contrário, um
+   * `render()` (disparado por qualquer evento) derrubaria o foco do campo de condição que o
+   * usuário está editando.
+   */
+  function renderBreakpoints(): void {
+    const signature = breakpointSpecs
+      .map((spec) => `${spec.line}:${spec.condition ?? ""}`)
+      .join("|");
+    if (signature === breakpointSignature) return;
+    breakpointSignature = signature;
+
+    bpHost.replaceChildren();
+    if (breakpointSpecs.length === 0) return;
+
+    bpHost.appendChild(sectionLabel(`Breakpoints (${breakpointSpecs.length})`));
+
+    for (const spec of breakpointSpecs) {
+      const el = document.createElement("div");
+      el.style.cssText = [
+        "display: flex;",
+        "align-items: center;",
+        "gap: 6px;",
+        "padding: 2px 10px;",
+      ].join(" ");
+
+      const label = document.createElement("span");
+      label.textContent = `linha ${spec.line}`;
+      label.style.cssText = "flex: 0 0 auto; color: var(--s-fg-muted, #999);";
+      el.appendChild(label);
+
+      const input = getConditionInput(spec.line);
+      el.appendChild(input);
+
+      const remove = document.createElement("button");
+      remove.type = "button";
+      remove.textContent = "×";
+      remove.title = "Remover breakpoint";
+      remove.style.cssText = [
+        "flex: 0 0 auto;",
+        "border: none;",
+        "background: transparent;",
+        "color: var(--s-fg-muted, #999);",
+        "cursor: pointer;",
+        "font-size: 13px;",
+        "line-height: 1;",
+      ].join(" ");
+      remove.addEventListener("click", () => onBreakpointRemove?.(spec.line));
+      el.appendChild(remove);
+
+      bpHost.appendChild(el);
+    }
+  }
+
+  /** Campo de condição de uma linha (persistente: mantém o foco durante a edição). */
+  function getConditionInput(line: number): HTMLInputElement {
+    const existing = conditionInputs.get(line);
+    if (existing !== undefined) return existing;
+
+    const input = document.createElement("input");
+    input.type = "text";
+    input.className = "debug-condition";
+    input.placeholder = "condição (ex.: x > 3)";
+    // A condição vigente entra no campo — um input novo não pode nascer vazio.
+    input.value = breakpointSpecs.find((spec) => spec.line === line)?.condition ?? "";
+    input.style.cssText = [
+      "flex: 1 1 auto;",
+      "min-width: 0;",
+      "height: 20px;",
+      "padding: 0 6px;",
+      "border: 1px solid var(--s-border, #3c3c3c);",
+      "border-radius: 3px;",
+      "background: var(--s-editor, #1e1e1e);",
+      "color: var(--s-fg, #ccc);",
+      "font-family: ui-monospace, monospace;",
+      "font-size: 11px;",
+    ].join(" ");
+    input.addEventListener("change", () => {
+      onBreakpointConditionChange?.(line, input.value.trim());
+    });
+    input.addEventListener("keydown", (event) => {
+      if (event.key === "Enter") {
+        event.preventDefault();
+        input.blur();
+      }
+    });
+    conditionInputs.set(line, input);
+    return input;
+  }
+
+  // ── Expressões de observação (watch) ───────────────────────────────────────────────────────
+
+  const watchInput = document.createElement("input");
+  watchInput.type = "text";
+  watchInput.placeholder = "expressão (ex.: x + 1)";
+  watchInput.style.cssText = [
+    "flex: 1 1 auto;",
+    "min-width: 0;",
+    "height: 20px;",
+    "padding: 0 6px;",
+    "border: 1px solid var(--s-border, #3c3c3c);",
+    "border-radius: 3px;",
+    "background: var(--s-editor, #1e1e1e);",
+    "color: var(--s-fg, #ccc);",
+    "font-family: ui-monospace, monospace;",
+    "font-size: 11px;",
+  ].join(" ");
+
+  const watchAddButton = document.createElement("button");
+  watchAddButton.type = "button";
+  watchAddButton.textContent = "＋";
+  watchAddButton.title = "Adicionar expressão de observação";
+  watchAddButton.style.cssText = [
+    "flex: 0 0 auto;",
+    "height: 20px;",
+    "width: 22px;",
+    "border: 1px solid var(--s-border, #3c3c3c);",
+    "border-radius: 3px;",
+    "background: transparent;",
+    "color: var(--s-fg, #ccc);",
+    "cursor: pointer;",
+    "font-size: 12px;",
+    "line-height: 1;",
+  ].join(" ");
+
+  const commitWatch = (): void => {
+    const expression = watchInput.value.trim();
+    if (expression.length === 0) return;
+    onWatchAdd?.(expression);
+    watchInput.value = "";
+  };
+
+  watchAddButton.addEventListener("click", commitWatch);
+  watchInput.addEventListener("keydown", (event) => {
+    if (event.key === "Enter") {
+      event.preventDefault();
+      commitWatch();
+    }
+  });
+
+  const watchRefreshButton = document.createElement("button");
+  watchRefreshButton.type = "button";
+  watchRefreshButton.textContent = "⟳";
+  watchRefreshButton.title = "Reavaliar expressões";
+  watchRefreshButton.style.cssText = [
+    "flex: 0 0 auto;",
+    "height: 20px;",
+    "width: 22px;",
+    "border: 1px solid var(--s-border, #3c3c3c);",
+    "border-radius: 3px;",
+    "background: transparent;",
+    "color: var(--s-fg, #ccc);",
+    "cursor: pointer;",
+    "font-size: 12px;",
+    "line-height: 1;",
+  ].join(" ");
+  watchRefreshButton.addEventListener("click", () => onWatchRefresh?.());
+
+  /** Controles de observação (persistentes — o input nunca perde o foco). */
+  function buildWatchControls(): void {
+    if (watchControlsHost.childElementCount > 0) return;
+    watchControlsHost.appendChild(sectionLabel("Observação"));
+    const controls = document.createElement("div");
+    controls.style.cssText = [
+      "display: flex;",
+      "align-items: center;",
+      "gap: 4px;",
+      "padding: 2px 10px 4px;",
+    ].join(" ");
+    controls.appendChild(watchInput);
+    controls.appendChild(watchAddButton);
+    controls.appendChild(watchRefreshButton);
+    watchControlsHost.appendChild(controls);
+  }
+
+  function renderWatch(): void {
+    buildWatchControls();
+    watchListHost.replaceChildren();
+    if (watchExpressions.length === 0) return;
+
+    for (const expression of watchExpressions) {
+      const el = document.createElement("div");
+      el.style.cssText = [
+        "display: flex;",
+        "align-items: center;",
+        "gap: 6px;",
+        "padding: 2px 10px;",
+      ].join(" ");
+
+      const name = document.createElement("span");
+      name.textContent = expression;
+      name.style.cssText = [
+        "font-family: ui-monospace, monospace;",
+        "overflow: hidden;",
+        "text-overflow: ellipsis;",
+        "white-space: nowrap;",
+      ].join(" ");
+      el.appendChild(name);
+
+      const value = document.createElement("span");
+      value.textContent = watchValues.get(expression) ?? "—";
+      value.title = watchValues.get(expression) ?? "";
+      value.style.cssText = [
+        "flex: 1 1 auto;",
+        "min-width: 0;",
+        "color: var(--s-accent, #3794ff);",
+        "font-family: ui-monospace, monospace;",
+        "overflow: hidden;",
+        "text-overflow: ellipsis;",
+        "white-space: nowrap;",
+      ].join(" ");
+      el.appendChild(value);
+
+      const remove = document.createElement("button");
+      remove.type = "button";
+      remove.textContent = "×";
+      remove.title = "Remover expressão";
+      remove.style.cssText = [
+        "flex: 0 0 auto;",
+        "border: none;",
+        "background: transparent;",
+        "color: var(--s-fg-muted, #999);",
+        "cursor: pointer;",
+        "font-size: 13px;",
+        "line-height: 1;",
+      ].join(" ");
+      remove.addEventListener("click", () => onWatchRemove?.(expression));
+      el.appendChild(remove);
+
+      watchListHost.appendChild(el);
+    }
+  }
+
+  // ── Render principal ───────────────────────────────────────────────────────────────────────
   function render(): void {
     stateLabel.textContent = state;
-    body.replaceChildren();
+    stackHost.replaceChildren();
+    varsHost.replaceChildren();
+    outHost.replaceChildren();
 
     // Botões: continuar só quando parado; pausar só quando rodando.
     const running = state === "running";
@@ -313,71 +630,70 @@ export function createDebugView(): DebugViewBinding {
       button.style.opacity = button.disabled ? "0.4" : "1";
     }
 
-    if (!stopped) {
-      if (breakpointCount > 0) {
-        body.appendChild(sectionLabel(`Breakpoints: ${breakpointCount}`));
+    if (stopped) {
+      stackHost.appendChild(sectionLabel("Pilha de chamadas"));
+      for (let i = 0; i < frames.length; i++) {
+        const frame = frames[i]!;
+        const el = row(0, false, false, `${i + 1}.`, frameLabel(frame));
+        if (i === selectedFrameIndex) {
+          el.style.background = "var(--s-highlight, #094771)";
+        }
+        el.addEventListener("click", () => {
+          selectedFrameIndex = i;
+          render();
+          onFrameSelect?.(frame);
+          requestScopes(frame);
+        });
+        const icon = document.createElement("span");
+        icon.innerHTML = FRAME_ICON_SVG;
+        icon.style.cssText = "flex-shrink: 0; opacity: .7; display: inline-flex;";
+        el.insertBefore(icon, el.children[1] ?? null);
+        stackHost.appendChild(el);
       }
-      if (state === "inactive" || state === "terminated") {
-        const empty = document.createElement("div");
-        empty.textContent = "Nenhuma sessão de depuração ativa. F5 inicia.";
-        empty.style.cssText = "padding: 10px; color: var(--s-fg-muted, #888);";
-        body.appendChild(empty);
-      }
-      return;
-    }
 
-    body.appendChild(sectionLabel("Pilha de chamadas"));
-    for (let i = 0; i < frames.length; i++) {
-      const frame = frames[i]!;
-      const el = row(0, false, false, `${i + 1}.`, frameLabel(frame));
-      if (i === selectedFrameIndex) {
-        el.style.background = "var(--s-highlight, #094771)";
-      }
-      el.addEventListener("click", () => {
-        selectedFrameIndex = i;
-        render();
-        onFrameSelect?.(frame);
-        requestScopes(frame);
-      });
-      const icon = document.createElement("span");
-      icon.innerHTML = FRAME_ICON_SVG;
-      icon.style.cssText = "flex-shrink: 0; opacity: .7; display: inline-flex;";
-      el.insertBefore(icon, el.children[1] ?? null);
-      body.appendChild(el);
-    }
-
-    const selected = frames[selectedFrameIndex];
-    if (selected !== undefined) {
-      const scopes = scopesByFrame.get(selected.id);
-      if (scopes !== undefined && scopes.length > 0) {
-        body.appendChild(sectionLabel("Variáveis"));
-        for (const scope of scopes) {
-          const expandable = scope.variablesReference > 0;
-          const expanded = expandedRefs.has(scope.variablesReference);
-          const el = row(0, expandable, expanded, scope.name, "");
-          el.addEventListener("click", (event) => {
-            event.stopPropagation();
-            if (!expandable) return;
+      const selected = frames[selectedFrameIndex];
+      if (selected !== undefined) {
+        const scopes = scopesByFrame.get(selected.id);
+        if (scopes !== undefined && scopes.length > 0) {
+          varsHost.appendChild(sectionLabel("Variáveis"));
+          for (const scope of scopes) {
+            const expandable = scope.variablesReference > 0;
+            const expanded = expandedRefs.has(scope.variablesReference);
+            const el = row(0, expandable, expanded, scope.name, "");
+            el.addEventListener("click", (event) => {
+              event.stopPropagation();
+              if (!expandable) return;
+              if (expanded) {
+                expandedRefs.delete(scope.variablesReference);
+                variablesByRef.delete(scope.variablesReference);
+              } else {
+                expandedRefs.add(scope.variablesReference);
+                onVariablesRequest?.(scope.variablesReference);
+              }
+              render();
+            });
+            varsHost.appendChild(el);
             if (expanded) {
-              expandedRefs.delete(scope.variablesReference);
-              variablesByRef.delete(scope.variablesReference);
-            } else {
-              expandedRefs.add(scope.variablesReference);
-              onVariablesRequest?.(scope.variablesReference);
+              const vars = variablesByRef.get(scope.variablesReference);
+              if (vars !== undefined) renderVariables(varsHost, vars, 1);
             }
-            render();
-          });
-          body.appendChild(el);
-          if (expanded) {
-            const vars = variablesByRef.get(scope.variablesReference);
-            if (vars !== undefined) renderVariables(body, vars, 1);
           }
         }
       }
+    } else if (state === "inactive" || state === "terminated") {
+      const empty = document.createElement("div");
+      empty.textContent = "Nenhuma sessão de depuração ativa. F5 inicia.";
+      empty.style.cssText = "padding: 10px; color: var(--s-fg-muted, #888);";
+      stackHost.appendChild(empty);
+    } else if (breakpointCount > 0) {
+      stackHost.appendChild(sectionLabel(`Breakpoints: ${breakpointCount}`));
     }
 
+    renderWatch();
+    renderBreakpoints();
+
     if (outputLines.length > 0) {
-      body.appendChild(sectionLabel("Saída"));
+      outHost.appendChild(sectionLabel("Saída"));
       const out = document.createElement("pre");
       out.style.cssText = [
         "margin: 0;",
@@ -391,7 +707,7 @@ export function createDebugView(): DebugViewBinding {
         "overflow-y: auto;",
       ].join(" ");
       out.textContent = outputLines.slice(-200).join("");
-      body.appendChild(out);
+      outHost.appendChild(out);
     }
   }
 
@@ -417,7 +733,8 @@ export function createDebugView(): DebugViewBinding {
     setState(next: DapSessionState): void {
       state = next;
       const active = state !== "inactive" && state !== "terminated" && state !== "errored";
-      toolbar.hidden = !active;
+      // A barra fica visível enquanto o painel estiver aberto (mesmo sem sessão).
+      toolbar.hidden = !isOpenValue && !active;
       if (!active) {
         if (state === "inactive" || state === "terminated") {
           scopesByFrame.clear();
@@ -474,6 +791,68 @@ export function createDebugView(): DebugViewBinding {
       breakpointCount = count;
       render();
     },
+    setBreakpointSpecs(specs: readonly DapBreakpointSpec[], documentKey?: string): void {
+      // Documento **diferente**: os inputs da lista anterior não podem ser reusados (a
+      // condição antiga voltaria no campo) — a lista é recriada do zero.
+      if (documentKey !== undefined && documentKey !== breakpointDocumentKey) {
+        breakpointDocumentKey = documentKey;
+        conditionInputs.clear();
+        breakpointSignature = ""; // força a reconstrução da lista
+      }
+      breakpointSpecs = specs;
+      // As entradas das linhas que **sumiram** são descartadas: sem isso o mapa cresceria
+      // sem limite e o input velho (com a condição antiga) seria reusado quando a mesma
+      // linha voltasse a ter breakpoint.
+      const lines = new Set(specs.map((spec) => spec.line));
+      for (const line of [...conditionInputs.keys()]) {
+        if (lines.has(line)) continue;
+        conditionInputs.delete(line);
+      }
+      // O valor do campo só é aplicado quando o usuário **não** está editando-o.
+      for (const spec of specs) {
+        const input = conditionInputs.get(spec.line);
+        if (input === undefined) continue;
+        if (document.activeElement === input) continue;
+        input.value = spec.condition ?? "";
+      }
+      renderBreakpoints();
+    },
+    onBreakpointConditionChange(callback: (line: number, condition: string) => void): void {
+      onBreakpointConditionChange = callback;
+    },
+    onBreakpointRemove(callback: (line: number) => void): void {
+      onBreakpointRemove = callback;
+    },
+    setWatchExpressions(expressions: readonly string[]): void {
+      watchExpressions = expressions;
+      renderWatch();
+    },
+    setWatchValues(values: ReadonlyMap<string, string>): void {
+      watchValues = new Map(values);
+      renderWatch();
+    },
+    onWatchAdd(callback: (expression: string) => void): void {
+      onWatchAdd = callback;
+    },
+    onWatchRemove(callback: (expression: string) => void): void {
+      onWatchRemove = callback;
+    },
+    onWatchRefresh(callback: () => void): void {
+      onWatchRefresh = callback;
+    },
+    showDebugValue(text: string, x: number, y: number): void {
+      valueTip.textContent = text;
+      valueTip.hidden = false;
+      const width = valueTip.offsetWidth;
+      const height = valueTip.offsetHeight;
+      const left = Math.min(x + 12, Math.max(0, window.innerWidth - width - 8));
+      const top = Math.min(y + 16, Math.max(0, window.innerHeight - height - 8));
+      valueTip.style.left = `${left}px`;
+      valueTip.style.top = `${top}px`;
+    },
+    hideDebugValue(): void {
+      valueTip.hidden = true;
+    },
     onAction(callback: (action: DebugAction) => void): void {
       onAction = callback;
     },
@@ -495,11 +874,15 @@ export function createDebugView(): DebugViewBinding {
     close(): void {
       isOpenValue = false;
       panel.hidden = true;
+      const active = state !== "inactive" && state !== "terminated" && state !== "errored";
+      toolbar.hidden = !active;
       render();
     },
     dispose(): void {
       toolbar.remove();
       panel.remove();
+      valueTip.remove();
+      conditionInputs.clear();
     },
   };
 }

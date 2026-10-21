@@ -68,6 +68,25 @@ export interface DapSetBreakpointsResponseBody {
   readonly breakpoints: readonly DapBreakpointBody[];
 }
 
+/**
+ * `SourceBreakpoint` do DAP — o que o cliente envia em `setBreakpoints`.
+ * `condition`/`hitCondition`/`logMessage` são **opcionais**: omitidos ⇒ o breakpoint é
+ * incondicional (parada sempre).
+ */
+export interface DapSourceBreakpoint {
+  readonly line: number;
+  readonly condition?: string;
+  readonly hitCondition?: string;
+  readonly logMessage?: string;
+}
+
+/** Corpo da resposta de `evaluate` (valor + tipo). */
+export interface DapEvaluateResponseBody {
+  readonly result: string;
+  readonly type?: string;
+  readonly variablesReference?: number;
+}
+
 export interface DapThreadBody {
   readonly id: number;
   readonly name: string;

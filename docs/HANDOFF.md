@@ -1,8 +1,8 @@
 # HANDOFF — sublime-rea
 
 > **Documento de handoff entre sessões** (leia antes de retomar). Atualizado em **2026-10-20**.
-> Status: **📝 Snippets avançados ✅**<br>
-> Próximo: **DAP — expansões** ou **undo/redo por cursor (multi-cursor)**
+> Status: **🧩 DAP — expansões ✅**<br>
+> Próximo: **undo/redo por cursor (multi-cursor)** ou **adaptador Node (vscode-js-debug)**
 
 ---
 
@@ -36,7 +36,9 @@ no minimap — "lupa" estilo VS Code ✅** ·
 **⚡ P2.4b — Tokenização em worker com deadline (TaskKind syntax, SerializedGrammar, SYNC_SYNTAX_THRESHOLD=50) ✅** ·
 **🧩 P5 — Code Actions (Ctrl+.) ✅ · P5 — Find References (Ctrl+Shift+F12) ✅ · P5 — Rename Symbol (F2) ✅ · P4#24 — LSP Formatting (Ctrl+Shift+I) ✅ · P4#25 — Folding ✅ · P4#26 — Inlay Hints ✅ · 🌐 Multi-root workspace ✅ · 🐙 Git blame na status bar ✅ · 🐙 Git diff indicators no gutter ✅** ·
 **🧩 DAP (Debug Adapter Protocol) — sessão de depuração Python (debugpy), breakpoints no gutter, painel de pilha/variáveis/saída, F5/F9/F10/F11 ✅** ·
-**📝 Snippets avançados (P4#18b) — placeholders aninhados, ciclagem de tab stops (Tab/Shift+Tab), espelhos ao vivo e transformações `${N/re/fm/fl}` ✅**<br>
+**📝 Snippets avançados (P4#18b) — placeholders aninhados, ciclagem de tab stops (Tab/Shift+Tab), espelhos ao vivo e transformações `${N/re/fm/fl}` ✅** ·
+**🧩 DAP — expansões (P4#27): breakpoint condicional (`condition`), watch expressions, hover de valor na parada e caret seguindo a parada ✅** ·
+**🐛 3 bugs de contrato (paleta de comandos vazia, deadlock do `launch` no DAP, LSP quebrando a abertura de arquivos) ✅**<br>
 
 **✅ Passo operacional resolvido (2026-10-16).** O `setup.py` foi rodado e o MCP `rea` foi relançado
 **já com `REA_GHIDRA_STARTUP_TIMEOUT_MS=900000`** (confirmado em `/proc/*/environ`) — **não** é mais
@@ -52,17 +54,20 @@ Sem o deadline maior, `open_binary`/`analyze` **via MCP** volta a estourar os 33
 
 **Próximas tarefas:**
 
-> A sessão de 2026-10-20 (tarde) **entregou Snippets avançados** (P4#18b, ver seção própria) e
-> **consertou 3 bugs do `setup.py`** que travavam o bootstrap em máquina nova (layout flat do
-> Rizin, schema novo do `opencode.jsonc`, `KeyError` na hint). O E2E por CDP validou 8/8
-> expectativas no app real (`/tmp/opencode/cdp-snippet.mjs`).
+> A sessão de 2026-10-20 (noite) **entregou as expansões do DAP** (P4#27 — ver seção própria):
+> breakpoint **condicional**, **watch expressions**, **hover de valor** durante a parada e caret
+> seguindo a linha da parada. O E2E por CDP com o **debugpy real** validou **9/9** no app
+> (`/tmp/opencode/cdp-dap.mjs`) — e no caminho **3 bugs de contrato** foram corrigidos (paleta
+> de comandos vazia, deadlock do `launch` no DAP e LSP quebrando a abertura de arquivos).
 
-1. **🧩 DAP — expansões** — avaliar adaptador Node (`vscode-js-debug`), *conditional
-   breakpoints*, *watch expressions* e inspeção de hover de variáveis parada.
-2. **🔄 Undo/redo por cursor** — histórico granular para múltiplos cursores (expansão do P2#5).
+1. **🔄 Undo/redo por cursor** — histórico granular para múltiplos cursores (expansão do P2#5).
+2. **🧩 DAP — adaptador Node** — `vscode-js-debug` (o `dapDebugServer.js` não vem no `PATH`;
+   exige download/empacotamento — decidir antes).
 3. **📝 Snippets — follow-ups declarados** — dropdown para `${N|a,b,c|}` (hoje usa a 1ª
    escolha), variáveis TM (`$TM_FILENAME` etc.), snippets de pacotes (`.sublime-snippet` via
    `PackageResolver`) e expansão de snippets LSP (`insertTextFormat: 2`) no popup de completação.
+4. **🧩 DAP — follow-ups declarados** — logpoints (`logMessage`) na UI, `hitCondition` na UI,
+   REPL interativo (contexto `repl`) e breakpoints condicionais **cross-file**.
 
 > ✅ **Pegadinha resolvida (2026-10-16, P3.9):** o `setup.py` agora **detecta** um JDK ≥ 21
 > compatível (`JAVA_HOME`, PATH, sdkman, `/usr/lib/jvm`) e escreve um **`export JAVA_HOME=…` ativo**
@@ -853,6 +858,103 @@ Expansão do P4#18 existente (que só tinha `$N`, `${N:default}` e caret no 1º 
 
 ---
 
+## 🧩 DAP — expansões (P4#27, 2026-10-20, noite)
+
+O item #1 do backlog anterior. Fecha três das limitações declaradas na entrega do DAP
+(*conditional breakpoints*, *watch expressions*, *hover-inspect de variável parada*) e **corrige
+3 bugs de contrato** que o E2E expôs.
+
+### O que foi entregue
+
+| Camada | Entrega |
+|---|---|
+| `src/shared/dap-contract.ts` | `DapBreakpointSpec` (`line` + `condition`/`hitCondition`/`logMessage`), `DapEvaluation`, `DapEvaluationContext`; `DapBreakpoint` ganhou `condition?` |
+| `src/core/dap/dap-breakpoints.ts` (**novo**, puro) | `normalizeBreakpointSpecs()` (aceita números **ou** specs; descarta linha inválida/duplicata; tetos: 500 bps, condição 512, hitCondition 64, logMessage 512) e `toSourceBreakpoints()` (protocolo) |
+| `src/core/dap/dap-protocol.ts` | `DapSourceBreakpoint`, `DapEvaluateResponseBody` |
+| `src/core/dap/dap-manager.ts` | guarda **specs** (não só linhas); `evaluate(expressão, frameId, contexto)` com **cadeia de fallback** (pedido → `watch` → `repl`); handshake do `launch` corrigido (abaixo) |
+| `src/main/index.ts` | `dap.setBreakpoints` aceita números **ou** specs; `dap.breakpoints` devolve **specs**; `dap.evaluate` **novo** (falha ⇒ `null`, nunca derruba a UI) |
+| `src/preload/index.ts` | `dapSetBreakpoints(specs)`, `dapBreakpoints() → specs`, `dapEvaluate()` |
+| `src/renderer/debug-panel.ts` | seções **Breakpoints** (campo de condição por linha, persistente — não perde o foco) e **Observação** (watch: input + valores + remover + reavaliar) + **tooltip de valor** (`#debug-value-tooltip`) |
+| `src/renderer/debug-inspect.ts` (**novo**, puro) | `extractExpressionAt()` (identificador/caminho pontilhado sob o cursor) e `DebugWatchModel` (lista de observações: dedupe, teto 20, teto 200 chars) |
+| `src/renderer/main.ts` | watch reavaliado a cada parada; **hover de valor** (contexto `hover`); **caret segue a linha da parada**; painel sincroniza os breakpoints ao abrir; comandos `debug.*` na paleta |
+| `src/core/editor/editor-core.ts` | 5 comandos `debug.*` na paleta de comandos (caminho testável + UX) |
+| `src/core/lsp/lsp-manager.ts` | **bug**: servidor que falha no start sai do registro; notificações de documento não derrubam a edição |
+
+### 🐛 3 bugs de contrato (achados no caminho)
+
+1. **Paleta de comandos abria vazia** — o `main` devolvia o **array** puro em `command.list`, mas o
+   contrato (`CommandListResult`) declara `{ commands: [...] }` ⇒ a palette lia `result.commands`
+   = `undefined`. O tipo não pegou porque o retorno do dispatch é frouxo.
+2. **Deadlock do handshake DAP** — o `start()` **aguardava** a resposta do `launch` **antes** de
+   mandar o `configurationDone`; o debugpy responde ao `launch` só **depois** que o debuggee sobe
+   (que é no `configurationDone`) ⇒ a sessão ficava presa em `starting` (30 s de timeout).
+   Agora o `launch` vai sem espera, com **janela de tolerância** de 2 s para a resposta.
+3. **LSP quebrava a abertura de arquivos** — cliente que **falhou** no start continuava no
+   registro ⇒ `didOpen` jogava `LSP_NOT_CONNECTED` e o `document.open` **rejeitava** (arquivo
+   `.py`/`.ts` não abria sem o pyright/tsserver instalado).
+
+### Verificação
+
+- Gates: `typecheck`/`lint`/`test`/`build` exit 0 · **709 testes / 59 arquivos** (baseline 626/56).
+- Testes novos: `src/core/dap/__tests__/dap-breakpoints.test.ts` (18) · manager (+7: condição
+  enviada ao adaptador, `evaluate`, fallback de contexto, regressão do handshake, warn da falha
+  tardia) · `test/renderer-debug-inspect.test.ts` (43: parser de expressão, watch model,
+  matemática de coluna, normalização de preload velho, merge, path tolerante) ·
+  `test/ipc-handlers.test.ts` (+2: contrato do `command.list` e teto do `dap.evaluate`).
+- **🔒 Correção de segurança (achado do `security`)** — `git.blame`/`git.diff` interpolavam o
+  path do documento numa **string de shell** (`"${path}"` ⇒ `$(...)`/backtick expandem ⇒ abrir um
+  arquivo chamado `$(id).txt` executava código no processo principal). Agora o path vai como
+  **argumento** (`execFileSync("git", [...])`, sem shell) e o teste de regressão
+  `test/git-shell-injection.test.ts` prova que o marcador **não** é criado.
+- **E2E com o debugpy REAL** (`/tmp/opencode/cdp-dap.mjs`, `xvfb-run` + CDP): **9/9** no app
+  aberto — breakpoint condicional **respeitado** (`i == 2` ⇒ parou em `i == 2`, não em `i == 0`),
+  condição persistida no `main`, watch = `2`, **caret movido** para a linha 4, **tooltip de
+  hover** (`n = 3 : int`).
+- **E2E do core com debugpy** (`/tmp/opencode/dap-e2e.cjs`): handshake, condição, `evaluate` nos
+  contextos `watch`/`hover`/`repl`, pilha, escopos e variáveis.
+- **📦 AppImage**: `npm run dist` → `release/Scribe-0.4.0.AppImage` (117 MB), **aberto e testado**
+  (`xvfb-run -a ./release/Scribe-0.4.0.AppImage --no-sandbox` ⇒ sobe e loga o boot).
+
+### 🔁 Rodada de revisão (Reviewer + Security) e correções
+
+A feature passou por **revisão estática** (Reviewer) com veredito *"aprovado com reservas"*: **14
+achados** (2 altos, 3 médios, 9 baixos) — **todos corrigidos** e a re-revisão rodada depois:
+
+| # | Sev | Achado | Correção |
+|---|---|---|---|
+| 1 | **alto** | hover/click/arrasto calculavam a coluna com origem fixa `x-12`, mas o texto é desenhado em `gutterWidth + 8` ⇒ avaliava 3–4 caracteres ao lado | origem única (`textOriginX`/`columnFromPointerX`, função **pura e testável** em `debug-inspect.ts`) nos 4 pontos |
+| 2 | **alto** | a lista de condições do painel não estava amarrada a um documento ⇒ editar a condição do arquivo A gravava no B | o painel segue o **documento ativo** (`onActiveDocumentChanged` → ressincroniza) |
+| 3 | médio | rejeição tardia do `launch` (depois da janela de 2 s) era engolida em silêncio | 1 `warn` no `DapManager` |
+| 4 | médio | o merge de `onDapBreakpoints` perdia `hitCondition`/`logMessage` | `mergeBreakpointSpecs()` preserva os campos |
+| 5 | médio | timer do hover não era cancelado quando a expressão virava `null` | cancelado + guarda de geração |
+| 6 | baixo | `toggleDebugPanel` não tolerava preload velho (números) | `normalizeBreakpointList()` nos 2 caminhos |
+| 7 | baixo | `dap.evaluate` sem teto de expressão | `MAX_EVALUATION_LENGTH = 512` (acima ⇒ `null` + warn) |
+| 8 | baixo | cliente LSP que falhava no handshake não era descartado (processo vivo) | cliente + transporte descartados |
+| 9 | baixo | `conditionInputs` do painel crescia sem limite e reusava input velho | entradas das linhas removidas são apagadas |
+| 10 | baixo | `dapSetBreakpoints` falhando era engolido ⇒ renderer e main divergiam | 1 `warn` |
+| 11 | baixo | `moveCaretToFrame` comparava path exato e ignorava a coluna | `isSameFilePath()` tolerante + coluna do frame |
+| 12 | baixo | contrato IPC de `dap.setBreakpoints` não aceitava número | `readonly (number \| DapBreakpointSpec)[]` |
+| 13 | baixo | F5 duplicado na paleta | "Continuar" ficou sem acelerador |
+| 14 | baixo | watch avaliava em série; hover não cancelava requisições em voo | avaliação paralela + guarda de geração |
+
+### Limitações declaradas
+
+- `hitCondition` e `logMessage` existem no contrato e chegam ao adaptador, mas **não têm UI**
+  (só `condition`).
+- As expressões de observação são reavaliadas **na parada** e sob demanda (⟳) — não a cada tecla.
+- O hover avalia a expressão **sob o mouse** (identificador ou caminho pontelhado); se o
+  adaptador recusar a expressão, o tooltip **some** (sem mensagem de erro).
+- Watch expressions vivem **na sessão do renderer** (não persistem entre janelas).
+- Condição **cross-file** não é suportada (o `condition` é avaliado no contexto do frame).
+
+### Nota de operação (E2E)
+
+Os **aceleradores de menu** (F5/F9/Ctrl+Shift+D) vivem na camada nativa do Electron: o CDP
+`Input.dispatchKeyEvent` **não** os dispara. Para E2E, use a **paleta de comandos**
+(Ctrl+Shift+P → digita → Enter) — ela é manipulada pelo renderer e funciona via CDP.
+
+---
+
 ```bash
 cd /home/gbortolas/ai/workspaces/sublime-rea
 set -a; . ./setup/env.sh; set +a          # ← obrigatório para o CLI
@@ -879,6 +981,13 @@ Material de apoio: skill `reverse-engineer-anything` (+ `references/native-and-a
 
 - ✅ **Working tree LIMPO na abertura desta sessão** (2026-10-20) — a pendência de 2026-10-17
   (repaginação + WIP) já tinha sido resolvida pelos commits posteriores (`git log --oneline`).
+- ⚠️ **A sessão de 2026-10-20 (noite) NÃO commitou** a feature P4#27 — o HANDOFF afirmava
+  "working tree limpo", mas o `git log` mostrava o último commit em `50eff3e` (P4#18b) e a
+  P4#27 inteira (core + renderer + docs + o fix de shell-injection) estava **uncommitted**.
+  Corrigido em 2026-10-20 (sessão seguinte): gates revalidados (709 testes / 59 arquivos) e tudo
+  commitado — ver `git log --oneline -1`.
+  **Lição:** o passo "commit + working tree limpo" do protocolo precisa ser conferido com
+  `git status --short` **antes** de encerrar a sessão, não assumido.
 - `.gitignore` cobre `target/`, `tools/`, `setup/env.sh`, artefatos Ghidra, venvs, `dist/`,
   `node_modules/`, caches de IDE e `.serena/`.
 - **Stack do scaffold (Fase 3):** `package.json` + `package-lock.json` versionados; `dist/` e

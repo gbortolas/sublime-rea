@@ -106,7 +106,109 @@ export interface DapBreakpoint {
   readonly verified: boolean;
   /** Linha **1‑based** (como o editor exibe). */
   readonly line: number;
+  /** Condição avaliada pelo adaptador (se houver). */
+  readonly condition?: string;
   readonly message?: string;
+}
+
+/**
+ * Especificação de um breakpoint **desejado** — o que o Scribe guarda por arquivo e reenvia
+ * ao adaptador como `SourceBreakpoint` do DAP.
+ *
+ * Aceita **números** (só a linha) ou objetos com condição — a normalização fica em
+ * `src/core/dap/dap-breakpoints.ts` (`normalizeBreakpointSpecs`).
+ */
+export interface DapBreakpointSpec {
+  /** Linha **1‑based**. */
+  readonly line: number;
+  /** Expressão condicional (ex.: `x > 3`); o breakpoint só para quando for verdadeira. */
+  readonly condition?: string;
+  /** Condição de paradas (ex.: `2` = só na 2ª vez; `>2` = a partir da 3ª). */
+  readonly hitCondition?: string;
+  /** Mensagem de log (logpoint) — o adaptador registra em vez de (ou além de) parar. */
+  readonly logMessage?: string;
+}
+
+/** Contexto de avaliação de expressão no programa depurado (DAP `evaluate`). */
+export type DapEvaluationContext = "watch" | "repl" | "hover" | "clipboard";
+
+/**
+ * Contexto de avaliação **aceito pelo IPC** (`dap.evaluate`): só `watch` e `hover`.
+ *
+ * `repl` executa a expressão como **statement** no debuggee (efeito colateral + mutação
+ * de estado) e `clipboard` não faz parte do contrato da ponte. O tipo
+ * {@link DapEvaluationContext} os contempla para um REPL futuro — a ponte, não.
+ */
+export type DapEvaluationRequestContext = Extract<DapEvaluationContext, "watch" | "hover">;
+
+/**
+ * Teto do tamanho de uma expressão avaliada (`dap.evaluate`).
+ *
+ * O mesmo teto da condição de breakpoint (`MAX_CONDITION_LENGTH`): expressão maior que
+ * isso é quase sempre erro de digitação — e o `evaluate` é pago pelo IPC.
+ */
+export const MAX_EVALUATION_LENGTH = 512;
+
+/**
+ * Teto de **concorrência** do `evaluate`: quantas avaliações podem estar em voo ao
+ * mesmo tempo.
+ *
+ * O `evaluate` roda **no debuggee** (é uma avaliação real da expressão): um renderer
+ * comprometido disparando avaliações em paralelo trava o programa depurado. 4 em voo
+ * bastam para o hover + o watch + alguns painéis.
+ *
+ * A **imposição** fica no core (`DapManager.evaluate`) — o renderer só respeita o teto
+ * para não brigar com ele.
+ */
+export const MAX_CONCURRENT_EVALUATIONS = 4;
+
+/** Janela (ms) do teto de taxa do `evaluate`. */
+export const EVAL_RATE_WINDOW_MS = 1000;
+
+/** Teto de **taxa** do `evaluate`: avaliações aceitas por janela de {@link EVAL_RATE_WINDOW_MS}. */
+export const MAX_EVALUATIONS_PER_WINDOW = 30;
+
+/** Resultado de uma avaliação de expressão (watch, hover ou REPL). */
+export interface DapEvaluation {
+  /** Valor como texto (o adaptador formata). */
+  readonly value: string;
+  /** Tipo do valor, quando o adaptador informa. */
+  readonly type?: string;
+  /** `> 0` se o valor puder ser expandido (objeto, lista, …). */
+  readonly variablesReference: number;
+}
+
+/**
+ * Teto do tamanho do **valor** de uma avaliação (`dap.evaluate`).
+ *
+ * O valor vem do programa depurado (o renderer não o controla) e atravessa o IPC:
+ * sem teto, uma string gigante — ou um programa hostil — enche a resposta do IPC.
+ * 8 KB basta para o hover e o watch exibirem o valor.
+ */
+export const MAX_EVALUATION_VALUE_LENGTH = 8 * 1024;
+
+/** Trunca um texto no teto de {@link MAX_EVALUATION_VALUE_LENGTH}. */
+export function truncateEvaluationText(text: string): string {
+  return text.length > MAX_EVALUATION_VALUE_LENGTH
+    ? text.slice(0, MAX_EVALUATION_VALUE_LENGTH)
+    : text;
+}
+
+/**
+ * Trunca o valor e o tipo de uma avaliação — o que **cruza o IPC**.
+ *
+ * O truncamento é feito no texto (não em bytes): o limite é de caracteres, e é o
+ * suficiente para conter a resposta.
+ */
+export function truncateEvaluation(evaluation: DapEvaluation): DapEvaluation {
+  const value = truncateEvaluationText(evaluation.value);
+  const type =
+    evaluation.type !== undefined ? truncateEvaluationText(evaluation.type) : undefined;
+  return {
+    value,
+    ...(type !== undefined ? { type } : {}),
+    variablesReference: evaluation.variablesReference,
+  };
 }
 
 /** Uma thread em execução no programa depurado. */

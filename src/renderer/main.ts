@@ -21,10 +21,14 @@ import {
   DARK_THEME,
   LIGHT_THEME,
   BUILTIN_THEMES,
+  MAX_CONCURRENT_EVALUATIONS,
 } from "../shared";
 import type {
   CommandListResult,
   DapBreakpoint,
+  DapBreakpointSpec,
+  DapEvaluation,
+  DapEvaluationRequestContext,
   DapOutputEvent,
   DapScope,
   DapSessionState,
@@ -79,6 +83,15 @@ import { createReferencesPopup } from "./references-popup";
 import type { ReferencesPopupBinding } from "./references-popup";
 import { createDebugView } from "./debug-panel";
 import type { DebugAction, DebugViewBinding } from "./debug-panel";
+import {
+  DebugHoverMemo,
+  DebugWatchModel,
+  columnFromPointerX,
+  extractExpressionAt,
+  isSameFilePath,
+  mergeBreakpointSpecs,
+  normalizeBreakpointList,
+} from "./debug-inspect";
 import { attachMinimap } from "./minimap";
 import type { MinimapBinding } from "./minimap";
 import { findSnippet, parseSnippet } from "./snippets";
@@ -522,8 +535,9 @@ interface ScribeBridge {
   dapStart?(handle: number, stopOnEntry?: boolean): Promise<DapSessionState>;
   dapStop?(): Promise<DapSessionState>;
   dapState?(): Promise<DapSessionState>;
-  dapSetBreakpoints?(handle: number, lines: readonly number[]): Promise<readonly DapBreakpoint[]>;
-  dapBreakpoints?(handle: number): Promise<readonly number[]>;
+  dapSetBreakpoints?(handle: number, specs: readonly (number | DapBreakpointSpec)[]): Promise<readonly DapBreakpoint[]>;
+  /** Breakpoints desejados de um documento (tolera preload antigo: só as linhas). */
+  dapBreakpoints?(handle: number): Promise<readonly (number | DapBreakpointSpec)[]>;
   dapThreads?(): Promise<readonly DapThread[]>;
   dapStackTrace?(threadId: number): Promise<readonly DapStackFrame[]>;
   dapScopes?(frameId: number): Promise<readonly DapScope[]>;
@@ -533,6 +547,8 @@ interface ScribeBridge {
   dapStepOver?(threadId: number): Promise<void>;
   dapStepInto?(threadId: number): Promise<void>;
   dapStepOut?(threadId: number): Promise<void>;
+  /** Avalia uma expressão no programa depurado (watch/hover). */
+  dapEvaluate?(expression: string, frameId: number, context?: DapEvaluationRequestContext): Promise<DapEvaluation | null>;
   onDapState?(callback: (event: { state: DapSessionState }) => void): () => void;
   onDapStopped?(callback: (event: DapStoppedEvent) => void): () => void;
   onDapOutput?(callback: (event: DapOutputEvent) => void): () => void;
@@ -939,6 +955,20 @@ async function fetchGitDiff(
 }
 
 /**
+ * Largura do gutter (px) do documento ativo — a **mesma** do desenho do texto.
+ *
+ * O texto é desenhado em `gutterWidth + 8`; a coluna do mouse tem de ser medida a partir
+ * da mesma origem (com uma origem fixa, o hover pega o identificador 3–4 caracteres ao lado).
+ */
+function gutterWidthOf(renderer: ScribeRenderer): number {
+  const width = renderer.getGutterWidth?.();
+  if (typeof width === "number" && Number.isFinite(width) && width > 0) return width;
+  const lineCount = renderer.sourceLineCount();
+  const digits = Math.max(1, Math.floor(Math.log10(Math.max(1, lineCount))) + 1);
+  return digits * 9 + 16;
+}
+
+/**
  * Busca os breakpoints desejados do documento (linhas 1-based) e pinta as bolinhas no gutter.
  * A fonte da verdade vive no main (`DapManager.desiredBreakpoints`) — persiste entre sessões.
  */
@@ -949,8 +979,10 @@ async function fetchDebugBreakpoints(
 ): Promise<void> {
   if (bridge?.dapBreakpoints === undefined) return;
   try {
-    const lines = await bridge.dapBreakpoints(handle);
-    renderer.setBreakpointLines([...lines]);
+    const raw = await bridge.dapBreakpoints(handle);
+    // Tolera um preload antigo (que devolvia só as linhas).
+    const specs = normalizeBreakpointList(raw);
+    renderer.setBreakpointLines(specs.map((spec) => spec.line));
     renderer.start();
   } catch {
     /* silencia */
@@ -1022,6 +1054,14 @@ class DocumentController {
   private batchLocalRevision = 0;
   /** Timer do rAF para flush do lote. */
   private flushTimer: number | null = null;
+
+  /**
+   * Notificado quando o **documento ativo** muda (abertura, ativação ou fechamento).
+   *
+   * Usado pelo painel de depuração: a lista de breakpoints acompanha o documento ativo
+   * (sem isto, editar a condição do arquivo A gravaria no arquivo B).
+   */
+  onActiveDocumentChanged: ((session: TabSession | undefined) => void) | undefined;
 
   constructor(
     private readonly bridge: ScribeBridge,
@@ -1154,6 +1194,7 @@ class DocumentController {
       }
     }
     console.info(`Scribe: documento ligado via preload "${path}" (handle ${handle})`);
+    this.onActiveDocumentChanged?.(session);
     return true;
   }
 
@@ -1196,6 +1237,7 @@ class DocumentController {
     // Busca breakpoints do documento ativado (bolinhas no gutter)
     void fetchDebugBreakpoints(this.bridge, this.renderer, session.handle);
     this.renderer.start();
+    this.onActiveDocumentChanged?.(session);
   }
 
   close(index: number): void {
@@ -1216,6 +1258,7 @@ class DocumentController {
       setDirtyStatus(false);
       setUndoStatus(false, false);
       showWelcome(true);
+      this.onActiveDocumentChanged?.(undefined);
     } else if (index <= this.activeIndex) {
       this.activate(Math.max(0, this.activeIndex - 1));
     } else {
@@ -2314,12 +2357,18 @@ export async function bootRenderer(): Promise<boolean> {
 
   // ── Depuração (DAP) ────────────────────────────────────────────────────────────────────────
   /**
-   * Breakpoints desejados por caminho (linhas 1-based). A fonte da verdade vive no main
-   * (`DapManager.desiredBreakpoints`) — persiste entre sessões de depuração; aqui só espelhamos
-   * para o gutter e para o toggle de F9.
+   * Breakpoints desejados por caminho (linhas 1-based + condição). A fonte da verdade vive no
+   * main (`DapManager.desiredBreakpoints`) — persiste entre sessões de depuração; aqui só
+   * espelhamos para o gutter, para o toggle de F9 e para o painel de condições.
    */
-  const debugBreakpoints = new Map<string, readonly number[]>();
+  const debugBreakpoints = new Map<string, readonly DapBreakpointSpec[]>();
   let debugThreadId: number | undefined;
+  /** Frame selecionado (topo da pilha por padrão) — necessário para avaliar expressões. */
+  let debugFrameId: number | undefined;
+  /** Estado da sessão (o hover de valor só vale enquanto o programa está parado). */
+  let debugState: DapSessionState = "inactive";
+  /** Expressões de observação (watch) do usuário. */
+  const debugWatch = new DebugWatchModel();
   const debugView: DebugViewBinding | undefined =
     bridge !== undefined && bridge.dapStart !== undefined && bridge.onDapState !== undefined
       ? createDebugView()
@@ -2403,19 +2452,266 @@ export async function bootRenderer(): Promise<boolean> {
     const line = session.source.positionAt(session.caret).line + 1; // 1-based
     const path = session.path;
     const current = debugBreakpoints.get(path) ?? [];
-    const next = current.includes(line)
-      ? current.filter((l: number) => l !== line)
-      : [...current, line].sort((a: number, b: number) => a - b);
-    debugBreakpoints.set(path, next);
-    renderer.setBreakpointLines(next);
-    renderer.start();
-    void bridge.dapSetBreakpoints(session.handle, next).catch(() => {});
+    const next = current.some((spec) => spec.line === line)
+      ? current.filter((spec) => spec.line !== line)
+      : [...current, { line }].sort((a, b) => a.line - b.line);
+    applyBreakpoints(path, next, session.handle);
   };
+
+  /**
+   * Publica o conjunto de breakpoints de um arquivo: espelha no gutter, no painel de
+   * condições e envia ao main (fonte da verdade).
+   *
+   * O **painel** mostra sempre os breakpoints do **documento ativo** — a lista de outro
+   * arquivo só entra no espelho (e na contagem), nunca no painel.
+   */
+  const applyBreakpoints = (
+    path: string,
+    specs: readonly DapBreakpointSpec[],
+    handle: number,
+  ): void => {
+    debugBreakpoints.set(path, specs);
+    const session = controller?.current;
+    if (session !== undefined && session.path === path) {
+      renderer.setBreakpointLines(specs.map((spec) => spec.line));
+      renderer.start();
+      debugView?.setBreakpointSpecs(specs, path);
+    }
+    debugView?.setBreakpointCount(
+      [...debugBreakpoints.values()].reduce((n, list) => n + list.length, 0),
+    );
+    void bridge?.dapSetBreakpoints?.(handle, specs).catch((error: unknown) => {
+      // Falha silenciosa aqui deixa renderer e main divergentes (a bolinha some sem aviso).
+      console.warn("Scribe: falha ao publicar os breakpoints", error);
+    });
+  };
+
+  /**
+   * Amarra o painel de breakpoints ao **documento ativo**: publica nele a lista do
+   * documento ativo (e só dela).
+   *
+   * Se a lista do documento ainda é desconhecida no espelho local, ela é buscada no main
+   * (fonte da verdade) — trocar de aba não pode deixar o painel com a lista do arquivo
+   * anterior.
+   */
+  const resyncDebugPanelToActiveDocument = (): void => {
+    if (debugView === undefined) return;
+    const session = controller?.current;
+    if (session === undefined) {
+      debugView.setBreakpointSpecs([]);
+      return;
+    }
+    const path = session.path;
+    const local = debugBreakpoints.get(path);
+    if (local !== undefined) {
+      debugView.setBreakpointSpecs(local, path);
+      return;
+    }
+    void bridge?.dapBreakpoints?.(session.handle)
+      .then((raw) => {
+        const specs = normalizeBreakpointList(raw);
+        debugBreakpoints.set(path, specs);
+        // O documento pode ter mudado durante a busca: só publica se ainda for o ativo.
+        if (controller?.current?.path !== path) return;
+        debugView?.setBreakpointSpecs(specs, path);
+        debugView?.setBreakpointCount(
+          [...debugBreakpoints.values()].reduce((n, list) => n + list.length, 0),
+        );
+      })
+      .catch((error: unknown) => {
+        console.warn("Scribe: falha ao sincronizar os breakpoints do documento", error);
+      });
+  };
+
+  /**
+   * Reavalia as expressões de observação contra o frame atual e publica os valores.
+   * Silencioso: sem sessão parada não há o que avaliar.
+   *
+   * A avaliação é **paralela** (o painel não espera a expressão mais lenta) e tem **guarda
+   * de geração**: um resultado obsoleto (frame trocado no meio) é descartado.
+   */
+  let debugWatchGeneration = 0;
+  const refreshWatchValues = (): void => {
+    if (debugView === undefined || bridge?.dapEvaluate === undefined) return;
+    if (debugFrameId === undefined || debugState !== "stopped") return;
+    const expressions = debugWatch.list();
+    if (expressions.length === 0) {
+      debugView.setWatchValues(new Map());
+      return;
+    }
+    const frameId = debugFrameId;
+    const generation = ++debugWatchGeneration;
+    void (async () => {
+      const entries: Array<readonly [string, string]> = [];
+      // Concorrência limitada: o core aceita no máximo `MAX_CONCURRENT_EVALUATIONS`
+      // avaliações em voo (teto de segurança) — uma vaga fica reservada ao hover.
+      const limit = Math.max(1, MAX_CONCURRENT_EVALUATIONS - 1);
+      for (let i = 0; i < expressions.length; i += limit) {
+        // Um refresh mais novo começou (ou a parada acabou): este é obsoleto — não segue
+        // avaliando (as avaliações ocupam a cota do core).
+        if (generation !== debugWatchGeneration) return;
+        const chunk = expressions.slice(i, i + limit);
+        const part = await Promise.all(
+          chunk.map(async (expression): Promise<readonly [string, string]> => {
+            try {
+              const result = await bridge.dapEvaluate!(expression, frameId, "watch");
+              return [expression, result === null ? "—" : result.value];
+            } catch {
+              return [expression, "—"];
+            }
+          }),
+        );
+        entries.push(...part);
+      }
+      // Resultado obsoleto (outra parada/frame no meio): descartado.
+      if (generation !== debugWatchGeneration) return;
+      debugView.setWatchValues(new Map(entries));
+    })();
+  };
+
+  /**
+   * Move o caret para a linha do frame da parada (quando o frame é do arquivo aberto).
+   * Antes, a parada **não** movia o caret (limitação declarada do P4#16/DAP).
+   */
+  const moveCaretToFrame = (frame: DapStackFrame): void => {
+    const session = controller?.current;
+    if (session === undefined) return;
+    // Comparação tolerante: o caminho do frame vem do adaptador (`\`, outra caixa) e o da
+    // sessão é o do editor — comparação literal rejeitaria o mesmo arquivo.
+    if (frame.path !== undefined && session.path !== "" && !isSameFilePath(frame.path, session.path)) {
+      return;
+    }
+    const line = Math.max(0, frame.line - 1);
+    if (line >= session.source.lineCount()) return;
+    // A coluna do frame (1-based no DAP) é respeitada — o caret aponta a expressão, não
+    // o começo da linha. Adaptador sem coluna ⇒ começo da linha.
+    const column = Number.isFinite(frame.column) ? Math.max(0, frame.column - 1) : 0;
+    const col = Math.min(column, session.source.line(line).length);
+    const offset = session.source.offsetOf(line, col);
+    session.caret = offset;
+    session.selection = { anchor: offset, active: offset };
+    session.selections = [session.selection] as SelectionSet;
+    viewport.scrollTo(Math.max(0, line - 5));
+    renderer.setSelection(session.selection);
+    renderer.setSelections(session.selections);
+    renderer.start();
+  };
+
+  /**
+   * Hover de valor: durante uma parada, a expressão sob o mouse é avaliada pelo adaptador
+   * e o valor aparece num tooltip (contexto `hover`).
+   */
+  let debugHoverTimer: ReturnType<typeof setTimeout> | undefined;
+  /**
+   * Geração das avaliações de hover: uma resposta que chega depois de outra avaliação
+   * (ou depois de a parada ter acabado) é **obsoleta** e descartada.
+   */
+  let debugHoverGeneration = 0;
+  /**
+   * Memo da expressão já avaliada: a **mesma** expressão não é reavaliada a cada
+   * movimento do mouse (cada avaliação é um roundtrip IPC + uma avaliação no debuggee).
+   */
+  const debugHoverMemo = new DebugHoverMemo();
+  /**
+   * Cancela a avaliação de hover **pendente** (timer + respostas em voo de outra
+   * expressão) — sem tocar no memo.
+   */
+  const cancelPendingHover = (): void => {
+    clearTimeout(debugHoverTimer);
+    debugHoverTimer = undefined;
+    debugHoverGeneration++;
+  };
+  /** Cancela o hover pendente (timer + avaliações em voo) e limpa o memo. */
+  const cancelDebugHover = (): void => {
+    cancelPendingHover();
+    debugHoverMemo.clear();
+    debugView?.hideDebugValue();
+  };
+  surface.addEventListener("mousemove", (event: MouseEvent) => {
+    if (debugView === undefined || bridge?.dapEvaluate === undefined) return;
+    if (debugState !== "stopped" || debugFrameId === undefined) {
+      cancelDebugHover();
+      return;
+    }
+    const session = controller?.current;
+    if (session === undefined) return;
+
+    const rect = surface.getBoundingClientRect();
+    const x = event.clientX - rect.left;
+    const y = event.clientY - rect.top;
+    const lineHeight = Math.ceil(TEXT_STYLE.sizePx * 1.4);
+    const line = Math.floor(
+      (y + viewport.scrollOffsetPx() - TEXT_STYLE.sizePx * 0.7) / lineHeight,
+    );
+    if (line < 0 || line >= session.source.lineCount()) {
+      cancelDebugHover();
+      return;
+    }
+    const text = session.source.line(line);
+    const approxCharW = TEXT_STYLE.sizePx * 0.6;
+    // Mesma origem do desenho do texto (gutter + padding) — senão a expressão sai ao lado.
+    const col = columnFromPointerX(x, text.length, gutterWidthOf(renderer), approxCharW);
+    const expression = extractExpressionAt(text, col);
+    if (expression === null) {
+      // Sem expressão sob o mouse: o timer pendente **precisa** morrer (o tooltip
+      // obsoleto apareceria depois).
+      cancelDebugHover();
+      return;
+    }
+
+    const frameId = debugFrameId;
+    if (!debugHoverMemo.needsEvaluation(expression, frameId)) {
+      // Mesma expressão do mesmo frame: o valor já está no tooltip — cancela qualquer
+      // avaliação pendente de **outra** expressão e só reposiciona o tooltip (sem novo
+      // roundtrip IPC nem nova avaliação no debuggee).
+      cancelPendingHover();
+      const cached = debugHoverMemo.lastResult;
+      if (cached !== null) {
+        const suffix = cached.type !== undefined ? ` : ${cached.type}` : "";
+        debugView.showDebugValue(
+          `${expression} = ${cached.value}${suffix}`,
+          event.clientX,
+          event.clientY,
+        );
+      }
+      return;
+    }
+
+    clearTimeout(debugHoverTimer);
+    debugHoverTimer = setTimeout(() => {
+      if (frameId === undefined) return;
+      const generation = ++debugHoverGeneration;
+      void (async () => {
+        try {
+          const result = await bridge.dapEvaluate!(expression, frameId, "hover");
+          // Resposta obsoleta (o mouse já foi para outro lugar): descartada.
+          if (generation !== debugHoverGeneration) return;
+          debugHoverMemo.remember(expression, frameId, result);
+          if (result === null) {
+            debugView.hideDebugValue();
+            return;
+          }
+          const suffix = result.type !== undefined ? ` : ${result.type}` : "";
+          debugView.showDebugValue(
+            `${expression} = ${result.value}${suffix}`,
+            event.clientX,
+            event.clientY,
+          );
+        } catch {
+          if (generation !== debugHoverGeneration) return;
+          debugHoverMemo.remember(expression, frameId, null);
+          debugView.hideDebugValue();
+        }
+      })();
+    }, 250);
+  });
 
   if (debugView !== undefined && bridge !== undefined) {
     debugView.onAction(handleDebugAction);
-    debugView.onFrameSelect(() => {
-      // A seleção de frame já dispara `onScopesRequest` no próprio painel; nada extra aqui.
+    debugView.onFrameSelect((frame: DapStackFrame) => {
+      // O frame selecionado é o contexto das expressões (watch/hover).
+      debugFrameId = frame.id;
+      refreshWatchValues();
     });
     debugView.onScopesRequest((frame: DapStackFrame) => {
       void bridge.dapScopes?.(frame.id)
@@ -2428,8 +2724,61 @@ export async function bootRenderer(): Promise<boolean> {
         .catch(() => {});
     });
 
+    // ── Breakpoints condicionais (P4#27) ───────────────────────────────────────────────────
+    // O painel lista os breakpoints do **documento ativo** — as edições abaixo aplicam
+    // sempre ao documento ativo (o painel é ressincronizado a cada troca de aba).
+    debugView.onBreakpointConditionChange((line: number, condition: string) => {
+      const session = controller?.current;
+      if (session === undefined) return;
+      const current = debugBreakpoints.get(session.path) ?? [];
+      const next = current.map((spec): DapBreakpointSpec => {
+        if (spec.line !== line) return spec;
+        if (condition.length > 0) return { ...spec, condition };
+        // Condição apagada: a spec volta sem o campo (o tipo é `exactOptionalPropertyTypes`).
+        return {
+          line: spec.line,
+          ...(spec.hitCondition !== undefined ? { hitCondition: spec.hitCondition } : {}),
+          ...(spec.logMessage !== undefined ? { logMessage: spec.logMessage } : {}),
+        };
+      });
+      applyBreakpoints(session.path, next, session.handle);
+    });
+    debugView.onBreakpointRemove((line: number) => {
+      const session = controller?.current;
+      if (session === undefined) return;
+      const current = debugBreakpoints.get(session.path) ?? [];
+      applyBreakpoints(
+        session.path,
+        current.filter((spec) => spec.line !== line),
+        session.handle,
+      );
+    });
+
+    // ── Expressões de observação (P4#27) ────────────────────────────────────────────────────
+    debugView.setWatchExpressions(debugWatch.list());
+    debugView.onWatchAdd((expression: string) => {
+      if (!debugWatch.add(expression)) return;
+      debugView.setWatchExpressions(debugWatch.list());
+      refreshWatchValues();
+    });
+    debugView.onWatchRemove((expression: string) => {
+      if (!debugWatch.remove(expression)) return;
+      debugView.setWatchExpressions(debugWatch.list());
+      refreshWatchValues();
+    });
+    debugView.onWatchRefresh(() => {
+      refreshWatchValues();
+    });
+
     bridge.onDapState?.((event: { state: DapSessionState }) => {
+      debugState = event.state;
       debugView.setState(event.state);
+      if (event.state !== "stopped") {
+        debugFrameId = undefined;
+        // O programa voltou a rodar: o valor em cache é **obsoleto** — o memo é limpo
+        // (a próxima parada reavalia a expressão).
+        cancelDebugHover();
+      }
     });
     bridge.onDapStopped?.((event: DapStoppedEvent) => {
       if (event.threadId !== undefined) debugThreadId = event.threadId;
@@ -2437,6 +2786,11 @@ export async function bootRenderer(): Promise<boolean> {
       void bridge.dapStackTrace?.(threadId)
         .then((frames: readonly DapStackFrame[]) => {
           debugView.showStopped(event.threadId, frames);
+          const top = frames[0];
+          debugFrameId = top?.id;
+          // Move o caret para a linha da parada (o frame pode estar em outro arquivo).
+          if (top !== undefined) moveCaretToFrame(top);
+          refreshWatchValues();
         })
         .catch(() => {});
     });
@@ -2444,19 +2798,41 @@ export async function bootRenderer(): Promise<boolean> {
       debugView.appendOutput(event.category, event.output);
     });
     bridge.onDapBreakpoints?.((event: { path: string; breakpoints: readonly DapBreakpoint[] }) => {
-      const verified = event.breakpoints
-        .filter((bp: DapBreakpoint) => bp.verified)
-        .map((bp: DapBreakpoint) => bp.line);
-      debugBreakpoints.set(event.path, verified);
-      debugView.setBreakpointCount(
-        [...debugBreakpoints.values()].reduce((n: number, lines: readonly number[]) => n + lines.length, 0),
-      );
+      // O main confirma os breakpoints **verificados**. O espelho local guarda a lista
+      // **desejada** (é ela que tem a condição): um breakpoint não verificado não pode
+      // desaparecer do espelho — senão a próxima edição da lista o apagaria do main
+      // (e a condição junto). `hitCondition`/`logMessage` são preservados (o evento do
+      // main não os carrega).
+      const current = debugBreakpoints.get(event.path) ?? [];
+      const merged = mergeBreakpointSpecs(current, event.breakpoints);
+
+      debugBreakpoints.set(event.path, merged);
+      // O painel mostra **sempre** os breakpoints do documento ativo.
       const session = controller?.current;
       if (session !== undefined && session.path === event.path) {
+        debugView.setBreakpointSpecs(merged, event.path);
+      }
+      debugView.setBreakpointCount(
+        [...debugBreakpoints.values()].reduce((n, list) => n + list.length, 0),
+      );
+      if (session !== undefined && session.path === event.path) {
+        // Só os verificados ganham a bolinha no gutter (o resto fica no painel).
+        const verified = event.breakpoints
+          .filter((bp: DapBreakpoint) => bp.verified)
+          .map((bp: DapBreakpoint) => bp.line);
         renderer.setBreakpointLines(verified);
         renderer.start();
       }
     });
+  }
+
+  // O painel de breakpoints acompanha o **documento ativo**: trocar de aba (ou abrir
+  // outro arquivo) ressincroniza a lista — sem isto, editar a condição do arquivo A
+  // gravaria no arquivo B.
+  if (controller !== undefined) {
+    controller.onActiveDocumentChanged = () => {
+      resyncDebugPanelToActiveDocument();
+    };
   }
 
   const handleMenuAction = (action: string): void => {
@@ -2553,6 +2929,36 @@ export async function bootRenderer(): Promise<boolean> {
       case "debug.toggleBreakpoint":
         toggleBreakpointAtCaret();
         break;
+      case "debug.togglePanel":
+        toggleDebugPanel();
+        break;
+    }
+  };
+
+  /** Abre/fecha o painel de depuração (menu, paleta de comandos e atalho). */
+  const toggleDebugPanel = (): void => {
+    if (debugView === undefined) return;
+    if (debugView.isOpen) {
+      debugView.close();
+      return;
+    }
+    debugView.open();
+    // Ao abrir, sincroniza os breakpoints do **documento ativo** (o main é a fonte da
+    // verdade). Tolera um preload antigo (que devolvia só as linhas).
+    const session = controller?.current;
+    if (session !== undefined) {
+      void bridge?.dapBreakpoints?.(session.handle)
+        .then((raw) => {
+          const specs = normalizeBreakpointList(raw);
+          debugBreakpoints.set(session.path, specs);
+          debugView?.setBreakpointSpecs(specs, session.path);
+          debugView?.setBreakpointCount(
+            [...debugBreakpoints.values()].reduce((n, list) => n + list.length, 0),
+          );
+        })
+        .catch((error: unknown) => {
+          console.warn("Scribe: falha ao buscar os breakpoints do documento", error);
+        });
     }
   };
 
@@ -2569,6 +2975,9 @@ export async function bootRenderer(): Promise<boolean> {
                 findBar.model.open();
               }
             } else if (["view.toggleTheme", "edit.cut", "edit.copy", "edit.paste", "edit.selectAll"].includes(command.id)) {
+              handleMenuAction(command.id);
+            } else if (command.id.startsWith("debug.")) {
+              // Depuração: o core não tem UI — as ações rodam no renderer.
               handleMenuAction(command.id);
             } else {
               // Comandos de core: file.*, edit.undo/redo — executa via IPC
@@ -3084,8 +3493,8 @@ function attachInputListeners(
     if (line < 0 || line >= session.source.lineCount()) return;
     const text = session.source.line(line);
     const approxCharW = TEXT_STYLE.sizePx * 0.6;
-    let col = Math.round((x - 12) / approxCharW);
-    col = Math.max(0, Math.min(col, text.length));
+    // Mesma origem do desenho do texto (gutter + padding).
+    const col = columnFromPointerX(x, text.length, gutterWidthOf(renderer), approxCharW);
     const offset = session.source.offsetOf(line, col);
     // Snippets (P4#18): clique fora da expansão encerra a sessão ativa (dentro do range —
     // inclusive entre paradas — ela continua viva).
@@ -3132,8 +3541,8 @@ function attachInputListeners(
     const clampedLine = Math.min(line, session.source.lineCount() - 1);
     const text = session.source.line(clampedLine);
     const approxCharW = TEXT_STYLE.sizePx * 0.6;
-    let col = Math.round((x - 12) / approxCharW);
-    col = Math.max(0, Math.min(col, text.length));
+    // Mesma origem do desenho do texto (gutter + padding).
+    const col = columnFromPointerX(x, text.length, gutterWidthOf(renderer), approxCharW);
     const offset = session.source.offsetOf(clampedLine, col);
     session.selection = { anchor: mouseDragAnchor, active: offset };
     // Drag colapsa para seleção única
@@ -3203,8 +3612,8 @@ function attachInputListeners(
       if (line < 0 || line >= session.source.lineCount()) return;
       const text = session.source.line(line);
       const approxCharW = TEXT_STYLE.sizePx * 0.6;
-      let col = Math.round((x - 12) / approxCharW);
-      col = Math.max(0, Math.min(col, text.length));
+      // Mesma origem do desenho do texto (gutter + padding).
+      const col = columnFromPointerX(x, text.length, gutterWidthOf(renderer), approxCharW);
       void (async () => {
         try {
           const result = await bridge.hover!(session.handle, line, col);

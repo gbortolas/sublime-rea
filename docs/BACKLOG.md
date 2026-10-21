@@ -695,6 +695,60 @@ Problemas identificados ao testar o AppImage pela primeira vez:
     (`.sublime-snippet` via `PackageResolver`) · snippets LSP (`insertTextFormat: 2`) no
     popup de completação
 
+## 🧩 DAP — expansões (P4#27, 2026-10-20, noite)
+
+- [x] **DAP — expansões** ✅ **fechado (2026-10-20)**. Fecha 3 das limitações declaradas na
+      entrega do DAP (conditional breakpoints, watch expressions, hover-inspect de variável
+      parada) e **corrige 3 bugs de contrato** achados no caminho. Entregue:
+  - **contrato** — `DapBreakpointSpec` (`line` + `condition`/`hitCondition`/`logMessage`),
+    `DapEvaluation`, `DapEvaluationContext` em `src/shared/dap-contract.ts`;
+    `DapSourceBreakpoint` e `DapEvaluateResponseBody` no protocolo
+  - **normalização pura** — `src/core/dap/dap-breakpoints.ts`: `normalizeBreakpointSpecs()`
+    (aceita números **ou** specs; descarta linha inválida/duplicata; tetos 500/512/64/512) e
+    `toSourceBreakpoints()` (formato do protocolo)
+  - **manager** — guarda **specs** (não só linhas); `evaluate(expressão, frameId, contexto)` com
+    **cadeia de fallback** (contexto pedido → `watch` → `repl`); handshake do `launch` corrigido
+  - **IPC** — `dap.setBreakpoints` aceita números **ou** specs; `dap.breakpoints` devolve specs;
+    `dap.evaluate` **novo** (falha ⇒ `null`, degradação explícita)
+  - **painel** — seções **Breakpoints** (condição editável por linha, campo persistente — não
+    perde o foco) e **Observação** (watch: input, valores, remover, reavaliar) + **tooltip de
+    valor** (`#debug-value-tooltip`)
+  - **renderer** — watch reavaliado a cada parada; **hover de valor** (contexto DAP `hover`);
+    **caret passa a seguir a linha da parada**; painel sincroniza os breakpoints ao abrir;
+    5 comandos `debug.*` na paleta de comandos
+  - **🐛 3 bugs de contrato** — (1) `command.list` devolvia array puro mas o contrato declara
+    `{ commands }` ⇒ **paleta abria vazia**; (2) `start()` aguardava a resposta do `launch`
+    antes do `configurationDone` ⇒ **deadlock** com o debugpy real; (3) cliente LSP que falha
+    no start continuava no registro ⇒ `LSP_NOT_CONNECTED` **quebrava a abertura de arquivos**
+  - **testes** — `dap-breakpoints.test.ts` (18) · manager (+7) · `renderer-debug-inspect.test.ts`
+    (37) · `ipc-handlers.test.ts` (+2 contrato do `command.list` e teto do `dap.evaluate`) ·
+    smoke (ajustado ao contrato)
+  - **🔁 revisão estática (Reviewer) + Security** — veredito *"aprovado com reservas"* com
+    **14 achados** (2 altos, 3 médios, 9 baixos), **todos corrigidos**:
+    (1) **alto** — hover/click/arrasto usavam origem de coluna `x-12` em vez de `gutterWidth + 8`
+    ⇒ avaliava o símbolo errado (virou função **pura e testável**);
+    (2) **alto** — a lista de condições do painel não estava amarrada ao documento ⇒ editar a
+    condição do arquivo A gravava no B (o painel agora segue o documento ativo);
+    (3) médio — rejeição tardia do `launch` engolida em silêncio (agora 1 warn);
+    (4) médio — o merge dos breakpoints perdia `hitCondition`/`logMessage`;
+    (5) médio — timer do hover não cancelado quando a expressão virava `null`;
+    (6-14) baixos — tolerância de preload velho, teto de 512 na expressão, descarte do cliente
+    LSP que falhou, limpeza dos inputs de condição, warn no `dapSetBreakpoints`, path tolerante +
+    coluna no `moveCaretToFrame`, contrato IPC aceitando número, F5 duplicado, watch paralelo
+    com guarda de geração
+  - **E2E com o debugpy real** (`/tmp/opencode/cdp-dap.mjs`): **9/9** no app — breakpoint
+    condicional respeitado (`i == 2`), condição persistida no main, watch = `2`, caret movido
+    para a linha da parada, tooltip de hover (`n = 3 : int`)
+  - **📦 AppImage** — `npm run dist` → `release/Scribe-0.4.0.AppImage` (117 MB), **aberto e
+    testado** (sobe e loga o boot)
+  - **🔒 segurança** — `git.blame`/`git.diff` interpolavam o path numa string de shell
+    (`$(...)`/backtick expandiam ⇒ RCE no processo principal ao abrir um arquivo com nome
+    malicioso). Agora `execFileSync("git", [...])` **sem shell** + teste de regressão
+    (`test/git-shell-injection.test.ts`) provando que nada é executado
+  - **Gates**: typecheck/lint/test/build exit 0 · **709 testes / 59 arquivos** (baseline 626/56)
+  - **Limitações**: `hitCondition`/`logMessage` sem UI · watch só reavalia na parada · hover some
+    se o adaptador recusar a expressão · watch não persiste entre janelas · sem condição cross-file
+
 ## 🏠 P3 — Housekeeping (2026-10-20, bootstrap)
 
 - [x] **P3.13 — 3 bugs do `setup.py`** ✅ **fechado** (2026-10-20, achados ao rodar o bootstrap

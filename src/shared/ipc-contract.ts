@@ -27,7 +27,7 @@ import type { CommandListResult } from "./command-contract";
 import type { ReplaceAllResult, SearchDocumentResult, SearchQuery } from "./search-contract";
 import type { Selection, SelectionSet } from "./selection-contract";
 import type { LspCompletionItem, LspDiagnostic, LspHoverResult, LspLocation, LspRenameResult, LspSignatureHelp, LspDocumentSymbol, LspCodeAction, LspTextEdit, LspFoldingRange, LspInlayHint } from "./lsp-contract";
-import type { DapBreakpoint, DapOutputEvent, DapScope, DapSessionState, DapStackFrame, DapStoppedEvent, DapThread, DapVariable } from "./dap-contract";
+import type { DapBreakpoint, DapBreakpointSpec, DapEvaluation, DapEvaluationRequestContext, DapOutputEvent, DapScope, DapSessionState, DapStackFrame, DapStoppedEvent, DapThread, DapVariable } from "./dap-contract";
 
 /** Versão do contrato do canal — `"<major>.<minor>"` (DEC-IPC-11: handshake negocia). */
 export type IpcVersion = `${number}.${number}`;
@@ -158,10 +158,13 @@ export interface IpcMethods {
   "dap.stop"(): DapSessionState;
   /** Estado atual da sessão de depuração. */
   "dap.state"(): DapSessionState;
-  /** Define os breakpoints (linhas 1‑based) de um documento; devolve-os já verificados se houver sessão. */
-  "dap.setBreakpoints"(handle: DocumentHandle, lines: readonly number[]): readonly DapBreakpoint[];
-  /** Breakpoints desejados (linhas 1‑based) de um documento. */
-  "dap.breakpoints"(handle: DocumentHandle): readonly number[];
+  /**
+   * Define os breakpoints de um documento; devolve-os já verificados se houver sessão.
+   * Aceita só a linha (`number`) ou a spec completa (com `condition`/`hitCondition`).
+   */
+  "dap.setBreakpoints"(handle: DocumentHandle, specs: readonly (number | DapBreakpointSpec)[]): readonly DapBreakpoint[];
+  /** Breakpoints desejados de um documento (com condição, se houver). */
+  "dap.breakpoints"(handle: DocumentHandle): readonly DapBreakpointSpec[];
   /** Threads do programa depurado. */
   "dap.threads"(): readonly DapThread[];
   /** Pilha de chamadas de uma thread. */
@@ -175,6 +178,11 @@ export interface IpcMethods {
   "dap.stepOver"(threadId: number): void;
   "dap.stepInto"(threadId: number): void;
   "dap.stepOut"(threadId: number): void;
+  /**
+   * Avalia uma expressão no programa depurado (só `watch` e `hover`).
+   * Devolve `null` quando o adaptador não consegue avaliar (ex.: contexto sem frame válido).
+   */
+  "dap.evaluate"(expression: string, frameId: number, context?: DapEvaluationRequestContext): DapEvaluation | null;
 }
 
 export type IpcMethodName = keyof IpcMethods & string;
@@ -243,6 +251,7 @@ export const IPC_METHODS = [
   "dap.stepOver",
   "dap.stepInto",
   "dap.stepOut",
+  "dap.evaluate",
 ] as const satisfies readonly IpcMethodName[];
 
 export const IPC_EVENT_NAMES = [

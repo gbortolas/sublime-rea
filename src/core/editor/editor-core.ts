@@ -1678,6 +1678,15 @@ export function createEditorCore(options: EditorCoreOptions = {}): EditorCore {
         { id: "edit.selectAll", label: "Selecionar tudo",     category: "Edit", accelerator: "Ctrl+A" },
         { id: "find.open",      label: "Buscar",              category: "Find", accelerator: "Ctrl+F" },
         { id: "view.toggleTheme", label: "Alternar tema",     category: "View", accelerator: "Ctrl+Shift+T" },
+        // Depuração (DAP) — executadas **no renderer** (o core não tem UI); a paleta as
+        // encaminha para os mesmos handlers do menu nativo.
+        // F5 é **contextual** (parado → continua; inativo → inicia): o acelerador fica
+        // só em "Iniciar depuração" — declarar F5 nos dois comandos é ambíguo.
+        { id: "debug.start",    label: "Iniciar depuração",   category: "Debug", accelerator: "F5" },
+        { id: "debug.continue", label: "Continuar (depuração)", category: "Debug" },
+        { id: "debug.stop",     label: "Encerrar depuração",  category: "Debug", accelerator: "Shift+F5" },
+        { id: "debug.toggleBreakpoint", label: "Alternar breakpoint", category: "Debug", accelerator: "F9" },
+        { id: "debug.togglePanel", label: "Painel de depuração", category: "Debug", accelerator: "Ctrl+Shift+D" },
       ];
     },
 

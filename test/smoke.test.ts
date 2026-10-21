@@ -377,11 +377,14 @@ describe("fumaça — pipeline IPC (keydown → main → texto)", () => {
     });
     expect(listResp.ok).toBe(true);
     if (listResp.ok) {
-      const commands = listResp.value as ReadonlyArray<{ readonly id: string }>;
-      const ids = commands.map((c) => c.id);
+      // O contrato é `{ commands: [...] }` (CommandListResult) — o array puro quebrava a
+      // paleta (achado no E2E do P4#27).
+      const result = listResp.value as { readonly commands: ReadonlyArray<{ readonly id: string }> };
+      const ids = result.commands.map((c) => c.id);
       expect(ids).toContain("edit.undo");
       expect(ids).toContain("file.save");
       expect(ids).toContain("edit.redo");
+      expect(ids).toContain("debug.toggleBreakpoint");
     }
 
     // command.execute("edit.undo") com documento aberto

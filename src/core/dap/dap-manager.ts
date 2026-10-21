@@ -12,20 +12,40 @@
 
 import { Emitter, type Event } from "../../shared/events";
 import { type Disposable } from "../../shared/disposable";
-import type {
-  DapBreakpoint,
-  DapLaunchTarget,
-  DapScope,
-  DapServerConfig,
-  DapSessionState,
-  DapStackFrame,
-  DapThread,
-  DapVariable,
+import {
+  EVAL_RATE_WINDOW_MS,
+  MAX_CONCURRENT_EVALUATIONS,
+  MAX_EVALUATIONS_PER_WINDOW,
+  MAX_EVALUATION_LENGTH,
+  truncateEvaluation,
+  type DapBreakpoint,
+  type DapBreakpointSpec,
+  type DapEvaluation,
+  type DapEvaluationContext,
+  type DapLaunchTarget,
+  type DapScope,
+  type DapServerConfig,
+  type DapSessionState,
+  type DapStackFrame,
+  type DapThread,
+  type DapVariable,
+} from "../../shared/dap-contract";
+
+/**
+ * Tetos do `evaluate` (definidos no contrato compartilhado — o renderer precisa do
+ * número para não exceder a cota) e **impostos aqui**, no core.
+ */
+export {
+  EVAL_RATE_WINDOW_MS,
+  MAX_CONCURRENT_EVALUATIONS,
+  MAX_EVALUATIONS_PER_WINDOW,
 } from "../../shared/dap-contract";
 import { DapClient } from "./dap-client";
 import { DapStdioTransport } from "./dap-transport";
 import { DapError } from "./dap-protocol";
+import { normalizeBreakpointSpecs, toSourceBreakpoints } from "./dap-breakpoints";
 import type {
+  DapEvaluateResponseBody,
   DapInitializeParams,
   DapScopesResponseBody,
   DapSetBreakpointsResponseBody,
@@ -38,6 +58,17 @@ import type {
 const INITIALIZED_TIMEOUT_MS = 10000;
 const STACK_FRAME_LIMIT = 50;
 
+/**
+ * Janela de tolerância para a resposta do `launch`/`attach`.
+ *
+ * O debugpy responde ao `launch` **depois** do `configurationDone` (o debuggee só sobe
+ * nessa hora) — esperar a resposta antes de mandar o `configurationDone` trava a sessão.
+ * Então a resposta é esperada por um instante curto: se ela já chegou (adaptadores
+ * rápidos), o erro aparece; se não, a sessão segue e a resposta tardia é apenas
+ * registrada.
+ */
+const LAUNCH_RESPONSE_GRACE_MS = 2000;
+
 export class DapManager implements Disposable {
   private readonly configs = new Map<string, DapServerConfig>();
 
@@ -47,8 +78,20 @@ export class DapManager implements Disposable {
   private activeProgram: string | null = null;
   private sessionState: DapSessionState = "inactive";
 
-  /** Breakpoints desejados por caminho absoluto de arquivo (linhas 1‑based). */
-  private readonly desiredBreakpoints = new Map<string, Set<number>>();
+  /**
+   * Breakpoints desejados por caminho absoluto de arquivo.
+   * Chave: linha **1‑based**; valor: spec completa (condição, hit condition, log message).
+   */
+  private readonly desiredBreakpoints = new Map<string, Map<number, DapBreakpointSpec>>();
+
+  /** Avaliações de expressão **em voo** (teto de concorrência — {@link MAX_CONCURRENT_EVALUATIONS}). */
+  private inFlightEvaluations = 0;
+
+  /**
+   * Instantes (ms) das avaliações aceitadas na janela corrente (teto de taxa —
+   * {@link MAX_EVALUATIONS_PER_WINDOW} por {@link EVAL_RATE_WINDOW_MS}).
+   */
+  private evaluationTimestamps: number[] = [];
 
   private readonly onStateEmitter = new Emitter<DapSessionState>();
   private readonly onStoppedEmitter = new Emitter<DapStoppedEventBody>();
@@ -164,7 +207,16 @@ export class DapManager implements Disposable {
         supportsVariableType: true,
       } satisfies DapInitializeParams)) as { supportsConfigurationDoneRequest?: boolean } | undefined;
 
-      await client.sendRequest(config.request, buildLaunchArgs(config, target));
+      // O pedido inicial (`launch`/`attach`) **não é aguardado** antes do `configurationDone`:
+      // o debugpy responde ao `launch` só *depois* que o debuggee sobe (o debuggee sobe no
+      // `configurationDone`) — esperar aqui trava a sessão inteira (observado no E2E real).
+      const launchRequest = client.sendRequest(
+        config.request,
+        buildLaunchArgs(config, target),
+      );
+      // Anexa um handler imediato: se o `launch` falhar antes do `race`, a rejeição não vira
+      // "unhandled rejection" (o `race` abaixo é quem decide o que fazer com ela).
+      launchRequest.catch(() => undefined);
 
       // O adaptador pode não emitir `initialized` (varia por implementação) — não é fatal.
       try {
@@ -178,6 +230,24 @@ export class DapManager implements Disposable {
       const supportsConfigurationDone = initBody?.supportsConfigurationDoneRequest !== false;
       if (supportsConfigurationDone) {
         await client.sendRequest("configurationDone");
+      }
+
+      // Se o `launch` já respondeu (adaptadores que respondem na hora), o erro aparece aqui.
+      // Se ainda não respondeu, segue — a resposta chega depois e é apenas registrado.
+      const launchOutcome = await raceWithTimeout(launchRequest, LAUNCH_RESPONSE_GRACE_MS);
+      if (launchOutcome.status === "rejected") throw launchOutcome.error;
+      if (launchOutcome.status === "timeout") {
+        // A resposta do `launch` chegou **depois** da janela de tolerância: se for uma
+        // falha, ela é registrada (1 `warn`) — engolir em silêncio seria degradação
+        // invisível (a sessão segue rodando, mas o `launch` nunca funcionou).
+        void launchRequest.then(
+          () => undefined,
+          (error: unknown) => {
+            console.warn(
+              `[dap] "launch" falhou depois da janela de tolerância: ${messageOf(error)}`,
+            );
+          },
+        );
       }
 
       this.setState("running");
@@ -202,24 +272,39 @@ export class DapManager implements Disposable {
     this.setState("inactive");
   }
 
-  /** Registra os breakpoints desejados de um arquivo e os envia ao adaptador, se ativo. */
+  /**
+   * Registra os breakpoints desejados de um arquivo e os envia ao adaptador, se ativo.
+   *
+   * Aceita números (só a linha) ou specs completas (condição, hit condition, log message) —
+   * a normalização é feita por `normalizeBreakpointSpecs` (descarta entradas inválidas).
+   */
   async setBreakpoints(
     sourcePath: string,
-    lines: readonly number[],
+    specs: readonly (number | DapBreakpointSpec)[],
   ): Promise<readonly DapBreakpoint[]> {
-    this.desiredBreakpoints.set(sourcePath, new Set(lines));
+    const normalized = normalizeBreakpointSpecs(specs);
+    this.desiredBreakpoints.set(
+      sourcePath,
+      new Map(normalized.map((spec) => [spec.line, spec])),
+    );
 
     const client = this.client;
     if (client === null || !isSessionReady(this.sessionState)) return [];
 
-    return this.pushBreakpoints(client, sourcePath, lines);
+    return this.pushBreakpoints(client, sourcePath, normalized);
   }
 
   /** Breakpoints desejados de um arquivo (ordem crescente de linha). */
   breakpointsFor(sourcePath: string): readonly number[] {
-    const set = this.desiredBreakpoints.get(sourcePath);
-    if (!set) return [];
-    return [...set].sort((a, b) => a - b);
+    const specs = this.breakpointSpecsFor(sourcePath);
+    return specs.map((spec) => spec.line);
+  }
+
+  /** Breakpoints desejados de um arquivo **com** condição (o que o painel de depuração edita). */
+  breakpointSpecsFor(sourcePath: string): readonly DapBreakpointSpec[] {
+    const byLine = this.desiredBreakpoints.get(sourcePath);
+    if (!byLine) return [];
+    return [...byLine.values()].sort((a, b) => a.line - b.line);
   }
 
   /** Threads em execução no programa depurado. */
@@ -295,6 +380,63 @@ export class DapManager implements Disposable {
     await this.requireClient().sendRequest("stepOut", { threadId });
   }
 
+  /**
+   * Avalia uma expressão no programa depurado (watch ou hover).
+   *
+   * O contexto pedido é tentado primeiro; se o adaptador recusar (`success: false`), há
+   * **fallback** para `watch` — nem todo adaptador implementa todos os contextos. O erro
+   * original é preservado quando **todas** as tentativas falham.
+   *
+   * Tetos aplicados **no core** (o IPC é apenas uma das bordas): o tamanho da expressão
+   * ({@link MAX_EVALUATION_LENGTH}), a taxa e a concorrência das avaliações. Exceder a
+   * taxa/concorrência falha com `DAP_EVAL_RATE_LIMITED` — um renderer comprometido não
+   * consegue congelar o debuggee.
+   */
+  async evaluate(
+    expression: string,
+    frameId: number,
+    context: DapEvaluationContext = "watch",
+  ): Promise<DapEvaluation> {
+    const client = this.requireClient();
+    const trimmed = expression.trim();
+    if (trimmed.length === 0) {
+      throw new DapError("DAP_EMPTY_EXPRESSION", "Expressão vazia");
+    }
+    if (trimmed.length > MAX_EVALUATION_LENGTH) {
+      throw new DapError(
+        "DAP_EXPRESSION_TOO_LONG",
+        `Expressão acima de ${MAX_EVALUATION_LENGTH} caracteres`,
+      );
+    }
+
+    this.reserveEvaluationSlot();
+    try {
+      const chain = contextChain(context);
+      let firstError: unknown;
+      for (const ctx of chain) {
+        try {
+          const body = (await client.sendRequest("evaluate", {
+            expression: trimmed,
+            frameId,
+            context: ctx,
+          })) as DapEvaluateResponseBody | undefined;
+          return truncateEvaluation({
+            value: body?.result ?? "",
+            ...(body?.type !== undefined ? { type: body.type } : {}),
+            variablesReference: body?.variablesReference ?? 0,
+          });
+        } catch (err) {
+          if (firstError === undefined) firstError = err;
+        }
+      }
+      throw firstError instanceof Error
+        ? firstError
+        : new DapError("DAP_EVALUATE_FAILED", "Falha ao avaliar a expressão");
+    } finally {
+      this.releaseEvaluationSlot();
+    }
+  }
+
   /** @inheritdoc */
   dispose(): void {
     const client = this.client;
@@ -318,6 +460,43 @@ export class DapManager implements Disposable {
     return this.client;
   }
 
+  /**
+   * Reserva uma vaga de avaliação (teto de concorrência + teto de taxa).
+   *
+   * Lança `DapError("DAP_EVAL_RATE_LIMITED")` quando um dos tetos é excedido — o
+   * chamador decide a degradação (o IPC devolve `null`).
+   */
+  private reserveEvaluationSlot(): void {
+    if (this.inFlightEvaluations >= MAX_CONCURRENT_EVALUATIONS) {
+      throw new DapError(
+        "DAP_EVAL_RATE_LIMITED",
+        `Já há ${MAX_CONCURRENT_EVALUATIONS} avaliações em voo`,
+      );
+    }
+    const now = Date.now();
+    const windowStart = now - EVAL_RATE_WINDOW_MS;
+    // Descarta as marcas que saíram da janela corrente.
+    while (
+      this.evaluationTimestamps.length > 0 &&
+      this.evaluationTimestamps[0]! <= windowStart
+    ) {
+      this.evaluationTimestamps.shift();
+    }
+    if (this.evaluationTimestamps.length >= MAX_EVALUATIONS_PER_WINDOW) {
+      throw new DapError(
+        "DAP_EVAL_RATE_LIMITED",
+        `Teto de ${MAX_EVALUATIONS_PER_WINDOW} avaliações por ${EVAL_RATE_WINDOW_MS} ms excedido`,
+      );
+    }
+    this.evaluationTimestamps.push(now);
+    this.inFlightEvaluations++;
+  }
+
+  /** Devolve a vaga de avaliação reservada. */
+  private releaseEvaluationSlot(): void {
+    if (this.inFlightEvaluations > 0) this.inFlightEvaluations--;
+  }
+
   private setState(state: DapSessionState): void {
     if (this.sessionState === state) return;
     this.sessionState = state;
@@ -328,30 +507,31 @@ export class DapManager implements Disposable {
   private async flushBreakpoints(): Promise<void> {
     const client = this.client;
     if (client === null) return;
-    for (const [sourcePath, lines] of this.desiredBreakpoints) {
-      await this.pushBreakpoints(client, sourcePath, [...lines].sort((a, b) => a - b));
+    for (const sourcePath of this.desiredBreakpoints.keys()) {
+      await this.pushBreakpoints(client, sourcePath, this.breakpointSpecsFor(sourcePath));
     }
   }
 
   private async pushBreakpoints(
     client: DapClient,
     sourcePath: string,
-    lines: readonly number[],
+    specs: readonly DapBreakpointSpec[],
   ): Promise<readonly DapBreakpoint[]> {
     const body = (await client.sendRequest("setBreakpoints", {
       source: { path: sourcePath },
-      breakpoints: lines.map((line) => ({ line })),
+      breakpoints: toSourceBreakpoints(specs),
     })) as DapSetBreakpointsResponseBody | undefined;
 
     const returned = body?.breakpoints ?? [];
-    const breakpoints: DapBreakpoint[] = lines.map((requestedLine, index) => {
+    const breakpoints: DapBreakpoint[] = specs.map((spec, index) => {
       const bp = returned[index];
       if (bp === undefined) {
-        return { verified: false, line: requestedLine };
+        return { verified: false, line: spec.line };
       }
       return {
         verified: bp.verified,
-        line: bp.line ?? requestedLine,
+        line: bp.line ?? spec.line,
+        ...(spec.condition !== undefined ? { condition: spec.condition } : {}),
         ...(bp.id !== undefined ? { id: bp.id } : {}),
         ...(bp.message !== undefined ? { message: bp.message } : {}),
       };
@@ -384,6 +564,54 @@ function extensionOf(path: string): string {
 
 function isSessionReady(state: DapSessionState): boolean {
   return state === "running" || state === "stopped";
+}
+
+/** Resultado da corrida entre uma promise e um prazo. */
+type RaceOutcome<T> =
+  | { readonly status: "resolved"; readonly value: T }
+  | { readonly status: "rejected"; readonly error: unknown }
+  | { readonly status: "timeout" };
+
+/**
+ * Espera a promise por até `timeoutMs`. Rejeição **não** é engolida: ela é devolvida
+ * (`rejected`) para que o chamador decida — a falha do `launch` precisa derrubar a sessão.
+ */
+async function raceWithTimeout<T>(
+  promise: Promise<T>,
+  timeoutMs: number,
+): Promise<RaceOutcome<T>> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const timeout = new Promise<{ status: "timeout" }>((resolve) => {
+    timer = setTimeout(() => resolve({ status: "timeout" }), timeoutMs);
+  });
+  try {
+    const settled = await Promise.race([
+      promise.then(
+        (value) => ({ status: "resolved" as const, value }),
+        (error: unknown) => ({ status: "rejected" as const, error }),
+      ),
+      timeout,
+    ]);
+    if (settled.status === "timeout") return { status: "timeout" };
+    return settled;
+  } finally {
+    if (timer !== undefined) clearTimeout(timer);
+  }
+}
+
+/**
+ * Cadeia de contextos tentados pelo `evaluate`: o contexto pedido e `watch`.
+ *
+ * Só `watch` e `hover` são pedidos ao adaptador: `repl` executa a expressão como
+ * **statement** no debuggee (efeito colateral + mutação de estado) e `clipboard` não
+ * faz parte do contrato do IPC. Duplicatas são removidas (o contexto pedido pode já
+ * ser `watch`).
+ */
+function contextChain(context: DapEvaluationContext): DapEvaluationContext[] {
+  const requested: DapEvaluationContext = context === "hover" ? "hover" : "watch";
+  const chain: DapEvaluationContext[] = [requested];
+  if (requested !== "watch") chain.push("watch");
+  return chain;
 }
 
 function messageOf(err: unknown): string {

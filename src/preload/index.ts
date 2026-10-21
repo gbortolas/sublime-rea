@@ -36,6 +36,9 @@ import type {
   SearchDocumentResult,
   SearchQuery,
   DapBreakpoint,
+  DapBreakpointSpec,
+  DapEvaluation,
+  DapEvaluationRequestContext,
   DapOutputEvent,
   DapScope,
   DapSessionState,
@@ -138,10 +141,10 @@ export interface ScribePreloadApi {
   dapStop(): Promise<DapSessionState>;
   /** Estado atual da sessão de depuração. */
   dapState(): Promise<DapSessionState>;
-  /** Define os breakpoints (linhas 1‑based) de um documento. */
-  dapSetBreakpoints(handle: DocumentHandle, lines: readonly number[]): Promise<readonly DapBreakpoint[]>;
-  /** Breakpoints desejados de um documento. */
-  dapBreakpoints(handle: DocumentHandle): Promise<readonly number[]>;
+  /** Define os breakpoints de um documento (só a linha, ou spec com condição). */
+  dapSetBreakpoints(handle: DocumentHandle, specs: readonly (number | DapBreakpointSpec)[]): Promise<readonly DapBreakpoint[]>;
+  /** Breakpoints desejados de um documento (com condição, se houver). */
+  dapBreakpoints(handle: DocumentHandle): Promise<readonly DapBreakpointSpec[]>;
   /** Threads do programa depurado. */
   dapThreads(): Promise<readonly DapThread[]>;
   /** Pilha de chamadas de uma thread. */
@@ -160,6 +163,8 @@ export interface ScribePreloadApi {
   dapStepInto(threadId: number): Promise<void>;
   /** Passo para fora. */
   dapStepOut(threadId: number): Promise<void>;
+  /** Avalia uma expressão no programa depurado (watch/hover). */
+  dapEvaluate(expression: string, frameId: number, context?: DapEvaluationRequestContext): Promise<DapEvaluation | null>;
   /** Escuta mudanças de estado da sessão de depuração. */
   onDapState(callback: (event: { state: DapSessionState }) => void): () => void;
   /** Escuta o evento de parada (breakpoint/passo/exceção). */
@@ -362,10 +367,10 @@ const api: ScribePreloadApi = {
     call<DapSessionState>("dap.start", [handle, stopOnEntry]),
   dapStop: (): Promise<DapSessionState> => call<DapSessionState>("dap.stop", []),
   dapState: (): Promise<DapSessionState> => call<DapSessionState>("dap.state", []),
-  dapSetBreakpoints: (handle: DocumentHandle, lines: readonly number[]): Promise<readonly DapBreakpoint[]> =>
-    call<readonly DapBreakpoint[]>("dap.setBreakpoints", [handle, lines]),
-  dapBreakpoints: (handle: DocumentHandle): Promise<readonly number[]> =>
-    call<readonly number[]>("dap.breakpoints", [handle]),
+  dapSetBreakpoints: (handle: DocumentHandle, specs: readonly (number | DapBreakpointSpec)[]): Promise<readonly DapBreakpoint[]> =>
+    call<readonly DapBreakpoint[]>("dap.setBreakpoints", [handle, specs]),
+  dapBreakpoints: (handle: DocumentHandle): Promise<readonly DapBreakpointSpec[]> =>
+    call<readonly DapBreakpointSpec[]>("dap.breakpoints", [handle]),
   dapThreads: (): Promise<readonly DapThread[]> => call<readonly DapThread[]>("dap.threads", []),
   dapStackTrace: (threadId: number): Promise<readonly DapStackFrame[]> =>
     call<readonly DapStackFrame[]>("dap.stackTrace", [threadId]),
@@ -378,6 +383,8 @@ const api: ScribePreloadApi = {
   dapStepOver: (threadId: number): Promise<void> => call<void>("dap.stepOver", [threadId]),
   dapStepInto: (threadId: number): Promise<void> => call<void>("dap.stepInto", [threadId]),
   dapStepOut: (threadId: number): Promise<void> => call<void>("dap.stepOut", [threadId]),
+  dapEvaluate: (expression: string, frameId: number, context?: DapEvaluationRequestContext): Promise<DapEvaluation | null> =>
+    call<DapEvaluation | null>("dap.evaluate", [expression, frameId, context]),
   onDapState: (callback: (event: { state: DapSessionState }) => void): (() => void) =>
     subscribeDap("dap.state", callback as (payload: unknown) => void),
   onDapStopped: (callback: (event: DapStoppedEvent) => void): (() => void) =>

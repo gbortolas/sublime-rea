@@ -11,7 +11,7 @@
  * **dinâmico**, dentro de `startMainProcess()`, que só roda quando o processo é o Electron
  * (`process.versions.electron`) — por isso este módulo é importável em `node`/vitest.
  */
-import { execSync } from "node:child_process";
+import { execFileSync } from "node:child_process";
 import { statSync } from "node:fs";
 import { join, resolve } from "node:path";
 import type { BrowserWindow as ElectronBrowserWindow } from "electron";
@@ -41,7 +41,8 @@ import type {
 import { LspManager } from "../core/lsp/lsp-manager";
 import { BUILTIN_LSP_SERVERS } from "../shared/lsp-contract";
 import { DapManager } from "../core/dap/dap-manager";
-import { BUILTIN_DAP_SERVERS } from "../shared/dap-contract";
+import { normalizeBreakpointSpecs } from "../core/dap/dap-breakpoints";
+import { BUILTIN_DAP_SERVERS, MAX_EVALUATION_LENGTH, truncateEvaluation, type DapEvaluationContext } from "../shared/dap-contract";
 
 export type { EditorCore, EditorCoreOptions } from "../core/editor";
 
@@ -357,7 +358,9 @@ async function dispatchIpc(
       return core.replaceAll(handle, query, replacement, signal);
     }
     case "command.list":
-      return core.listCommands();
+      // O contrato (`CommandListResult`) é `{ commands: [...] }` — devolver o array puro
+      // quebrava a palette (ela lia `result.commands` e recebia `undefined` ⇒ lista vazia).
+      return { commands: core.listCommands() };
     case "command.execute": {
       const commandId = requireString(request.args[0], "command.execute", "commandId");
       // file.open precisa do dialog injetado (não vive no core)
@@ -448,9 +451,13 @@ async function dispatchIpc(
       if (state === undefined) return null;
       const path = state.uri;
       try {
-        const result = execSync(
-          `git blame -L ${blameLine + 1},${blameLine + 1} --porcelain "${path}" 2>/dev/null`,
-          { timeout: 5000, encoding: "utf-8", maxBuffer: 1024 },
+        // **Sem shell**: o path vem do renderer (`document.open`) e, dentro de uma
+        // string de shell, `$(...)`/backticks expandem ⇒ execução de código. O path vai
+        // como **argumento** (o `--` separa as opções do path).
+        const result = execFileSync(
+          "git",
+          ["blame", "-L", `${blameLine + 1},${blameLine + 1}`, "--porcelain", "--", path],
+          { stdio: ["ignore", "pipe", "ignore"], timeout: 5000, encoding: "utf-8", maxBuffer: 1024 },
         );
         if (!result) return null;
         const lines = (result as string).split("\n");
@@ -477,9 +484,17 @@ async function dispatchIpc(
       if (path === undefined) return [];
       try {
         const dir = path.substring(0, path.lastIndexOf("/"));
-        const result = execSync(
-          `git diff HEAD --unified=0 -- "${path}" 2>/dev/null`,
-          { cwd: dir, timeout: 5000, encoding: "utf-8", maxBuffer: 65536 },
+        // **Sem shell** (mesma razão do `git.blame`): o path é argumento, não string.
+        const result = execFileSync(
+          "git",
+          ["diff", "HEAD", "--unified=0", "--", path],
+          {
+            cwd: dir,
+            stdio: ["ignore", "pipe", "ignore"],
+            timeout: 5000,
+            encoding: "utf-8",
+            maxBuffer: 65536,
+          },
         );
         if (!result) return [];
         // Parse unified diff: @@ -start,count +start,count @@
@@ -522,24 +537,25 @@ async function dispatchIpc(
     case "dap.setBreakpoints": {
       const dap = requireDap(deps);
       const handle = requireHandle(request.args[0], "dap.setBreakpoints");
-      const rawLines = request.args[1];
-      if (!Array.isArray(rawLines)) {
+      const rawSpecs = request.args[1];
+      if (!Array.isArray(rawSpecs)) {
         throw new IpcProtocolError(
           "invalid-args",
-          "dap.setBreakpoints: lines deve ser um array",
+          "dap.setBreakpoints: specs deve ser um array",
         );
       }
-      const lines = rawLines.filter((n): n is number => typeof n === "number");
+      // Aceita números (só a linha) ou specs com condição — a normalização é do core.
+      const specs = normalizeBreakpointSpecs(rawSpecs);
       const path = core.registry.get(handle)?.uri;
       if (path === undefined) return [];
-      return dap.setBreakpoints(path, lines);
+      return dap.setBreakpoints(path, specs);
     }
     case "dap.breakpoints": {
       const dap = requireDap(deps);
       const handle = requireHandle(request.args[0], "dap.breakpoints");
       const path = core.registry.get(handle)?.uri;
       if (path === undefined) return [];
-      return dap.breakpointsFor(path);
+      return dap.breakpointSpecsFor(path);
     }
     case "dap.threads":
       return requireDap(deps).threads();
@@ -575,6 +591,49 @@ async function dispatchIpc(
       return requireDap(deps)
         .stepOut(requireNumber(request.args[0], "dap.stepOut", "threadId"))
         .then(() => undefined);
+    case "dap.evaluate": {
+      const dap = requireDap(deps);
+      const expression = request.args[0];
+      if (typeof expression !== "string" || expression.trim().length === 0) {
+        throw new IpcProtocolError(
+          "invalid-args",
+          "dap.evaluate: expression deve ser uma string não vazia",
+        );
+      }
+      // Teto de tamanho (o mesmo da condição de breakpoint): expressão gigante é erro de
+      // digitação e não vale o roundtrip — degrada com `null` + 1 `warn`.
+      if (expression.trim().length > MAX_EVALUATION_LENGTH) {
+        console.warn(
+          `[dap] evaluate: expressão acima de ${MAX_EVALUATION_LENGTH} caracteres foi ignorada`,
+        );
+        return null;
+      }
+      // `frameId` é o **frame da pilha** (identificador do adaptador): inteiro positivo.
+      const rawFrameId = request.args[1];
+      if (
+        typeof rawFrameId !== "number" ||
+        !Number.isInteger(rawFrameId) ||
+        rawFrameId <= 0
+      ) {
+        throw new IpcProtocolError(
+          "invalid-args",
+          "dap.evaluate: 'frameId' deve ser um inteiro positivo",
+        );
+      }
+      const frameId = rawFrameId;
+      // Só `watch` e `hover`: `repl` executa a expressão como **statement** no debuggee
+      // (efeito colateral + mutação de estado) — o IPC não o aceita.
+      const rawContext = request.args[2];
+      const context: DapEvaluationContext = rawContext === "hover" ? "hover" : "watch";
+      try {
+        // O valor vem do programa depurado: é truncado antes de cruzar o IPC.
+        return truncateEvaluation(await dap.evaluate(expression, frameId, context));
+      } catch (err) {
+        // Degradação silenciosa: o hover/watch mostra "—"; não derruba a UI.
+        console.warn("[dap] evaluate falhou:", errorCode(err, "DAP_EVALUATE_FAILED"));
+        return null;
+      }
+    }
     default:
       // Inalcançável: `parseIpcRequest` já validou o método; guarda contra regressão.
       throw new IpcProtocolError("unknown-method", "método desconhecido");
@@ -871,6 +930,8 @@ export async function startMainProcess(): Promise<void> {
           { label: "Stop Debugging", accelerator: "Shift+F5", click: () => sendMenuAction(win, "debug.stop") },
           { type: "separator" },
           { label: "Toggle Breakpoint", accelerator: "F9", click: () => sendMenuAction(win, "debug.toggleBreakpoint") },
+          { label: "Debug Panel", accelerator: "CmdOrCtrl+Shift+D", click: () => sendMenuAction(win, "debug.togglePanel") },
+          { type: "separator" },
           { label: "Step Over", accelerator: "F10", click: () => sendMenuAction(win, "debug.stepOver") },
           { label: "Step Into", accelerator: "F11", click: () => sendMenuAction(win, "debug.stepInto") },
           { label: "Step Out", accelerator: "Shift+F11", click: () => sendMenuAction(win, "debug.stepOut") },

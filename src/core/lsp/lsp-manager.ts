@@ -105,8 +105,21 @@ export class LspManager implements Disposable {
       initializationOptions: config.initializationOptions,
     };
 
-    await client.connect(initParams);
-    return client;
+    try {
+      await client.connect(initParams);
+      return client;
+    } catch (err) {
+      // O servidor **não** subiu (comando ausente, handshake falho): tira ele do registro.
+      // Sem isso, o cliente ficaria registrado mas desconectado e **toda** operação de
+      // documento para aquela extensão quebraria com `LSP_NOT_CONNECTED` — inclusive a
+      // simples abertura do arquivo (achado no E2E do P4#27).
+      this.clients.delete(config.name);
+      // Descarta o cliente **e** o transporte: sem isto, o processo do servidor que
+      // falhou continua vivo (órfão) e o transporte fica com os listeners abertos.
+      transport.dispose();
+      client.dispose();
+      throw err;
+    }
   }
 
   /**
@@ -128,7 +141,7 @@ export class LspManager implements Disposable {
     const client = this.getClient(ext);
     if (!client) return;
 
-    client.sendNotification("textDocument/didOpen", {
+    this.notifySafely(client, "textDocument/didOpen", {
       textDocument: { uri, languageId, version, text },
     });
   }
@@ -139,7 +152,7 @@ export class LspManager implements Disposable {
     const client = this.getClient(ext);
     if (!client) return;
 
-    client.sendNotification("textDocument/didChange", {
+    this.notifySafely(client, "textDocument/didChange", {
       textDocument: { uri, version },
       contentChanges: [{ text }],
     });
@@ -151,9 +164,24 @@ export class LspManager implements Disposable {
     const client = this.getClient(ext);
     if (!client) return;
 
-    client.sendNotification("textDocument/didClose", {
+    this.notifySafely(client, "textDocument/didClose", {
       textDocument: { uri },
     });
+  }
+
+  /**
+   * Envia uma notificação **sem** deixar a falha virar erro de edição.
+   *
+   * Um servidor que morreu (ou que nunca subiu) não pode derrubar a abertura/alteração do
+   * documento: no máximo o recurso LSP daquele arquivo fica indisponível. A degradação é
+   * declarada (1 `warn`), nunca silenciosa.
+   */
+  private notifySafely(client: LspClient, method: string, params: unknown): void {
+    try {
+      client.sendNotification(method, params);
+    } catch (err) {
+      console.warn(`[lsp] notificação "${method}" ignorada:`, err);
+    }
   }
 
   /**
