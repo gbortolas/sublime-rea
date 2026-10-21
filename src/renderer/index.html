@@ -104,10 +104,9 @@
         <div id="editor-area">
           <div id="tab-bar" role="tablist" aria-label="Documentos"></div>
 
-          <!-- Breadcrumbs: caminho do documento ativo + posição do caret. -->
+          <!-- Breadcrumbs: caminho do documento ativo (a posição do caret fica na status bar). -->
           <div id="breadcrumbs" aria-label="Trilha do documento">
             <span id="bc-path" class="bc-path"></span>
-            <span id="bc-position" class="bc-position">Ln 1, Col 1</span>
           </div>
 
           <div id="editor-stack">
@@ -144,9 +143,9 @@
                   <input id="find-input" type="text" placeholder="Buscar" aria-label="Buscar" autocomplete="off" spellcheck="false" />
                   <span id="find-count" aria-live="polite">0/0</span>
                   <div class="find-toggles">
-                    <button id="find-case" class="find-toggle" type="button" title="Case-sensitive (Ctrl+Alt+C)">Aa</button>
-                    <button id="find-regex" class="find-toggle" type="button" title="Regex (Ctrl+Alt+R)">.*</button>
-                    <button id="find-word" class="find-toggle" type="button" title="Whole word (Ctrl+Alt+W)">\b</button>
+                    <button id="find-case" class="find-toggle" type="button" title="Case-sensitive (Ctrl+Alt+C)" aria-pressed="false">Aa</button>
+                    <button id="find-regex" class="find-toggle" type="button" title="Regex (Ctrl+Alt+R)" aria-pressed="false">.*</button>
+                    <button id="find-word" class="find-toggle" type="button" title="Whole word (Ctrl+Alt+W)" aria-pressed="false">\b</button>
                   </div>
                   <button id="find-close" type="button" aria-label="Fechar busca">
                     <svg viewBox="0 0 16 16" width="14" height="14" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" aria-hidden="true" focusable="false">

@@ -36,7 +36,7 @@ const BAR_RIGHT_PAD = 2;
 /** Faixa reservada à direita para os marcadores de busca/diagnóstico (px). */
 const MARKER_STRIP = 16;
 /** Alpha das barras de conteúdo (discreto — não pode virar faixa sólida). */
-const LINE_CONTENT_ALPHA = 0.45;
+const LINE_CONTENT_ALPHA = 0.55;
 
 // ---------------------------------------------------------------------------
 // Matemática do minimap — funções puras (sem DOM), testáveis
@@ -71,6 +71,16 @@ export interface MinimapLayoutOptions {
    * É o que corta a janela no **range visível** do editor.
    */
   readonly maxLines?: number;
+  /**
+   * Preenche a **faixa inteira** com a janela desenhada (o passo vertical cresce para
+   * ocupar a altura disponível).
+   *
+   * Sem isso, a janela (que é o **range visível** do editor, ~30-40 linhas) ocupava
+   * só ~13% da faixa de 700px — o minimap virava um "espelho" curto no topo, com o
+   * resto vazio. Com `fill`, a faixa vira um **overview ampliado** do que se está vendo
+   * (o passo é o mesmo do clique ⇒ navegar continua exato).
+   */
+  readonly fill?: boolean;
 }
 
 /**
@@ -84,15 +94,25 @@ export function computeMinimapLayout(options: MinimapLayoutOptions): MinimapLayo
   const { viewportHeight, lineCount } = options;
   const lineH = Math.max(BAR_MIN_HEIGHT, options.lineHeight ?? MINIMAP_LINE_HEIGHT);
   // Com 1px de altura a barra precisa de um gap de 1px, senão as linhas viram uma faixa só.
-  const rowPitch = lineH >= 2 ? lineH : lineH + 1;
+  const gap = lineH >= 2 ? 0 : 1;
+  const rowPitch = lineH + gap;
   const capacity = viewportHeight > 0 ? Math.floor(viewportHeight / rowPitch) : 0;
   const maxFirst = Math.max(0, lineCount - 1);
   const firstLine = Math.max(0, Math.min(options.firstLine ?? 0, maxFirst));
   const ceiling = options.maxLines ?? Number.POSITIVE_INFINITY;
-  const visibleLines = Math.max(
-    0,
-    Math.min(capacity, ceiling, Math.max(0, lineCount - firstLine)),
-  );
+  const windowLines = Math.max(0, Math.min(ceiling, Math.max(0, lineCount - firstLine)));
+  if (options.fill === true && windowLines > 0 && viewportHeight > 0) {
+    // A janela é menor que a faixa ⇒ **amplia** o passo para ocupar a altura toda.
+    const filled = Math.max(rowPitch, Math.floor(viewportHeight / windowLines));
+    return {
+      lineH: Math.max(BAR_MIN_HEIGHT, filled - gap),
+      rowPitch: filled,
+      visibleLines: windowLines,
+      firstLine,
+      truncated: lineCount > firstLine + windowLines,
+    };
+  }
+  const visibleLines = Math.max(0, Math.min(capacity, windowLines));
   return {
     lineH,
     rowPitch,
@@ -356,6 +376,9 @@ export function attachMinimap(deps: MinimapDeps): MinimapBinding {
       lineCount: deps.source.lineCount(),
       firstLine: win.firstLine,
       maxLines: win.count,
+      // A janela é o range **visível** (poucas linhas): sem `fill` ela ocuparia só
+      // ~13% da faixa. Com `fill`, a faixa é um overview ampliado do que se vê.
+      fill: true,
     });
   };
 

@@ -65,6 +65,36 @@ describe("computeMinimapLayout — altura de linha fixa", () => {
     const layout = computeMinimapLayout({ viewportHeight: 0, lineCount: 100 });
     expect(layout.visibleLines).toBe(0);
   });
+
+  // `fill`: a janela (range visível) é ampliada para ocupar a faixa inteira — sem isso o
+  // minimap usava só ~13% da altura (a barra ficava colada no topo).
+  it("fill ⇒ o passo vertical cresce para a janela ocupar a faixa toda", () => {
+    const layout = computeMinimapLayout({
+      viewportHeight: 660,
+      lineCount: 200,
+      firstLine: 10,
+      maxLines: 30,
+      fill: true,
+    });
+    expect(layout.visibleLines).toBe(30);
+    expect(layout.firstLine).toBe(10);
+    // 30 linhas em 660px ⇒ passo de 22px (o conteúdo preenche a faixa).
+    expect(layout.rowPitch).toBe(22);
+    expect(layout.rowPitch * layout.visibleLines).toBeGreaterThanOrEqual(660);
+  });
+
+  it("fill não altera o comportamento padrão (sem fill, o passo é o fixo de 3px)", () => {
+    const plain = computeMinimapLayout({ viewportHeight: 660, lineCount: 200, firstLine: 10, maxLines: 30 });
+    const filled = computeMinimapLayout({ viewportHeight: 660, lineCount: 200, firstLine: 10, maxLines: 30, fill: true });
+    expect(plain.rowPitch).toBe(3);
+    expect(filled.rowPitch).toBeGreaterThan(plain.rowPitch);
+    expect(filled.visibleLines).toBe(plain.visibleLines);
+  });
+
+  it("fill com janela vazia não divide por zero", () => {
+    const layout = computeMinimapLayout({ viewportHeight: 660, lineCount: 0, maxLines: 0, fill: true });
+    expect(layout.visibleLines).toBe(0);
+  });
 });
 
 describe("minimapBarWidth — largura proporcional ao comprimento da linha", () => {

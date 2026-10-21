@@ -34,8 +34,13 @@ export interface FindBarState {
   readonly current: number;
   /** A busca foi truncada (há mais ocorrências além do teto). */
   readonly truncated: boolean;
-  /** Mensagem de status (nº de substituições ou erro). */
+  /** Mensagem de status (nº de substituições ou erro) — o **texto curto** que vai para a barra. */
   readonly status: string | undefined;
+  /**
+   * Detalhe técnico do status (a mensagem interna completa). Vai para o `title`/tooltip da
+   * barra e para o console — a UI **nunca** mostra a string interna ("Scribe: …").
+   */
+  readonly statusDetail: string | undefined;
   /** Carimbo de tempo (ms) da última busca aplicada — `now` injetável. */
   readonly searchedAt: number;
   readonly caseSensitive: boolean;
@@ -60,8 +65,82 @@ export interface FindBarOptions {
 /** Debounce default do find bar (ms). */
 export const FIND_DEBOUNCE_MS = 150;
 
+/**
+ * Teto de caracteres da mensagem exibida na barra de busca. Passando disso, o texto é
+ * cortado (nunca no meio de uma palavra) e o resto fica no tooltip (`title`) + console.
+ */
+export const FIND_STATUS_MAX_CHARS = 120;
+
+/** Prefixo das mensagens internas do Scribe — nunca deve aparecer na UI. */
+const INTERNAL_PREFIX = "Scribe: ";
+
+/**
+ * Erro de operação da find bar com **duas** camadas de mensagem: o texto **curto** que
+ * aparece na barra ("Nenhum arquivo aberto") e o detalhe técnico, que vai para o tooltip e
+ * para o console. É o que impede a string interna de vazar para a UI.
+ */
+export class FindBarError extends Error {
+  constructor(
+    /** Texto curto, pronto para a UI. */
+    readonly userMessage: string,
+    /** Detalhe técnico (mensagem interna completa). */
+    readonly detail: string,
+  ) {
+    super(userMessage);
+    this.name = "FindBarError";
+  }
+}
+
+/** Status apresentado: texto curto (UI) + detalhe técnico (tooltip/console). */
+export interface FindStatus {
+  /** Texto **curto** que vai para a barra (≤ `FIND_STATUS_MAX_CHARS`). */
+  readonly text: string;
+  /** Detalhe técnico (mensagem interna completa). */
+  readonly detail: string;
+}
+
 function describeError(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
+}
+
+/** Primeira letra em maiúscula (mensagem interna vem em minúscula depois do prefixo). */
+function humanize(text: string): string {
+  const first = text.charAt(0);
+  if (first.length === 0) return text;
+  return first.toLocaleUpperCase("pt-BR") + text.slice(1);
+}
+
+/**
+ * Corta um texto em `max` caracteres **sem partir uma palavra no meio** (corta na última
+ * palavra completa antes do limite). O corte é marcado com "…".
+ */
+export function truncateStatus(text: string, max: number = FIND_STATUS_MAX_CHARS): string {
+  if (text.length <= max) return text;
+  if (max <= 1) return "…";
+  const slice = text.slice(0, max - 1); // reserva 1 caractere para o "…"
+  const lastSpace = slice.lastIndexOf(" ");
+  // Só recua até a última palavra completa se ela ainda for uma fatia relevante.
+  const base = lastSpace > (max - 1) * 0.5 ? slice.slice(0, lastSpace) : slice;
+  return `${base.trimEnd()}…`;
+}
+
+/**
+ * Converte um erro no par (texto curto, detalhe técnico) da barra de busca.
+ *
+ * `FindBarError` já traz o texto curto pronto; erro genérico mantém a mensagem como está
+ * (a do núcleo, ex.: "padrão inválido") e perde o prefixo interno "Scribe: " quando ela
+ * existe — o detalhe completo continua disponível para o tooltip e o console.
+ */
+export function presentFindError(error: unknown): FindStatus {
+  if (error instanceof FindBarError) {
+    return { text: truncateStatus(error.userMessage), detail: error.detail };
+  }
+  const raw = describeError(error);
+  if (!raw.startsWith(INTERNAL_PREFIX)) {
+    return { text: truncateStatus(raw), detail: raw };
+  }
+  const stripped = raw.slice(INTERNAL_PREFIX.length).trim();
+  return { text: truncateStatus(humanize(stripped)), detail: raw };
 }
 
 /**
@@ -82,6 +161,7 @@ export class FindBarModel {
   private currentIndex = 0;
   private truncatedFlag = false;
   private statusValue: string | undefined;
+  private statusDetailValue: string | undefined;
   private docKey = "";
   private revision = -1;
   private requestSeq = 0;
@@ -122,6 +202,7 @@ export class FindBarModel {
       current: this.matches.length === 0 ? 0 : this.currentIndex + 1,
       truncated: this.truncatedFlag,
       status: this.statusValue,
+      statusDetail: this.statusDetailValue,
       searchedAt: this.searchedAt,
       caseSensitive: this.caseSensitiveValue,
       regex: this.regexValue,
@@ -167,7 +248,7 @@ export class FindBarModel {
   setPattern(value: string): void {
     if (this.patternValue === value) return;
     this.patternValue = value;
-    this.statusValue = undefined;
+    this.clearStatus();
     if (value.length === 0) {
       // Padrão vazio: nada a buscar. Limpa a contagem em vez de disparar `search.emptyPattern`
       // (e invalida qualquer resposta em voo, para ela não repintar a contagem antiga).
@@ -201,6 +282,7 @@ export class FindBarModel {
       this.currentIndex = 0;
       this.truncatedFlag = false;
       this.statusValue = undefined;
+      this.statusDetailValue = undefined;
       this.cancelPending();
       this.requestSeq += 1; // in-flight do documento anterior nunca aplica
       this.emit();
@@ -228,11 +310,12 @@ export class FindBarModel {
     try {
       const result = await this.options.api.replaceAll(this.query(), this.replacementValue);
       this.statusValue = `${result.replaced} substituição(ões)`;
+      this.statusDetailValue = undefined;
       this.emit();
       // Contagem fresca (o texto já mudou): nova busca, mesmo caminho do debounce.
       if (this.patternValue.length > 0) this.scheduleSearch();
     } catch (error) {
-      this.statusValue = describeError(error);
+      this.setErrorStatus(error);
       this.emit();
     }
   }
@@ -268,6 +351,26 @@ export class FindBarModel {
   }
 
   // ---- interno -------------------------------------------------------------------------------
+
+  /** Limpa o status (texto + detalhe) — usado quando o estado volta a "sem mensagem". */
+  private clearStatus(): void {
+    this.statusValue = undefined;
+    this.statusDetailValue = undefined;
+  }
+
+  /**
+   * Publica um erro na barra: **texto curto** na UI, detalhe técnico no tooltip e no console.
+   * É o que impede a string interna ("Scribe: …") de vazar para a tela.
+   */
+  private setErrorStatus(error: unknown): void {
+    const presented = presentFindError(error);
+    this.statusValue = presented.text;
+    this.statusDetailValue = presented.detail;
+    // O detalhe que a UI esconde fica no console (o texto curto já está na barra).
+    if (presented.detail !== presented.text) {
+      console.warn("Scribe: find bar — erro na busca:", presented.detail);
+    }
+  }
 
   private query(): SearchQuery {
     return {
@@ -333,7 +436,7 @@ export class FindBarModel {
       this.matches = [];
       this.currentIndex = 0;
       this.truncatedFlag = false;
-      this.statusValue = describeError(error);
+      this.setErrorStatus(error);
       this.emit();
     }
   }

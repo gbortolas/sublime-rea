@@ -1094,6 +1094,35 @@ servidores LSP iniciam ✓.
 
 ---
 
+## 🐛 Auditoria de bugs (2026-10-21, tarde) — 5 auditores em paralelo
+
+5 auditores (edição/render/casca/LSP-DAP-segurança) rodaram o app via CDP e caçaram **20+ achados**;
+**16 foram corrigidos** (o resto é follow-up). O mais grave:
+
+| Sev | Achado | Correção |
+|---|---|---|
+| **crítico** | **o caret nunca era desenhado na posição real** — a barra azul ficava no topo-esquerdo da viewport (o `primaryCaret` era a *primeira linha visível*) | o caret passou a ser a posição real e o "destaque de linha atual" virou o parâmetro `activeLine` (verificado por leitura de pixels: y=71px, antes y=8px) |
+| **alto** | **RCE via `git diff`**: o repo do documento era lido com o ambiente do usuário ⇒ `diff.external` executava comando arbitrário | env sanificado (`GIT_*` descartados, `GIT_CONFIG_GLOBAL=/dev/null`), `--no-ext-diff --no-textconv`, `core.pager`/`hooksPath` neutralizados + teste de regressão |
+| **alto** | **salvar falhava fora do mesmo filesystem** (EXDEV) | o tmp passa a nascer no diretório do destino (com fallback) |
+| **alto** | **edi��ão externa (plugin/LSP) não reconciliava caret/seleções** ⇒ a digitação seguinte corrompia o texto | o delta é aplicado às seleções; a reconciliação aguarda o flush do lote |
+| **alto** | roda/PageUp/PageDown rolavam em **linhas lógicas** (6 rows em vez de 3) | `viewport.scrollByRows()` (delta em rows) |
+| **alto** | clicar na **aba já ativa** deixava o editor mudo (foco no botão) | `activate()` sempre devolve o foco ao canvas |
+| **alto** | **tema claro ilegível**: 31 elementos reprovavam AA (`--bg`, `--font`, `--highlight`, `--s-editor` não existiam) | tokens virados alias dos `--s-*` + escala de contraste (texto pequeno 3.58:1 → 5.85:1) |
+| **médio** | `git blame` nunca funcionava (cwd do app) e o **main bloqueava** durante o diff | `cwd: dirname(path)` + `execFile` assíncrono |
+| **médio** | abrir um **FIFO** travava o IPC | o registry exige arquivo regular |
+| **médio** | paleta/find bar/painel/popups **se sobrepunham** | escala única de z-index + geometria do painel abaixo da find bar |
+| **médio** | o minimap usava só **13%** da faixa | passo vertical ampliado (`fill`) — a faixa virou um overview do que se vê |
+
+**Também**: `window.open` remoto bloqueado; `broadcast` em janela morta; `dirname` de verdade; hit-test
+off-by-5px; documento inteiro montado a cada frame (30 FPS com 200k linhas); guias de indentação em
+índice lógico; mensagem de erro crua na UI; `Ln/Col` duplicado; `aria-pressed` nos toggles da busca;
+menu nativo com `Ctrl+W`/DevTools/Zoom.
+
+**Gates:** `typecheck`/`lint`/`test`/`build` exit 0 · **1039 testes / 79 arquivos** · E2E de
+usabilidade **TUDO OK**.
+
+---
+
 ## 🗂️ Estado do repositório
 
 - ✅ **Working tree LIMPO na abertura desta sessão** (2026-10-20) — a pendência de 2026-10-17

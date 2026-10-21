@@ -42,7 +42,7 @@
   --s-sidebar-w: 240px;
   --s-tabbar-h: 35px;
   --s-breadcrumbs-h: 24px;
-  --s-statusbar-h: 22px;
+  --s-statusbar-h: 24px;
   --s-minimap-w: 72px;
 
   /* ── Movimento ────────────────────────────────────────────────────────── */
@@ -85,13 +85,21 @@
   --s-accent: #3794ff;
   --s-gutter: #2b2d30;
   --s-gutter-fg: #6e6e6e;
-  --s-border: #2b2d30;
-  --s-activitybar: #18191b;
-  --s-sidebar: #18191b;
+  --s-border: #303238;
+  --s-activitybar: #161719;
+  --s-sidebar: #1a1b1e;
   --s-statusbar: #18191b;
-  --s-tabbar: #18191b;
+  --s-tabbar: #1a1b1e;
   --s-tabactive: #1e1f22;
-  --s-tabinactive: #18191b;
+  --s-tabinactive: #1a1b1e;
+  /*
+   * **Superfície elevada** (popups, find bar, paleta, lupa, kbd, painéis de runtime): um degrau
+   * ACIMA da casca, com borda mais forte — é o que faz um overlay flutuante se destacar do
+   * editor. Sem isto, o popup (fundo #f8f8f8) ficava invisível sobre o editor branco.
+   */
+  --s-surface-raised: #24262b;
+  /* Borda de overlay/controle interativo — mais presente que `--s-border` (divisórias). */
+  --s-border-strong: #3a3d43;
 
   /* Alias de ponte: overlays criados em RUNTIME (popup de referências, popup de escolha de
      snippet, popup de code actions) ainda referenciam `--fg`/`--border`/`--bg-overlay`/
@@ -119,19 +127,37 @@
   --fg-tertiary: var(--s-subtle);
 
   /* ── Derivados (translúcidos, agnósticos de tema) ─────────────────────── */
-  --s-muted: color-mix(in srgb, var(--s-fg) 62%, transparent);
-  --s-subtle: color-mix(in srgb, var(--s-fg) 40%, transparent);
+  /*
+   * **Escala de contraste.** Os degraus de opacidade sobre `--s-fg` são o que garante
+   * WCAG AA no texto pequeno da casca. Valores **medidos** (fórmula de contraste sobre o
+   * `getComputedStyle` do app rodando, não estimativa):
+   *
+   *   token           │ claro                │ escuro
+   *   ────────────────┼──────────────────────┼──────────────────
+   *   --s-muted (80%) │ 5,82:1 sobre #f7f7f7 │ 7,98:1 sobre #18191b
+   *   --s-subtle (72%)│ 4,79:1 sobre #ffffff │ 6,42:1 sobre #1e1f22
+   *   --s-disabled 55%│ 3,01:1 (isento: inativo) │ 4,40:1
+   *
+   * Antes: `--s-muted` 62% (3,53:1 no claro ⇒ reprovava AA) e `--s-subtle` 40% (2,14:1).
+   */
+  --s-muted: color-mix(in srgb, var(--s-fg) 80%, transparent);
+  --s-subtle: color-mix(in srgb, var(--s-fg) 72%, transparent);
+  /* Estado desabilitado: legível (o `opacity: .35` do status bar dava 1,47:1 — invisível). */
+  --s-disabled: color-mix(in srgb, var(--s-fg) 55%, transparent);
   --s-hover: color-mix(in srgb, var(--s-fg) 8%, transparent);
   --s-pressed: color-mix(in srgb, var(--s-fg) 15%, transparent);
-  --s-selected: color-mix(in srgb, var(--s-accent) 26%, transparent);
-  --s-ring: color-mix(in srgb, var(--s-accent) 70%, transparent);
-  /*
-   * Texto secundário com **contraste AA** (rótulos de 10-11px dos painéis de runtime).
-   * `--s-muted` (62%) rendia ~3,6:1 no tema claro (abaixo de AA); 80% rende ~5,8:1 sobre
-   * `--s-sidebar` (#f8f8f8). Derivado de `--s-fg` (nunca cor crua) ⇒ segue o tema.
-   */
-  --s-fg-muted: color-mix(in srgb, var(--s-fg) 80%, transparent);
+  /* Seleção: 14% de acento (26% ficava pesado e competia com o texto). */
+  --s-selected: color-mix(in srgb, var(--s-accent) 14%, transparent);
+  /* Anel de foco: o acento puro (o accent a 70% sumia no tema claro). */
+  --s-ring: var(--s-accent);
+  /* Alias histórico do texto secundário — agora é o mesmo degrau do `--s-muted`. */
+  --s-fg-muted: var(--s-muted);
+
+  /* ── Cores semânticas (lidas também pelo canvas via `getComputedStyle`) ─── */
   --s-warn: #e0a44a;
+  --s-error: #e06c75;
+  --s-info: #61afef;
+  --s-success: #7ec97e;
 
   /* ── Sombras (por tema: `[data-theme="light"]` abaixo) ────────────────── */
   --s-shadow: 0 12px 32px rgb(0 0 0 / 0.5), 0 2px 8px rgb(0 0 0 / 0.35);
@@ -141,6 +167,12 @@
   color-scheme: light;
   --s-shadow: 0 12px 32px rgb(0 0 0 / 0.16), 0 2px 8px rgb(0 0 0 / 0.08);
   --s-warn: #a86a00;
+  --s-error: #c33;
+  --s-info: #005fb8;
+  --s-success: #1a7f37;
+  /* Overlay flutuante: branco puro (o cinza da casca sumia sobre o editor branco). */
+  --s-surface-raised: #ffffff;
+  --s-border-strong: #d4d4d6;
 }
 
 /* ══ Base ══════════════════════════════════════════════════════════════════ */
@@ -192,7 +224,8 @@ input,
 select,
 textarea {
   font-family: var(--s-font-ui);
-  font-size: var(--s-fs-sm);
+  /* Base da casca: 13px (`--s-fs-md`). O `--s-fs-sm` (12px) é exclusive da status bar. */
+  font-size: var(--s-fs-md);
   color: inherit;
 }
 
@@ -265,7 +298,8 @@ textarea {
   padding: 0;
   border: none;
   background: transparent;
-  color: var(--s-subtle);
+  /* Ícone: `--s-muted` (80%) ⇒ 5,85:1 no tema claro (antes `--s-subtle` 40% ⇒ 2,13:1). */
+  color: var(--s-muted);
   cursor: pointer;
   transition: color var(--s-dur) var(--s-ease);
 }
@@ -276,6 +310,8 @@ textarea {
 
 .activity-item.active,
 .activity-item[aria-pressed="true"] {
+  /* Fundo sutil no item ativo — a barra de acento (::before) é o que marca a seleção. */
+  background: var(--s-hover);
   color: var(--s-fg);
 }
 
@@ -366,16 +402,19 @@ textarea {
 }
 
 .sidebar-item {
+  position: relative;
   display: flex;
   align-items: center;
-  gap: 6px;
+  gap: var(--s-space-2);
   width: 100%;
+  /* Alvo de clique: 24px (WCAG 2.5.8). */
+  min-height: 24px;
   padding: 4px var(--s-space-2) 4px var(--s-space-3);
   border: none;
   background: transparent;
   color: var(--s-muted);
   font: inherit;
-  font-size: var(--s-fs-sm);
+  font-size: var(--s-fs-md);
   text-align: left;
   cursor: pointer;
 }
@@ -388,6 +427,17 @@ textarea {
 .sidebar-item.active {
   background: var(--s-selected);
   color: var(--s-fg);
+}
+
+/* Barra de acento do item ativo (2px) — marcador elegante de seleção. */
+.sidebar-item.active::before {
+  content: "";
+  position: absolute;
+  left: 0;
+  top: 0;
+  bottom: 0;
+  width: 2px;
+  background: var(--s-accent);
 }
 
 .sidebar-item .item-name {
@@ -427,7 +477,7 @@ textarea {
   position: relative;
   display: flex;
   align-items: center;
-  gap: 6px;
+  gap: var(--s-space-2);
   flex: none;
   min-width: 0;
   max-width: 180px;
@@ -438,7 +488,7 @@ textarea {
   background: var(--s-tabinactive);
   color: var(--s-muted);
   font: inherit;
-  font-size: var(--s-fs-sm);
+  font-size: var(--s-fs-md);
   white-space: nowrap;
   user-select: none;
   cursor: pointer;
@@ -472,7 +522,7 @@ textarea {
   display: inline-block;
   width: 7px;
   height: 7px;
-  margin-right: 6px;
+  margin-right: var(--s-space-2);
   border-radius: 50%;
   vertical-align: 1px;
   background: var(--s-warn);
@@ -486,8 +536,9 @@ textarea {
   display: none;
   flex: none;
   place-items: center;
-  width: 18px;
-  height: 18px;
+  /* Alvo de clique: 24px (o "×" de 18px era menor que o mínimo recomendado). */
+  width: 24px;
+  height: 24px;
   padding: 0;
   border: none;
   border-radius: var(--s-radius-sm);
@@ -516,7 +567,7 @@ textarea {
   background: var(--s-bg);
   border-bottom: 1px solid var(--s-border);
   color: var(--s-muted);
-  font-size: var(--s-fs-sm);
+  font-size: var(--s-fs-md);
   white-space: nowrap;
   overflow: hidden;
   user-select: none;
@@ -525,7 +576,7 @@ textarea {
 .bc-path {
   display: flex;
   align-items: center;
-  gap: 5px;
+  gap: var(--s-space-1);
   min-width: 0;
   overflow: hidden;
 }
@@ -551,14 +602,6 @@ textarea {
   height: 12px;
 }
 
-.bc-position {
-  margin-left: auto;
-  flex: none;
-  padding-left: var(--s-space-2);
-  color: var(--s-subtle);
-  font-variant-numeric: tabular-nums;
-}
-
 /* ══ Overlay / canvas ══════════════════════════════════════════════════════ */
 
 #ui-overlay {
@@ -577,20 +620,21 @@ textarea {
  *
  * `position: absolute` posiciona em relação a `#ui-overlay` (a camada de UI) e
  * `pointer-events: auto` reabilita a interação — o overlay em si é `pointer-events: none`.
- * As cores/raios/sombras vêm de tokens que já existiam (`--s-sidebar`, `--s-border`,
- * `--s-radius-lg`, `--s-shadow`), então o painel acompanha o tema claro/escuro.
+ * As cores/raios/sombras vêm de tokens que já existiam (`--s-surface-raised`,
+ * `--s-border-strong`, `--s-radius-lg`, `--s-shadow`), então o painel acompanha o tema
+ * claro/escuro e se destaca do editor.
  */
 .scribe-panel {
   position: absolute;
   z-index: var(--z-panel);
-  border: 1px solid var(--s-border);
+  border: 1px solid var(--s-border-strong);
   border-radius: var(--s-radius-lg);
-  background: var(--s-sidebar);
+  background: var(--s-surface-raised);
   box-shadow: var(--s-shadow);
   pointer-events: auto;
   color: var(--s-fg);
   font-family: var(--s-font-ui);
-  font-size: var(--s-fs-sm);
+  font-size: var(--s-fs-md);
 }
 
 /* ══ Welcome screen ════════════════════════════════════════════════════════ */
@@ -614,10 +658,10 @@ textarea {
 
 .welcome-logo {
   margin: 0;
-  font-size: 2.6rem;
-  font-weight: 200;
-  letter-spacing: 0.34em;
-  text-indent: 0.34em; /* compensa o letter-spacing final, mantendo o centro óptico */
+  font-size: 32px;
+  font-weight: 300;
+  letter-spacing: 0.28em;
+  text-indent: 0.28em; /* compensa o letter-spacing final, mantendo o centro óptico */
   text-transform: uppercase;
   color: var(--s-fg);
 }
@@ -640,7 +684,7 @@ textarea {
 
 .welcome-shortcuts {
   display: grid;
-  gap: 6px;
+  gap: var(--s-space-2);
   margin-bottom: var(--s-space-4);
 }
 
@@ -649,19 +693,25 @@ textarea {
   grid-template-columns: 9.5rem 1fr;
   align-items: center;
   gap: var(--s-space-2);
-  font-size: var(--s-fs-sm);
+  font-size: var(--s-fs-md);
 }
 
+/*
+ * Tecla (kbd): "tecla física" — superfície elevada, borda forte e uma sombra de 1px que faz o
+ * desgaste do topo (era um retângulo cinza indistinto do fundo).
+ */
 .shortcut-row kbd {
   display: block;
-  padding: 3px var(--s-space-2);
-  border: 1px solid var(--s-border);
-  border-radius: var(--s-radius);
-  background: var(--s-hover);
+  padding: 3px 7px;
+  border: 1px solid var(--s-border-strong);
+  border-radius: var(--s-radius-sm);
+  background: var(--s-surface-raised);
+  box-shadow: 0 1px 0 var(--s-border-strong);
   color: var(--s-fg);
   font-family: var(--s-font-mono);
   font-size: var(--s-fs-xs);
   text-align: center;
+  min-width: 7.5rem;
 }
 
 .shortcut-row span {
@@ -671,7 +721,7 @@ textarea {
 
 .welcome-hint {
   margin: 0;
-  font-size: var(--s-fs-sm);
+  font-size: var(--s-fs-md);
   color: var(--s-subtle);
 }
 
@@ -706,30 +756,30 @@ textarea {
   z-index: var(--z-findbar);
   display: flex;
   flex-direction: column;
-  gap: 6px;
+  gap: var(--s-space-2);
   padding: var(--s-space-2);
-  border: 1px solid var(--s-border);
+  border: 1px solid var(--s-border-strong);
   border-radius: var(--s-radius-lg);
-  background: var(--s-sidebar);
+  background: var(--s-surface-raised);
   box-shadow: var(--s-shadow);
 }
 
 .find-row {
   display: flex;
   align-items: center;
-  gap: 6px;
+  gap: var(--s-space-2);
 }
 
 #find-bar input {
   flex: 1;
   min-width: 9rem;
-  padding: 5px var(--s-space-2);
-  border: 1px solid var(--s-border);
+  padding: var(--s-space-1) var(--s-space-2);
+  border: 1px solid var(--s-border-strong);
   border-radius: var(--s-radius);
   background: var(--s-bg);
   color: var(--s-fg);
   font: inherit;
-  font-size: var(--s-fs-sm);
+  font-size: var(--s-fs-md);
 }
 
 #find-bar input::placeholder {
@@ -755,7 +805,7 @@ textarea {
   background: var(--s-hover);
   color: var(--s-fg);
   font: inherit;
-  font-size: var(--s-fs-sm);
+  font-size: var(--s-fs-md);
   cursor: pointer;
   transition: background var(--s-dur) var(--s-ease);
 }
@@ -764,17 +814,26 @@ textarea {
   background: var(--s-pressed);
 }
 
+/*
+ * O "×" (fechar) **não** é um botão comum: `#find-bar button` (1,0,1) herdava fundo/borda,
+ * então o "×" parecia um botão de ação. Este seletor (2,0,0) vence e devolve o "×" ao estado
+ * de ícone (fundo/borda transparentes).
+ */
+#find-bar #find-close {
+  background: transparent;
+  border-color: transparent;
+}
+
 #find-close {
   display: grid;
   flex: none;
   place-items: center;
   padding: 4px;
-  border-color: transparent;
-  background: transparent;
   color: var(--s-muted);
 }
 
-#find-close:hover {
+/* O hover precisa ser mais específico que o `#find-bar #find-close` (2,0,0) acima. */
+#find-bar #find-close:hover {
   background: var(--s-hover);
   color: var(--s-fg);
 }
@@ -788,35 +847,35 @@ textarea {
 
 .find-toggle {
   min-width: 24px;
-  padding: 3px var(--s-space-1) !important;
-  border-color: transparent !important;
-  background: transparent !important;
-  color: var(--s-subtle) !important;
-  font-family: var(--s-font-mono);
-  font-size: var(--s-fs-xs) !important;
   line-height: 1.5;
   text-align: center;
 }
 
 /*
- * O `font: inherit` de `#find-bar button` (especificidade 1,0,1) vence o `font-family`
- * de `.find-toggle` (0,1,0) — os toggles `Aa .* \b` perdiam a fonte monoespaçada.
- * Este seletor (1,1,1) vence o `#find-bar button` e restaura o mono (e o line-height).
+ * O `font: inherit` de `#find-bar button` (1,0,1) vence o `font-family` de `.find-toggle`
+ * (0,1,0) — os toggles `Aa .* \b` perdiam a fonte monoespaçada. Este seletor (1,1,1) vence o
+ * `#find-bar button` e restaura o mono (e o line-height) **sem `!important`**: como ele é mais
+ * específico que o `#find-bar button`, também carrega o fundo/borda transparentes do toggle.
  */
 #find-bar button.find-toggle {
+  padding: 3px var(--s-space-1);
+  border-color: transparent;
+  background: transparent;
+  color: var(--s-subtle);
   font-family: var(--s-font-mono);
+  font-size: var(--s-fs-xs);
   line-height: 1.5;
 }
 
-.find-toggle:hover {
-  background: var(--s-hover) !important;
-  color: var(--s-fg) !important;
+#find-bar button.find-toggle:hover {
+  background: var(--s-hover);
+  color: var(--s-fg);
 }
 
-.find-toggle.active {
-  background: var(--s-selected) !important;
-  border-color: var(--s-accent) !important;
-  color: var(--s-fg) !important;
+#find-bar button.find-toggle.active {
+  background: var(--s-selected);
+  border-color: var(--s-accent);
+  color: var(--s-fg);
 }
 
 /* ══ Barra e painel de depuração (posição) ═══════════════════════════════ */
@@ -856,9 +915,9 @@ textarea {
   z-index: var(--z-modal);
   width: min(560px, calc(100% - 2 * var(--s-space-4)));
   transform: translateX(-50%);
-  border: 1px solid var(--s-border);
+  border: 1px solid var(--s-border-strong);
   border-radius: var(--s-radius-lg);
-  background: var(--s-sidebar);
+  background: var(--s-surface-raised);
   box-shadow: var(--s-shadow);
   overflow: hidden;
 }
@@ -886,18 +945,30 @@ textarea {
 }
 
 .palette-item {
+  position: relative;
   display: flex;
   align-items: center;
   gap: var(--s-space-2);
-  padding: 6px var(--s-space-2);
+  padding: var(--s-space-2) var(--s-space-2);
   border-radius: var(--s-radius);
-  font-size: var(--s-fs-sm);
+  font-size: var(--s-fs-md);
   cursor: pointer;
 }
 
 .palette-item:hover,
 .palette-item.selected {
   background: var(--s-selected);
+}
+
+/* Barra de acento do item selecionado (2px) — marcador elegante de seleção. */
+.palette-item.selected::before {
+  content: "";
+  position: absolute;
+  left: 0;
+  top: 0;
+  bottom: 0;
+  width: 2px;
+  background: var(--s-accent);
 }
 
 .palette-item .cmd-label {
@@ -909,12 +980,14 @@ textarea {
   color: var(--s-fg);
 }
 
+/* Badge de categoria: "chip" em acento — 16% de acento sobre a superfície + o texto no acento. */
 .palette-item .cmd-category {
   flex: none;
   order: 2;
-  padding: 1px 5px;
+  padding: 1px 6px;
+  border: 1px solid transparent;
   border-radius: var(--s-radius-sm);
-  background: var(--s-hover);
+  background: color-mix(in srgb, var(--s-accent) 16%, transparent);
   color: var(--s-accent);
   font-size: var(--s-fs-xs);
   text-transform: uppercase;
@@ -954,12 +1027,13 @@ textarea {
 }
 
 .completion-item {
+  position: relative;
   display: flex;
   align-items: center;
   gap: var(--s-space-2);
-  padding: 5px var(--s-space-2);
+  padding: var(--s-space-1) var(--s-space-2);
   border-radius: var(--s-radius);
-  font-size: var(--s-fs-sm);
+  font-size: var(--s-fs-md);
   cursor: pointer;
   user-select: none;
 }
@@ -967,6 +1041,17 @@ textarea {
 .completion-item:hover,
 .completion-item.selected {
   background: var(--s-selected);
+}
+
+/* Barra de acento do item selecionado (2px) — marcador elegante de seleção. */
+.completion-item.selected::before {
+  content: "";
+  position: absolute;
+  left: 0;
+  top: 0;
+  bottom: 0;
+  width: 2px;
+  background: var(--s-accent);
 }
 
 .completion-icon {
@@ -987,7 +1072,7 @@ textarea {
   white-space: nowrap;
   color: var(--s-fg);
   font-family: var(--s-font-mono);
-  font-size: var(--s-fs-sm);
+  font-size: var(--s-fs-md);
 }
 
 .completion-detail {
@@ -1006,9 +1091,10 @@ textarea {
   flex: none;
   order: 2;
   margin-left: var(--s-space-1);
-  padding: 1px 5px;
+  padding: 1px 6px;
+  border: 1px solid transparent;
   border-radius: var(--s-radius-sm);
-  background: var(--s-hover);
+  background: color-mix(in srgb, var(--s-accent) 16%, transparent);
   color: var(--s-accent);
   font-size: var(--s-fs-xs);
   text-transform: uppercase;
@@ -1025,31 +1111,14 @@ textarea {
   max-width: 400px;
   max-height: 300px;
   padding: var(--s-space-2) var(--s-space-3);
-  border: 1px solid var(--s-border);
+  border: 1px solid var(--s-border-strong);
   border-radius: var(--s-radius);
-  background: var(--s-sidebar);
+  background: var(--s-surface-raised);
   box-shadow: var(--s-shadow);
   overflow-y: auto;
-  font-size: var(--s-fs-sm);
+  font-size: var(--s-fs-md);
   line-height: 1.5;
   color: var(--s-fg);
-}
-
-/* Minimap Hover Preview — tooltip com código real ao passar mouse no minimap */
-.minimap-hover-tooltip {
-  position: fixed;
-  z-index: var(--z-tooltip);
-  background: var(--s-bg);
-  border: 1px solid var(--s-border);
-  border-radius: 6px;
-  box-shadow: var(--s-shadow);
-  padding: 6px 10px;
-  line-height: 1.5;
-  white-space: pre;
-  pointer-events: none;
-  max-height: 320px;
-  overflow: hidden;
-  min-width: 100px;
 }
 
 .hover-body {
@@ -1090,23 +1159,23 @@ textarea {
   min-width: 240px;
   max-width: 480px;
   max-height: 300px;
-  border: 1px solid var(--s-border);
+  border: 1px solid var(--s-border-strong);
   border-radius: var(--s-radius-lg);
-  background: var(--s-sidebar);
+  background: var(--s-surface-raised);
   box-shadow: var(--s-shadow);
   overflow-y: auto;
   padding: var(--s-space-2) var(--s-space-3);
   display: flex;
   flex-direction: column;
   gap: var(--s-space-1);
-  font-size: var(--s-fs-sm);
+  font-size: var(--s-fs-md);
   line-height: 1.4;
   color: var(--s-fg);
 }
 
 .signature-label {
   font-family: var(--s-font-mono);
-  font-size: var(--s-fs-sm);
+  font-size: var(--s-fs-md);
   color: var(--s-fg);
   white-space: pre-wrap;
   word-break: break-all;
@@ -1135,7 +1204,7 @@ textarea {
 
 .signature-param {
   font-family: var(--s-font-mono);
-  font-size: var(--s-fs-sm);
+  font-size: var(--s-fs-md);
   color: var(--s-muted);
 }
 
@@ -1146,7 +1215,7 @@ textarea {
 
 .signature-param-sep {
   color: var(--s-muted);
-  font-size: var(--s-fs-sm);
+  font-size: var(--s-fs-md);
   margin: 0 1px;
 }
 
@@ -1166,9 +1235,9 @@ textarea {
   min-width: 300px;
   max-width: 480px;
   max-height: 360px;
-  border: 1px solid var(--s-border);
+  border: 1px solid var(--s-border-strong);
   border-radius: var(--s-radius-lg);
-  background: var(--s-sidebar);
+  background: var(--s-surface-raised);
   box-shadow: var(--s-shadow);
   display: flex;
   flex-direction: column;
@@ -1187,7 +1256,7 @@ textarea {
   background: transparent;
   color: var(--s-fg);
   font-family: var(--s-font-ui);
-  font-size: var(--s-fs-sm);
+  font-size: var(--s-fs-md);
   outline: none;
   box-sizing: border-box;
 }
@@ -1203,12 +1272,13 @@ textarea {
 }
 
 .symbols-item {
+  position: relative;
   display: flex;
   align-items: center;
   gap: var(--s-space-2);
-  padding: 5px var(--s-space-2);
+  padding: var(--s-space-1) var(--s-space-2);
   border-radius: var(--s-radius);
-  font-size: var(--s-fs-sm);
+  font-size: var(--s-fs-md);
   cursor: pointer;
   user-select: none;
 }
@@ -1216,6 +1286,17 @@ textarea {
 .symbols-item:hover,
 .symbols-item.selected {
   background: var(--s-selected);
+}
+
+/* Barra de acento do item selecionado (2px) — marcador elegante de seleção. */
+.symbols-item.selected::before {
+  content: "";
+  position: absolute;
+  left: 0;
+  top: 0;
+  bottom: 0;
+  width: 2px;
+  background: var(--s-accent);
 }
 
 .symbols-icon {
@@ -1235,16 +1316,17 @@ textarea {
   text-overflow: ellipsis;
   white-space: nowrap;
   font-family: var(--s-font-mono);
-  font-size: var(--s-fs-sm);
+  font-size: var(--s-fs-md);
   color: var(--s-fg);
 }
 
 .symbols-kind {
   flex: none;
-  padding: 1px 5px;
+  padding: 1px 6px;
+  border: 1px solid transparent;
   border-radius: var(--s-radius-sm);
-  background: var(--s-hover);
-  color: var(--s-muted);
+  background: color-mix(in srgb, var(--s-accent) 16%, transparent);
+  color: var(--s-accent);
   font-size: var(--s-fs-xs);
   text-transform: uppercase;
   letter-spacing: 0.04em;
@@ -1255,7 +1337,7 @@ textarea {
   padding: var(--s-space-3);
   text-align: center;
   color: var(--s-muted);
-  font-size: var(--s-fs-sm);
+  font-size: var(--s-fs-md);
 }
 
 /* ══ Status bar ════════════════════════════════════════════════════════════ */
@@ -1312,7 +1394,13 @@ textarea {
 }
 
 .status-item.disabled {
-  opacity: 0.35;
+  /*
+   * Antes: `opacity: .35` ⇒ 1,47:1 de contraste (invisível no tema claro). Agora o estado
+   * desabilitado é **legível** (a cor `--s-disabled` faz o trabalho) — WCAG isenta componentes
+   * inativos do contraste mínimo, mas "invisível" não é um estado, é um bug.
+   */
+  opacity: 1;
+  color: var(--s-disabled);
 }
 
 .status-item.disabled.clickable {
@@ -1330,23 +1418,124 @@ textarea {
   margin-left: var(--s-space-2);
 }
 
+/* ══ Superfícies flutuantes de runtime ═══════════════════════════════════ */
+
+/*
+ * Os overlays criados em **RUNTIME** (painel/barra de depuração, popup de referências, popup
+ * de escolha de snippet) nascem com `style.cssText` — o estilo **inline** vence qualquer regra
+ * de autor. Para trazê-los para o design system (superfície elevada + borda forte) sem mexer
+ * no TS, o CSS precisa de `!important` — é o único lugar do arquivo em que ele é necessário
+ * para **sobrepor estilo inline** (os outros dois são a regra global `[hidden]` e o
+ * `prefers-reduced-motion`).
+ */
+#debug-toolbar,
+#debug-panel,
+#references-popup,
+#snippet-choice-popup {
+  background: var(--s-surface-raised) !important;
+  border-color: var(--s-border-strong) !important;
+}
+
+/* Item do popup de referências: a barra de acento marca o item selecionado. */
+.ref-item {
+  position: relative;
+}
+
+.ref-item.selected::before {
+  content: "";
+  position: absolute;
+  left: 0;
+  top: 0;
+  bottom: 0;
+  width: 2px;
+  background: var(--s-accent);
+}
+
+/* ══ Lupa de código (code loupe) ══════════════════════════════════════════ */
+
+/*
+ * A lupa é um overlay flutuante como qualquer outro: superfície elevada, borda forte, raio da
+ * casca e a **escala de z-index** (`--z-tooltip`) — antes ela usava um `z-index` numérico
+ * solto (10001), fora da escala do design system, e uma sombra/radius próprios.
+ */
+.code-loupe {
+  position: fixed;
+  z-index: var(--z-tooltip);
+  width: min(320px, 40vw);
+  overflow: hidden;
+  border: 1px solid var(--s-border-strong);
+  border-radius: var(--s-radius-lg);
+  background: var(--s-surface-raised);
+  box-shadow: var(--s-shadow);
+  color: var(--s-fg);
+  pointer-events: none;
+  transition: opacity var(--s-dur) var(--s-ease);
+}
+
+/* Fade-out: a classe é o gatilho (o `opacity` inline esconderia este estado). */
+.code-loupe.is-hiding {
+  opacity: 0;
+}
+
+.code-loupe-lines {
+  will-change: transform;
+}
+
+.code-loupe-line {
+  position: relative;
+  padding: 0 10px;
+  white-space: pre;
+}
+
+.code-loupe-line.is-hover {
+  background: var(--s-hover);
+}
+
+.code-loupe-caret {
+  position: absolute;
+  left: 0;
+  top: 0;
+  width: 3px;
+  border-radius: 1px;
+  background: var(--s-accent);
+}
+
 /* ══ Foco e acessibilidade ════════════════════════════════════════════════ */
 
 :focus {
   outline: none;
 }
 
+/*
+ * **Anel de foco** (WCAG 2.4.11 — "Focus Not Obscured" / 2.4.7 — "Focus Visible").
+ *
+ * Antes: `1px` **inside** (`outline-offset: -1px`) — o anel sumia dentro do controle e se
+ * confundia com o hover (1,0,1 vs 1px de borda). Agora: 2px **fora**, na cor do acento, para
+ * todo controle focável (button, input, select, textarea, [tabindex]).
+ */
 :focus-visible {
-  outline: 1px solid var(--s-ring);
-  outline-offset: -1px;
+  outline: 2px solid var(--s-ring);
+  outline-offset: 2px;
 }
 
 #editor-surface:focus-visible {
   outline: none;
 }
 
+/*
+ * O input da paleta fica colado na borda do modal: o anel **externo** sairia da janela, então
+ * ele é desenhado **para dentro** (o foco continua visível — requisito de acessibilidade).
+ */
 #palette-input:focus-visible {
+  outline: 2px solid var(--s-ring);
+  outline-offset: -2px;
   border-bottom-color: var(--s-accent);
+}
+
+/* Mesmo caso do input de símbolos (o popup tem `overflow: hidden` ⇒ o anel externo é cortado). */
+.symbols-input:focus-visible {
+  outline: 2px solid var(--s-ring);
+  outline-offset: -2px;
 }
 
 /* ══ Scrollbars ═══════════════════════════════════════════════════════════ */

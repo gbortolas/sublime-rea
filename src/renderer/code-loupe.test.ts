@@ -1,7 +1,7 @@
 /**
  * Scribe — testes da geometria da lupa (`src/renderer/code-loupe.ts`).
  *
- * A lupa é a "coluna de código" ampliada: o preview **magnificado** (fonte × 2.5) e **colorido**
+ * A lupa é a "coluna de código" ampliada: o preview **magnificado** (fonte × 1.8) e **colorido**
  * que segue o mouse sobre o minimap. Aqui travamos as invariantes puras (sem DOM):
  * - a janela de linhas é **centrada** na linha sob o mouse e **recortada** no documento;
  * - o painel fica **à esquerda** do minimap (nunca sobre ele) e dentro da janela;
@@ -15,6 +15,7 @@ import type { HighlightSpan, ScopeStyle, ThemeResolver } from "../shared";
 import {
   LOUPE_LINE_COUNT,
   LOUPE_MIN_WIDTH_PX,
+  LOUPE_WIDTH_PX,
   LOUPE_ZOOM,
   computeLoupeContentOffset,
   computeLoupePanelSize,
@@ -70,11 +71,11 @@ describe("computeLoupeWindow — janela de linhas do preview", () => {
 });
 
 describe("computeLoupePanelSize — zoom e tamanho do painel", () => {
-  it("multiplica a fonte do editor pelo zoom (2.5×)", () => {
+  it("multiplica a fonte do editor pelo zoom (1.8×)", () => {
     const size = computeLoupePanelSize({ fontSize: 15, lines: 14 });
     expect(size.fontSize).toBe(Math.round(15 * LOUPE_ZOOM));
-    expect(size.fontSize).toBe(38);
-    expect(LOUPE_ZOOM).toBe(2.5);
+    expect(size.fontSize).toBe(27);
+    expect(LOUPE_ZOOM).toBe(1.8);
   });
 
   it("a altura acompanha a quantidade de linhas", () => {
@@ -85,12 +86,13 @@ describe("computeLoupePanelSize — zoom e tamanho do painel", () => {
   it("a largura nunca passa do espaço disponível à esquerda do minimap", () => {
     const size = computeLoupePanelSize({ fontSize: 15, lines: 14, availableWidth: 200 });
     expect(size.width).toBe(200);
-    expect(size.width).toBeLessThan(360);
+    expect(size.width).toBeLessThan(LOUPE_WIDTH_PX);
   });
 
-  it("sem limite de espaço ⇒ largura padrão (360px)", () => {
+  it("sem limite de espaço ⇒ largura padrão (320px)", () => {
     const size = computeLoupePanelSize({ fontSize: 15, lines: 14 });
-    expect(size.width).toBe(360);
+    expect(size.width).toBe(320);
+    expect(size.width).toBe(LOUPE_WIDTH_PX);
   });
 });
 

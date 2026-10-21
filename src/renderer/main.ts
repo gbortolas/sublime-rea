@@ -69,6 +69,7 @@ import type {
   Viewport,
 } from "../shared";
 import {
+  FindBarError,
   FindBarModel,
   createDebounceScheduler,
 } from "./find-bar";
@@ -325,6 +326,82 @@ function applyChromeTheme(theme: EditorTheme): void {
   for (const [name, value] of vars) root.style.setProperty(name, value);
   root.dataset.theme = theme.kind;
   root.style.colorScheme = theme.kind;
+}
+
+/** Cores **semânticas** do tema (erro/warn/info) já resolvidas para valores concretos. */
+interface SemanticColors {
+  readonly error: string;
+  readonly warning: string;
+  readonly info: string;
+}
+
+/**
+ * Fallback das cores semânticas por tema — mesmos valores dos tokens `--s-*` do `index.css`
+ * (usados só se a folha de estilo ainda não tiver definido o token).
+ */
+const SEMANTIC_FALLBACK: Readonly<Record<"dark" | "light", SemanticColors>> = {
+  dark: { error: "#e06c75", warning: "#e0a44a", info: "#61afef" },
+  light: { error: "#c33", warning: "#a86a00", info: "#005fb8" },
+};
+
+let semanticCache: { readonly kind: string; readonly colors: SemanticColors } | undefined;
+
+/**
+ * Resolve uma cor CSS (qualquer expressão: hex, `rgb()`, `color-mix()`…) para `rgba(r,g,b,a)`.
+ *
+ * O canvas não entende custom property nem `color-mix()` — então a cor é pintada num canvas de
+ * 1×1 e lida de volta. Expressão inválida (ou token ausente) ⇒ devolve o *fallback*, nunca uma
+ * string que o canvas não entenda (o `fillStyle` ignoraria e o marcador ficaria com a cor
+ * anterior).
+ */
+function resolveCssColor(value: string, fallback: string): string {
+  const text = value.trim();
+  if (text.length === 0 || typeof document === "undefined") return fallback;
+  const probe = document.createElement("canvas");
+  probe.width = 1;
+  probe.height = 1;
+  const ctx = probe.getContext("2d");
+  if (ctx === null) return fallback;
+  ctx.fillStyle = "#010203"; // sentinela: valor inválido mantém o anterior
+  ctx.fillStyle = text;
+  if (ctx.fillStyle === "#010203") return fallback;
+  ctx.clearRect(0, 0, 1, 1);
+  ctx.fillRect(0, 0, 1, 1);
+  const data = ctx.getImageData(0, 0, 1, 1).data;
+  const r = data[0] ?? 0;
+  const g = data[1] ?? 0;
+  const b = data[2] ?? 0;
+  const a = data[3] ?? 255;
+  return `rgba(${r}, ${g}, ${b}, ${a / 255})`;
+}
+
+/** Lê uma custom property do `:root` e a resolve para uma cor de canvas. */
+function cssColorVar(name: string, fallback: string): string {
+  if (typeof getComputedStyle !== "function") return fallback;
+  const value = getComputedStyle(document.documentElement).getPropertyValue(name);
+  return resolveCssColor(value, fallback);
+}
+
+/**
+ * Paleta semântica do tema ativo (`--s-error`/`--s-warn`/`--s-info`), com cache por tema.
+ *
+ * O token semântico vive no CSS (fonte única de verdade), mas o minimap pinta no **canvas** e o
+ * `fillStyle` **não** resolve custom properties CSS — então a custom property é lida do DOM
+ * (`getComputedStyle`) e o hex fica só como *fallback*.
+ */
+function semanticColors(): SemanticColors {
+  const attr = document.documentElement.dataset.theme;
+  const kind: "dark" | "light" =
+    attr === "light" || attr === "dark" ? attr : THEME.current.kind;
+  if (semanticCache?.kind === kind) return semanticCache.colors;
+  const fallback = SEMANTIC_FALLBACK[kind];
+  const colors: SemanticColors = {
+    error: cssColorVar("--s-error", fallback.error),
+    warning: cssColorVar("--s-warn", fallback.warning),
+    info: cssColorVar("--s-info", fallback.info),
+  };
+  semanticCache = { kind, colors };
+  return colors;
 }
 
 // ---- rasterização/medição no renderer (fora da main thread seria o ideal — DEC-REN-3) ----------
@@ -3368,11 +3445,16 @@ class ScribeRenderer {
 
     const lineHeight = this.lineHeight();
     const scrollPx = this.viewport.scrollOffsetPx();
-    const firstLine = Math.floor(scrollPx / lineHeight);
-    const visibleLines = Math.ceil(this.viewportHeight / lineHeight) + 1;
-    const lastLine = firstLine + visibleLines;
+    // A rolagem é contada em **rows visuais**; o diagnóstico traz **linhas lógicas**.
+    // Converter nos dois sentidos evita o filtro "misturar unidades" (descartava
+    // diagnósticos visíveis e/ou desenhava fora da faixa).
+    const firstRow = Math.floor(scrollPx / lineHeight);
+    const visibleRows = Math.ceil(this.viewportHeight / lineHeight) + 1;
+    const lastRow = firstRow + visibleRows;
+    const firstLine = this.visualRows?.lineOfRow(firstRow) ?? firstRow;
+    const lastLine = this.visualRows?.lineOfRow(lastRow) ?? lastRow;
 
-    // Filtra diagnósticos visíveis
+    // Filtra diagnósticos visíveis (em **linhas lógicas**)
     const visible = diags.filter(
       (d) => d.range.startLine <= lastLine && d.range.endLine >= firstLine,
     );
@@ -3393,12 +3475,15 @@ class ScribeRenderer {
       const color = this.diagColor(diag.severity);
       // Row **visual** do diagnóstico: com soft wrap, a linha lógica ocupa N rows e o
       // squiggly tem de ficar na row do segmento que contém o offset.
-      const row =
-        this.visualRows?.locate(diag.range.startLine, diag.range.startCol)?.row ??
-        diag.range.startLine;
+      const loc = this.visualRows?.locate(diag.range.startLine, diag.range.startCol);
+      const row = loc?.row ?? diag.range.startLine;
       const startY = row * lineHeight + lineHeight - 2 - scrollPx;
-      const startX = paddingLeft + diag.range.startCol * charW;
-      const endX = paddingLeft + diag.range.endCol * charW;
+      // A coluna do diagnóstico é relativa à **linha lógica**; com wrap, o X tem de ser
+      // medido **dentro do segmento** (cada segmento começa na margem esquerda).
+      const startCol = loc?.column ?? diag.range.startCol;
+      const endCol = loc !== undefined ? loc.column + Math.max(0, diag.range.endCol - diag.range.startCol) : diag.range.endCol;
+      const startX = paddingLeft + startCol * charW;
+      const endX = paddingLeft + endCol * charW;
       const width = Math.max(4, endX - startX);
 
       ctx.strokeStyle = color;
@@ -3554,12 +3639,24 @@ function focusEditorSurface(): void {
   if (el instanceof HTMLElement) el.focus();
 }
 
+/**
+ * Sincroniza um botão-toggle: classe `.active` (visual) **e** `aria-pressed` (estado
+ * acessível). Sem o `aria-pressed`, um toggle é anunciado pela leitora de tela só como
+ * "botão" — o usuário não sabe se o modo está ligado.
+ */
+function syncToggleButton(button: HTMLElement | null, active: boolean): void {
+  if (button === null) return;
+  button.classList.toggle("active", active);
+  button.setAttribute("aria-pressed", String(active));
+}
+
 function updateCaretStatus(source: DocumentLineSource, offset: number): void {
   const status = document.getElementById("status-caret");
   const position = source.positionAt(offset);
+  // A posição aparece **uma** vez na UI: só na status bar (`#status-caret`). O breadcrumb
+  // `#bc-position` foi removido do HTML (redundância "Ln 1, Col 1" em dois lugares) — não
+  // voltamos a escrever nele.
   if (status) status.textContent = `${position.line + 1}:${position.column + 1}`;
-  const breadcrumb = document.getElementById("bc-position");
-  if (breadcrumb) breadcrumb.textContent = `Ln ${position.line + 1}, Col ${position.column + 1}`;
 }
 
 function updateBlame(session: DocumentSession | undefined, bridge: ScribeBridge | undefined, line: number): void {
@@ -4384,6 +4481,10 @@ export async function bootRenderer(): Promise<boolean> {
       case "find.open":
         if (findBar !== undefined && !findBar.model.isOpen) {
           findBar.model.open();
+          // O atalho do **menu nativo** chega aqui (o accelerator do menu precede o
+          // renderer) ⇒ a busca abria **sem foco** e digitar não ia para o campo.
+          const findInput = document.getElementById("find-input");
+          if (findInput instanceof HTMLInputElement) findInput.focus();
         }
         break;
       case "find.next":
@@ -4590,6 +4691,9 @@ export async function bootRenderer(): Promise<boolean> {
     getViewportHeight: () => renderer.viewportHeight,
     colors: () => {
       const c = THEME.current.colors;
+      // Cores semânticas vêm dos tokens do tema (`--s-error`/`--s-warn`/`--s-info`) — o hex
+      // fixo ficava igual nos dois temas (erro/warn/info não seguiam a paleta).
+      const semantic = semanticColors();
       return {
         background: rgbToCss(c.background),
         line: rgbToCss(c.foreground),
@@ -4597,9 +4701,9 @@ export async function bootRenderer(): Promise<boolean> {
         viewportBorder: rgbaToCss(c.foreground, 0.25),
         searchMatch: rgbaToCss(c.foreground, 0.35),
         searchCurrent: rgbaToCss(0xffcc00ff, 0.8),
-        diagnosticError: "#e06c75",
-        diagnosticWarning: "#d19a66",
-        diagnosticInfo: "#61afef",
+        diagnosticError: semantic.error,
+        diagnosticWarning: semantic.warning,
+        diagnosticInfo: semantic.info,
       };
     },
     // NOVOS CAMPOS (P3.x): realce de sintaxe, busca e diagnóstico no minimap
@@ -4667,8 +4771,11 @@ export async function bootRenderer(): Promise<boolean> {
   explorerBtn?.addEventListener("click", () => setSidebarVisible(sidebar?.hidden ?? true));
 
   document.getElementById("activity-search")?.addEventListener("click", () => {
+    // ⚠️ A busca precisa **focar o input** (o botão focava o canvas ⇒ digitar inseria no
+    // documento em vez do campo de busca).
     findBar?.model.open();
-    surface.focus();
+    const findInput = document.getElementById("find-input");
+    if (findInput instanceof HTMLInputElement) findInput.focus();
   });
   document.getElementById("activity-palette")?.addEventListener("click", () => {
     // ⚠️ Pelo **mesmo** caminho do atalho `Ctrl+Shift+P`: a paleta abre **focando o input**
@@ -4779,14 +4886,23 @@ export function attachFindBar(deps: FindBarDeps): FindBarBinding | undefined {
     find: (query: SearchQuery): Promise<SearchDocumentResult> => {
       const handle = currentHandle();
       if (handle === undefined) {
-        return Promise.reject(new Error("Scribe: nenhum documento aberto para buscar"));
+        // A barra mostra só o texto curto ("Nenhum arquivo aberto"); a string interna fica
+        // no tooltip (`title`) e no console — nunca vaza para a tela.
+        return Promise.reject(
+          new FindBarError("Nenhum arquivo aberto", "Scribe: nenhum documento aberto para buscar"),
+        );
       }
       return find.call(deps.bridge, handle, query);
     },
     replaceAll: (query: SearchQuery, replacement: string): Promise<ReplaceAllResult> => {
       const handle = currentHandle();
       if (handle === undefined) {
-        return Promise.reject(new Error("Scribe: nenhum documento aberto para substituir"));
+        return Promise.reject(
+          new FindBarError(
+            "Nenhum arquivo aberto",
+            "Scribe: nenhum documento aberto para substituir",
+          ),
+        );
       }
       return replaceAll.call(deps.bridge, handle, query, replacement);
     },
@@ -4798,7 +4914,9 @@ export function attachFindBar(deps: FindBarDeps): FindBarBinding | undefined {
     // Fechar a find bar devolve o foco ao canvas (o input da barra took o foco).
     if (!state.open) focusEditorSurface();
     count.textContent = `${state.current}/${state.total}${state.truncated ? "+" : ""}`;
+    // A barra mostra o **texto curto** do status; o detalhe técnico fica no tooltip (`title`).
     status.textContent = state.status ?? "";
+    status.title = state.statusDetail ?? "";
     // Empurra os matches pro renderer pintar no canvas (P3.11).
     if (state.open && model.allMatches.length > 0) {
       deps.renderer.setSearchMatches({
@@ -4815,10 +4933,12 @@ export function attachFindBar(deps: FindBarDeps): FindBarBinding | undefined {
     }
     // Dispara um novo frame pra pintar os destaques.
     deps.renderer.start();
-    // Botões de toggle: estado ativo dos toggles de busca.
-    caseBtn?.classList.toggle("active", state.caseSensitive);
-    regexBtn?.classList.toggle("active", state.regex);
-    wordBtn?.classList.toggle("active", state.wholeWord);
+    // Botões de toggle: estado ativo dos toggles de busca. O `aria-pressed` é sincronizado
+    // junto com a classe `.active` — o atributo inicial vem do HTML, mas quem manda é o
+    // estado real (teclado, clique ou `Ctrl+Alt+C/R/W`).
+    syncToggleButton(caseBtn, state.caseSensitive);
+    syncToggleButton(regexBtn, state.regex);
+    syncToggleButton(wordBtn, state.wholeWord);
   };
 
   // Selecionar uma ocorrência move o caret (coluna do início) e rola até a linha dela.

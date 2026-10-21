@@ -26,10 +26,15 @@ import type { MinimapSource } from "./minimap";
 // Constantes da lupa
 // ---------------------------------------------------------------------------
 
-/** Multiplicador de zoom do preview (fonte do editor × 2.5). */
-export const LOUPE_ZOOM = 2.5;
-/** Largura alvo do painel da lupa (px). */
-export const LOUPE_WIDTH_PX = 360;
+/**
+ * Multiplicador de zoom do preview (fonte do editor × 1.8).
+ *
+ * Era 2.5 (fonte 15px ⇒ 38px): a lupa ficava enorme e o texto era cortado na borda. Com 1.8
+ * (15px ⇒ 27px) o preview continua legível e cabe na largura do painel.
+ */
+export const LOUPE_ZOOM = 1.8;
+/** Largura alvo do painel da lupa (px) — 320px cabem na janela sem estourar. */
+export const LOUPE_WIDTH_PX = 320;
 /** Largura mínima do painel (px) — abaixo disso não há espaço à esquerda do minimap. */
 export const LOUPE_MIN_WIDTH_PX = 160;
 /** Quantidade de linhas exibidas no preview. */
@@ -357,24 +362,20 @@ export function attachCodeLoupe(deps: CodeLoupeDeps): CodeLoupeBinding {
     return { panel: el, content: lines };
   };
 
+  /**
+   * Aplica ao painel só o que é **dinâmico** (posição e métricas do preview).
+   *
+   * Tudo o que é **design** (z-index, fundo, borda, raio, sombra, transição) vive na classe
+   * `.code-loupe` do `index.css` — antes o popup "vazava" do sistema com um `z-index` numérico
+   * solto (10001, fora da escala `--z-*`), sombra e raio próprios, e um `opacity` inline que
+   * anulava o estado de fade (`is-hiding`).
+   */
   const stylePanel = (el: HTMLElement, size: LoupePanelSize, panelHeight: number): void => {
-    el.style.position = "fixed";
-    el.style.zIndex = "10001";
-    el.style.pointerEvents = "none";
-    el.style.boxSizing = "border-box";
     el.style.width = `${size.width}px`;
     el.style.height = `${panelHeight}px`;
-    el.style.overflow = "hidden";
     el.style.fontFamily = deps.fontFamily;
     el.style.fontSize = `${size.fontSize}px`;
     el.style.lineHeight = `${size.lineHeight}px`;
-    el.style.background = "var(--s-bg, #1e1f22)";
-    el.style.color = "var(--s-fg, #d4d4d4)";
-    el.style.border = "1px solid var(--s-border, #2b2d30)";
-    el.style.borderRadius = "6px";
-    el.style.boxShadow = "0 6px 20px rgba(0, 0, 0, 0.45)";
-    el.style.transition = "opacity 120ms ease";
-    el.style.opacity = "1";
   };
 
   /** Desenha as linhas do preview (texto + cor por token). */
@@ -390,25 +391,15 @@ export function attachCodeLoupe(deps: CodeLoupeDeps): CodeLoupeBinding {
     for (let line = win.firstLine; line <= win.lastLine; line++) {
       const el = document.createElement("div");
       el.className = "code-loupe-line";
-      el.style.whiteSpace = "pre";
-      el.style.padding = "0 10px";
-      el.style.position = "relative"; // âncora do marcador do caret (não desloca o texto)
       if (line === hoverLine) {
         el.classList.add("is-hover");
-        el.style.background = "var(--s-hover, rgba(127, 127, 127, 0.16))";
       }
       if (caretLine !== undefined && line === caretLine) {
         el.classList.add("is-caret");
         const marker = document.createElement("span");
         marker.className = "code-loupe-caret";
-        // O marcador é **absoluto**: não empurra o texto (o código fica alinhado entre as linhas).
-        marker.style.position = "absolute";
-        marker.style.left = "0";
-        marker.style.top = "0";
-        marker.style.width = "3px";
+        // Só a ALTURA é dinâmica (a linha do preview); o resto do marcador é CSS.
         marker.style.height = `${lineHeight}px`;
-        marker.style.borderRadius = "1px";
-        marker.style.background = "var(--s-accent, #3794ff)";
         el.appendChild(marker);
       }
       const text = deps.source.line(line) ?? "";
@@ -439,7 +430,6 @@ export function attachCodeLoupe(deps: CodeLoupeDeps): CodeLoupeBinding {
       return;
     }
     el.classList.add("is-hiding");
-    el.style.opacity = "0";
     if (fadeTimer !== null) clearTimeout(fadeTimer);
     fadeTimer = setTimeout(() => {
       fadeTimer = null;

@@ -793,6 +793,17 @@ Problemas identificados ao testar o AppImage pela primeira vez:
       (`prefix`/`body`/`description`, precedência `user > app > os`, tetos) e expandem pelo mesmo
       pipeline dos embutidos; IPC `snippets.list` ✓ · **958 testes**.
 
+## 🐛 Auditoria de bugs (2026-10-21, tarde)
+
+- [x] **Auditoria com 5 agentes em paralelo** ✅ — 20+ achados (runtime via CDP), **16 corrigidos**:
+      o **caret** nunca era desenhado na posição real (crítico) · **RCE via `git diff`** (alto) ·
+      **save** falhando fora do mesmo fs (alto) · edição externa corrompendo o texto (alto) ·
+      scroll em linhas lógicas (alto) · aba ativa deixando o editor mudo (alto) · tema claro
+      ilegível (31 elementos abaixo de AA) · `git blame` quebrado + main bloqueando · FIFO travando
+      o IPC · popups se sobrepondo · minimap usando 13% da faixa · `window.open` remoto ·
+      hit-test off-by-5px · O(documento)/frame · mensagem de erro crua · `aria-pressed` ·
+      menu nativo sem `Ctrl+W`. **1039 testes / 79 arquivos** · E2E de usabilidade **TUDO OK**.
+
 ---
 
 ## 🏠 P3 — Housekeeping (2026-10-20, bootstrap)
