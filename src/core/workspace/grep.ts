@@ -17,8 +17,9 @@
  *   `RegExp` do shared e **a dobra de acentos fica desligada** (dobrar o *padrão* quebraria a
  *   semântica de `[á-ú]`/`\p{...}`, e dobrar o *texto* quebraria `\p{L}` com letras acentuadas);
  * - **padrão catastrófico**: no modo regex, um padrão com **quantificador aninhado**
- *   (`(a+)+`) ou **alternância ambígua** (`(a|aa)+`) é **recusado antes de varrer** (o
- *   `RegExp` do JS faz *backtracking* ⇒ a busca não terminaria e travaria o app inteiro);
+ *   (`(a+)+`) ou **alternância ambígua** (`(a|aa)+`, também **aninhada**: `((a|aa))+`) é
+ *   **recusado antes de varrer** (o `RegExp` do JS faz *backtracking* ⇒ a busca não
+ *   terminaria e o worker ficaria preso);
  * - **case** (`caseSensitive`, default `false` = ignora o case, como o find bar);
  * - **binários**: por padrão são **ignorados** (`includeBinary`, default `false`); com
  *   `includeBinary=true` o arquivo entra na varredura (o `readFile` é utf8 e preserva o NUL);
@@ -27,6 +28,10 @@
  *   binário (contém `\0`, salvo `includeBinary`) e diretório/ilegível (o `readFile` falha ⇒
  *   o arquivo é pulado e a busca continua);
  * - **tetos**: `maxMatches` (ocorrências) e `maxFiles` (arquivos) ⇒ `truncated: true`;
+ * - **orçamento de tempo** (`budgetMs`, default {@link GREP_DEFAULT_BUDGET_MS} = 20 s):
+ *   orçamento **soft** — a varredura para **entre arquivos** (nunca no meio de um `RegExp`,
+ *   que o motor do JS não interrompe) e o resultado sai **incompleto** (`truncated: true`)
+ *   com um aviso. `budgetMs <= 0` ⇒ **sem orçamento** (a busca nunca é cortada por tempo);
  * - **paralelo**: a leitura tem concorrência limitada (`concurrency`, default 8) e o
  *   `AbortSignal` cancela a operação no meio da leitura.
  *
@@ -35,7 +40,7 @@
  * `main` (o `workspaceIndex`): ele expande **cada** raiz e entrega a lista **plana** de
  * arquivos. Um caminho de arquivo **não** precisa estar sob uma raiz conhecida pelo núcleo.
  *
- * O módulo é **puro** (a I/O entra por `readFile`): o `main` injeta o `FileSystem` e o
+ * O módulo é **puro** (a I/O entra por `readFile`): quem chama injeta o port de leitura e o
  * renderer nunca chama isto direto (a travessia é o IPC).
  *
  * ⚠️ **Contrato do port de leitura** (ver {@link GrepReadFile}): o `readFile` recebe o
@@ -43,13 +48,32 @@
  * demais" com o código {@link GREP_FILE_TOO_LARGE}) — sem isso, o núcleo materializaria o
  * arquivo inteiro (2 GB!) antes de poder descartá-lo.
  *
- * ⚠️ **Residual conhecido (follow-up):** a varredura é **síncrona** no processo principal
- * (o `main` roda o `grepWorkspace` no event loop ⇒ a janela, o IPC e o LSP **esperam** o
- * scan terminar). O que esta rodada mitiga é o pior caso (padrão catastrófico ⇒ recusado;
- * arquivo grande ⇒ pulado antes de ser lido), mas o **budget de tempo** (o scan rodar numa
- * *worker* ou ser interrompido por um teto de tempo) ainda **não** existe.
+ * ✅ **Onde a varredura roda:** o `grep` é a task `grep` da lane `grep` do `TaskPool` ⇒ a
+ * varredura (CPU-bound) e a **leitura** acontecem **no worker** (o port de leitura sobre
+ * `node:fs` é `src/core/workspace/grep-fs.ts`) ⇒ o processo principal nunca materializa o
+ * conteúdo de um arquivo gigante e a janela/IPC/LSP **não esperam** o scan.
+ *
+ * 🛡️ **As duas redes de segurança** (nesta ordem):
+ * - **orçamento soft** ({@link GREP_DEFAULT_BUDGET_MS}): a varredura para **entre arquivos**
+ *   (nunca no meio de um `RegExp` — o motor do JS não é interrompível) e devolve o
+ *   resultado **parcial honesto** (`truncated: true` + aviso). Uma varredura que
+ *   **terminou** nunca é marcada como truncada (a checagem do orçamento vem **depois**
+ *   do guard de "não há mais candidatos");
+ * - **teto duro** (o `TaskPool` **mata** o worker que estoura o prazo da task `grep` —
+ *   `GREP_TASK_TIMEOUT_MS`, em `src/shared/grep-contract.ts`): é a rede final contra um
+ *   `RegExp` patológico que escapou do detector ⇒ no pior caso o **worker morre**, a lane
+ *   se recupera e o `main` continua responsivo.
+ *
+ * ⚠️ **Residual conhecido (conservador, mas o app não trava):** o detector de padrão
+ * catastrófico é **conservador** — padrões **muito aninhados** (perto do teto de
+ * profundidade) ou com **truques de sintaxe** podem **escapar** da detecção. O detector é
+ * a **primeira** linha (o padrão é recusado antes de varrer); o orçamento soft e o teto duro
+ * do pool são a **rede final** — o **app não trava** (o worker morre, o `main` fica
+ * responsivo).
  */
 import { CancellationError, SearchInputError, toError } from "../../shared";
+import { GREP_DEFAULT_BUDGET_MS } from "../../shared/grep-contract";
+import type { GrepMatch, GrepResult } from "../../shared/grep-contract";
 import {
   normalizeSearchQuery,
   scanText,
@@ -67,35 +91,14 @@ import {
 
 export { foldAccents } from "./grep-accents";
 
-/** Uma ocorrência encontrada num arquivo da workspace. */
-export interface GrepMatch {
-  /** Caminho do arquivo (o mesmo string que o chamador passou em `files`). */
-  readonly path: string;
-  /** Linha da ocorrência — **0-based** (mesma convenção de `scanText`). */
-  readonly line: number;
-  /** Coluna da ocorrência — **0-based**, em code units UTF-16. */
-  readonly column: number;
-  /** A **linha inteira** onde a ocorrência está (sem o terminador de linha). */
-  readonly text: string;
-}
-
-/** Resultado de uma varredura da workspace. */
-export interface GrepResult {
-  /** Ocorrências ordenadas por `(path, line, column)`. */
-  readonly matches: readonly GrepMatch[];
-  /** `true` = o resultado está **incompleto** (bateu no teto de matches/arquivos). */
-  readonly truncated: boolean;
-  /** Quantos arquivos foram **de fato varridos** (lidos e varridos — pulados não contam). */
-  readonly filesScanned: number;
-  /**
-   * Os **avisos** da busca (o que foi desligado/ajustado — **nunca** um crash).
-   *
-   * Ex.: no modo `regex` a dobra de acentos é desligada (a regex do usuário precisa casar
-   * com o texto **exatamente**) ⇒ o aviso diz isso explicitamente, em vez de descartar a
-   * opção em silêncio.
-   */
-  readonly warnings?: readonly string[];
-}
+/**
+ * ⚠️ Os tipos do grep **moram** em `src/shared/grep-contract.ts` (a fonte da verdade — o
+ * core e o contrato IPC **importam** de lá; nenhum dos dois espelha).
+ *
+ * Aqui eles são **re-exportados** para não quebrar quem já importa do core (o `renderer` e
+ * os testes importam `GrepMatch`/`GrepResult` de `core/workspace/grep`).
+ */
+export type { GrepMatch, GrepResult };
 
 /**
  * O port de leitura do `grep`.
@@ -183,6 +186,25 @@ export interface GrepOptions {
    * agora). Com `true`, o arquivo binário (contém NUL) entra na varredura como texto.
    */
   readonly includeBinary?: boolean;
+  /**
+   * Orçamento de tempo da varredura (**soft**, em ms).
+   *
+   * - default: {@link GREP_DEFAULT_BUDGET_MS} (20 s);
+   * - `budgetMs <= 0` ⇒ **sem orçamento** (a busca nunca é cortada por tempo);
+   * - a checagem acontece **entre arquivos** (nunca no meio de um `RegExp` — o motor do JS
+   *   não é interrompível): quando o orçamento estoura, o resultado sai **incompleto**
+   *   (`truncated: true`) **com um aviso**, preservando o que já foi encontrado;
+   * - uma varredura que **terminou** (todos os candidatos varridos) **nunca** é truncada:
+   *   a checagem vem **depois** do guard de "não há mais candidatos" (o relógio pode
+   *   estourar na **volta**, depois do último arquivo — o resultado está completo).
+   */
+  readonly budgetMs?: number;
+  /**
+   * Relógio injetável (default {@link Date.now}) — mede o orçamento de tempo.
+   *
+   * Só existe para o teste ser **determinístico** (o teste injeta um relógio que "anda").
+   */
+  readonly now?: () => number;
   /** Notificado quando um arquivo **não pôde ser lido** (o arquivo é pulado, a busca segue). */
   readonly onError?: (path: string, error: Error) => void;
 }
@@ -220,7 +242,27 @@ export const GREP_FILE_TOO_LARGE = "search.tooLarge";
 // ---------------------------------------------------------------------------------------------
 
 /** O que a análise do padrão encontrou (a mensagem do erro diz o quê). */
-export type CatastrophicPatternReason = "quantificador aninhado" | "alternância ambígua";
+export type CatastrophicPatternReason =
+  | "quantificador aninhado"
+  | "alternância ambígua"
+  | "aninhamento profundo";
+
+/**
+ * O teto de profundidade da análise recursiva (a ambiguidade dos grupos **aninhados**).
+ *
+ * O padrão do usuário é limitado a {@link SEARCH_MAX_PATTERN_LENGTH} (512 code units) ⇒ no
+ * máximo ~255 níveis de aninhamento ⇒ o teto de 256 cobre o **pior caso** (a análise
+ * nunca para no meio de um padrão real).
+ *
+ * ⚠️ 256 níveis de recursão **não** estouram a pilha (o Node aguenta ~10⁴ frames) — e o
+ * teste cobre 200+ níveis.
+ *
+ * ⚠️ **Falha fechada**: se **ainda** houver aninhamento quando a análise chega no teto, o
+ * padrão é **recusado** (não é seguro varrer o que o detector não entendeu) — melhor um
+ * erro claro do que um worker travado por um `RegExp` patológico. (Na prática é
+ * **inalcançável**: o teto de 512 code units do padrão impede 256+ níveis.)
+ */
+const MAX_CATASTROPHIC_DEPTH = 256;
 
 /** O quantificador que segue um átomo. */
 interface Quantifier {
@@ -356,7 +398,9 @@ function matchingOpenParen(source: string, closeIndex: number): number {
 
 /** `true` quando a alternativa pode casar **vazio** (ex.: "a*", "a{0,3}", ""). */
 function isNullableAlternative(source: string): boolean {
-  const trimmed = source.trim();
+  // ⚠️ O **prefixo de grupo** (`?:`, `?=`, …) é sintaxe, não conteúdo ⇒ ele não muda a
+  // nulabilidade ("(?:)" ⇒ a alternativa é vazia).
+  const trimmed = stripGroupPrefixes(source.trim());
   if (trimmed.length === 0) return true;
   const last = trimmed.charAt(trimmed.length - 1);
   if (last === "*" || last === "?") return true;
@@ -378,27 +422,164 @@ function isNullableAlternative(source: string): boolean {
   return false;
 }
 
+/**
+ * O fim do **prefixo de grupo** que começa em `index` (o `?`), ou −1 quando não há prefixo.
+ *
+ * Formas reconhecidas: `?:`, `?=`, `?!` (2 code units), `?<=`, `?<!` (3) e `?<nome>` (até
+ * o `>`). O prefixo é **sintaxe** — nunca conteúdo do grupo.
+ */
+function groupPrefixEnd(source: string, index: number): number {
+  if (source.charAt(index) !== "?") return -1;
+  const next = source.charAt(index + 1);
+  if (next === ":" || next === "=" || next === "!") return index + 2;
+  if (next === "<") {
+    const third = source.charAt(index + 2);
+    // Lookbehind (`(?<=`/`(?<!`): o prefixo tem 3 code units.
+    if (third === "=" || third === "!") return index + 3;
+    // Grupo **nomeado** (`(?<nome>`): o prefixo vai até o `>`.
+    const close = source.indexOf(">", index + 2);
+    return close >= 0 ? close + 1 : -1;
+  }
+  return -1;
+}
+
+/**
+ * Remove os **prefixos de grupo** (`?:`, `?=`, `?!`, `?<nome>`, `?<=`, `?<!`) de um texto.
+ *
+ * ⚠️ O prefixo é **sintaxe**, não conteúdo ⇒ ele **não pode** entrar na comparação das
+ * alternativas: sem esta normalização, o corpo do grupo `(?:a|aa)` produzia as
+ * alternativas "?:a" e "aa" ⇒ o `startsWith` não casava ⇒ o padrão `^((?:a|aa))+b$`
+ * (exponencial — o **mesmo** backtracking de `^((a|aa))+b$`) **escapava** da detecção.
+ *
+ * O prefixo só sai quando ele **é** prefixo: logo depois de um `(` ou no **começo** do
+ * texto (o prefixo do próprio grupo, órfão quando os parênteses do grupo são removidos).
+ * Um `?` que **não** é prefixo (o quantificador `a?`, o marcador *lazy* `*?`) é preservado.
+ */
+export function stripGroupPrefixes(source: string): string {
+  let out = "";
+  let i = 0;
+  while (i < source.length) {
+    const ch = source.charAt(i);
+    if (ch === "?") {
+      const end = groupPrefixEnd(source, i);
+      const previous = out.charAt(out.length - 1);
+      if (end >= 0 && (previous === "(" || out.length === 0)) {
+        i = end;
+        continue;
+      }
+    }
+    out += ch;
+    i += 1;
+  }
+  return out;
+}
+
 /** `true` quando uma alternativa é **prefixo** da outra (⇒ as duas casam a mesma string). */
 function alternativesOverlap(a: string, b: string): boolean {
-  const left = a.trim();
-  const right = b.trim();
+  // ⚠️ O **prefixo de grupo** é sintaxe ⇒ ele é removido dos **dois lados** antes da
+  // comparação (senão "(?:a|aa)" produzia "?:a" vs "aa" ⇒ nenhuma era prefixo da outra).
+  const left = stripGroupPrefixes(a.trim());
+  const right = stripGroupPrefixes(b.trim());
   if (left.length === 0 || right.length === 0) return false;
   if (left === right) return true;
   return left.startsWith(right) || right.startsWith(left);
 }
 
-/** `true` quando as alternativas de um grupo se sobrepõem (ou alguma casa vazio). */
-function hasAmbiguousAlternatives(body: string): boolean {
+/**
+ * O corpo do **último** grupo do texto — quando esse grupo é o **elemento final** do
+ * texto (só um quantificador pode vir depois dele).
+ *
+ * Só o grupo **final** interessa: a ambiguidade de um grupo no **meio** do corpo
+ * (`((a|ab)c)+`) **não** se multiplica na repetição externa (a repetição só multiplica
+ * a ambiguidade que está na **fronteira** do grupo repetido) ⇒ é o que separa
+ * `((a|aa))+` (catastrófico: "aa" casa de duas formas) de `((a|ab)c)+` (inofensivo:
+ * o "c" ancora o fim de cada repetição).
+ *
+ * O texto vem do **corpo achatado** do grupo pai (os parênteses do grupo aninhado são
+ * preservados) ⇒ os grupos aninhados são reencontrados varrendo o corpo (respeitando
+ * `\` e as classes `[...]`).
+ */
+function trailingGroupBody(text: string): string | undefined {
+  let i = 0;
+  let depth = 0;
+  let groupStart = -1;
+  let lastStart = -1;
+  let lastEnd = -1;
+  while (i < text.length) {
+    const ch = text.charAt(i);
+    if (ch === "\\") {
+      i += 2;
+      continue;
+    }
+    if (ch === "[") {
+      i = skipCharClass(text, i);
+      continue;
+    }
+    if (ch === "(") {
+      if (depth === 0) groupStart = i;
+      depth += 1;
+      i += 1;
+      continue;
+    }
+    if (ch === ")") {
+      depth -= 1;
+      if (depth === 0) {
+        lastStart = groupStart;
+        lastEnd = i + 1;
+      }
+      i += 1;
+      continue;
+    }
+    i += 1;
+  }
+  if (lastStart < 0) return undefined;
+  // Depois do último grupo só pode vir um quantificador (e nada mais).
+  if (lastEnd < text.length) {
+    const quant = readQuantifier(text, lastEnd);
+    if (quant.end === lastEnd || quant.end !== text.length) return undefined;
+  }
+  return text.slice(lastStart + 1, lastEnd - 1);
+}
+
+/**
+ * A ambiguidade das alternativas de um corpo de grupo.
+ *
+ * A ambiguidade **desce** para o grupo **aninhado** do fim do corpo: a repetição
+ * externa multiplica as formas de casar o mesmo texto ⇒ `((a|aa))+` é catastrófico
+ * (2^n) mesmo com o `|` **dentro** do grupo aninhado (o `|` de topo do corpo do grupo
+ * externo não existe — o corpo achatado é `(a|aa)`, uma alternativa só).
+ *
+ * A recursão tem **teto de profundidade** ({@link MAX_CATASTROPHIC_DEPTH}): um padrão
+ * muito aninhado **não** pode estourar a pilha — e, quando o aninhamento **sobra** no
+ * teto, a análise **falha fechada** (devolve o motivo ⇒ o padrão é recusado).
+ */
+function findAmbiguousAlternatives(
+  body: string,
+  depth: number = 0,
+): CatastrophicPatternReason | undefined {
   const alternatives = splitTopLevelAlternatives(body);
   for (const alternative of alternatives) {
-    if (isNullableAlternative(alternative)) return true;
+    if (isNullableAlternative(alternative)) return "alternância ambígua";
   }
   for (let i = 0; i < alternatives.length; i += 1) {
     for (let j = i + 1; j < alternatives.length; j += 1) {
-      if (alternativesOverlap(alternatives[i]!, alternatives[j]!)) return true;
+      if (alternativesOverlap(alternatives[i]!, alternatives[j]!)) return "alternância ambígua";
     }
   }
-  return false;
+  // O grupo **aninhado** do fim de cada alternativa: a ambiguidade dele sobe para o
+  // grupo externo (a repetição externa multiplica as duas formas de casar).
+  for (const alternative of alternatives) {
+    const nested = trailingGroupBody(alternative);
+    if (nested === undefined) continue;
+    if (depth >= MAX_CATASTROPHIC_DEPTH) {
+      // ⚠️ **Falha fechada**: sobrou aninhamento e a análise não pode descer mais ⇒ o
+      // padrão é recusado (não é seguro varrer o que o detector não entendeu).
+      return "aninhamento profundo";
+    }
+    const reason = findAmbiguousAlternatives(nested, depth + 1);
+    if (reason !== undefined) return reason;
+  }
+  return undefined;
 }
 
 /**
@@ -406,14 +587,18 @@ function hasAmbiguousAlternatives(body: string): boolean {
  *
  * O `RegExp` do JS é um motor de **backtracking**: um padrão como `(a+)+` (quantificador
  * aninhado) ou `(a|aa)+` (alternância ambígua) faz o motor explorar 2^n caminhos num texto
- * de n caracteres ⇒ a varredura **não termina** (e, como o `grep` roda no processo
- * principal, o app inteiro trava).
+ * de n caracteres ⇒ a varredura **não termina** (e, como o `grep` roda no **worker**, o
+ * worker fica preso — o `main` continua responsivo, mas a busca morre com ele).
  *
  * A detecção é **conservadora** (só recusa o que é claramente catastrófico):
  * - **quantificador aninhado**: um grupo quantificado sem limite (`*`, `+`, `{n,}`) cujo
  *   corpo tem outro quantificador sem limite;
  * - **alternância ambígua**: um grupo quantificado sem limite cujas alternativas se
- *   **sobrepõem** (uma é prefixo da outra) ou alguma delas pode casar **vazio**.
+ *   **sobrepõem** (uma é prefixo da outra) ou alguma delas pode casar **vazio** — a
+ *   ambiguidade é procurada também nos grupos **aninhados** (o `|` de `((a|aa))+` está
+ *   dentro do grupo aninhado, e não no topo do corpo do grupo externo);
+ * - **aninhamento profundo**: o padrão é mais aninhado do que a análise entende (teto de
+ *   profundidade) ⇒ **falha fechada** (é recusado, não varrido).
  */
 function findCatastrophicConstruct(source: string): CatastrophicPatternReason | undefined {
   const stack: RegexFrame[] = [];
@@ -465,8 +650,8 @@ function findCatastrophicConstruct(source: string): CatastrophicPatternReason | 
       }
       if (quant.unbounded) {
         if (reason === undefined && frame.hasUnbounded) reason = "quantificador aninhado";
-        if (reason === undefined && frame.hasAlternation && hasAmbiguousAlternatives(frame.body)) {
-          reason = "alternância ambígua";
+        if (reason === undefined && frame.hasAlternation) {
+          reason = findAmbiguousAlternatives(frame.body);
         }
       }
       i = quant.end;
@@ -633,7 +818,10 @@ async function readFileCancellable(
  * - a leitura é **paralela** (concorrência limitada) e **cancelável** (`signal`);
  * - arquivo grande/binário/ilegível é **pulado** (a busca continua);
  * - `truncated: true` quando o resultado está incompleto (bateu no teto de matches ou de
- *   arquivos);
+ *   arquivos, ou o **orçamento de tempo** estourou);
+ * - uma varredura que **terminou** (todos os candidatos varridos) **nunca** é marcada como
+ *   truncada — o orçamento é conferido **depois** do guard de "não há mais candidatos" (o
+ *   relógio pode estourar na **volta**, depois do último arquivo: o resultado está completo);
  * - as ocorrências saem ordenadas por `(path, line, column)`.
  *
  * Lança `SearchInputError` para padrão vazio/excedente/inválido (o mesmo contrato do find
@@ -687,8 +875,8 @@ export async function grepWorkspace(options: GrepOptions): Promise<GrepResult> {
 
   // ⚠️ **Padrão catastrófico**: o `RegExp` do JS faz *backtracking* ⇒ `(a+)+` (quantificador
   // aninhado) ou `(a|aa)+` (alternância ambígua) **não terminam** num texto com "aaaa…".
-  // Como o `grep` roda no processo principal, isso travaria o app inteiro ⇒ o padrão é
-  // **recusado antes de varrer**, com um erro claro (nunca um crash).
+  // Como o `grep` roda no **worker** (task `grep` da lane `grep`), isso prenderia o worker
+  // ⇒ o padrão é **recusado antes de varrer**, com um erro claro (nunca um crash).
   if (regexMode) {
     const catastrophe = findCatastrophicConstruct(rawPattern);
     if (catastrophe !== undefined) {
@@ -735,11 +923,43 @@ export async function grepWorkspace(options: GrepOptions): Promise<GrepResult> {
   let cursor = 0;
   let stop = false;
 
+  // O **orçamento de tempo** (soft): a varredura para **entre arquivos** (nunca no meio de
+  // um `RegExp` — o motor do JS não é interrompível) e o resultado sai **incompleto**, com
+  // um aviso. `budgetMs <= 0` ⇒ **sem orçamento** (a busca nunca é cortada por tempo).
+  const now = options.now ?? Date.now;
+  const budgetMs =
+    options.budgetMs === undefined || !Number.isFinite(options.budgetMs)
+      ? GREP_DEFAULT_BUDGET_MS
+      : options.budgetMs;
+  const hasTimeBudget = budgetMs > 0;
+  const startedAt = hasTimeBudget ? now() : 0;
+  // O aviso entra **uma vez** (vários workers podem ver o orçamento estourado).
+  let budgetWarningAdded = false;
+  const addBudgetWarning = (): void => {
+    if (budgetWarningAdded) return;
+    budgetWarningAdded = true;
+    warnings.push(
+      `a busca foi interrompida por tempo (${budgetMs} ms) — o resultado está incompleto`,
+    );
+  };
+
   const worker = async (): Promise<void> => {
     for (;;) {
       if (stop) return;
       const index = cursor++;
+      // ⚠️ O guard de "**não há mais candidatos**" vem **antes** da checagem de tempo: uma
+      // varredura que **terminou** (todos os candidatos varridos) **nunca** é marcada como
+      // truncada — o relógio pode ter estourado o orçamento na **volta** (depois do último
+      // arquivo), mas o resultado está **completo** ⇒ `truncated: false` e nenhum aviso.
       if (index >= candidates.length) return;
+      // O orçamento é conferido **antes de ler o próximo arquivo** (a leitura já em curso
+      // termina — o corte é entre arquivos, nunca no meio de um `RegExp`).
+      if (hasTimeBudget && now() - startedAt > budgetMs) {
+        truncated = true;
+        stop = true;
+        addBudgetWarning();
+        return;
+      }
       if (budget <= 0) {
         // Parou por falta de orçamento: o resultado está **incompleto** (pode haver mais
         // ocorrências nos arquivos que não chegaram a ser varridos).

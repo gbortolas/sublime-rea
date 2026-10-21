@@ -7,6 +7,7 @@ import {
   SEARCH_MAX_MATCHES,
   SEARCH_MAX_PATTERN_LENGTH,
   SEARCH_MAX_TEXT_LENGTH,
+  TaskTimeoutError,
   makeHandle,
   normalizeSearchQuery,
   scanText,
@@ -218,7 +219,7 @@ describe("TaskPoolImpl — fila, cancelamento, resize e shutdown", () => {
     await pool.shutdown();
     expect(pool.workerCount("fileRead")).toBe(0);
     expect(pool.workerCount("io")).toBe(0);
-    expect(pool.busy).toEqual({ io: 0, index: 0, fileRead: 0 });
+    expect(pool.busy).toEqual({ io: 0, index: 0, fileRead: 0, grep: 0 });
 
     await expect(pool.run({ kind: "readFile", path: file }).done).rejects.toBeInstanceOf(PoolShutdownError);
     await pool.shutdown(); // idempotente
@@ -230,6 +231,130 @@ describe("TaskPoolImpl — fila, cancelamento, resize e shutdown", () => {
     expect(pool.size("io")).toBe(1);
     expect(pool.size("index")).toBe(1);
     expect(pool.size("fileRead")).toBe(1);
+  });
+});
+
+// ── Starvation de lane: preempção + teto cobrindo a FILA ──────────────────────────────────────
+//
+// O `cap` global do pool (min(setting, cpus − 1)) é **compartilhado** por todas as lanes. A
+// lane `io` é **residente** (o worker não é reciclado por idle) ⇒ ela segura o teto global
+// sozinha. Sem preempção, uma task de outra lane (`grep`) ficava na fila **para sempre** (e o
+// `timeoutMs` **não** disparava, porque o relógio só era armado na atribuição).
+//
+// O contrato (em `src/shared/concurrency-contract.ts`) é: o `timeoutMs` cobre a task
+// **INTEIRA** — a espera na fila conta. Logo: ou a task **roda** (preempção) ou ela **estoura**
+// (teto) — nunca fica pendurada.
+
+describe("TaskPoolImpl — preempção de lane e teto cobrindo a fila", () => {
+  const LANES = ["io", "index", "fileRead", "grep"] as const;
+
+  /** Total de workers vivos (todas as lanes) — para aferir o teto global. */
+  function totalWorkers(pool: TaskPoolImpl): number {
+    return LANES.reduce((sum, lane) => sum + pool.workerCount(lane), 0);
+  }
+
+  /** Pool com **teto global = 1** (2 CPUs ⇒ min(setting, cpus − 1) = 1) e idle longo. */
+  function makeCapOnePool(): TaskPoolImpl {
+    return makePool({ availableParallelism: 2, maxBackgroundThreads: 1, idleTimeoutMs: 30_000 });
+  }
+
+  it("preempta o worker ocioso de outra lane (a task não fica na fila para sempre)", async () => {
+    const pool = makeCapOnePool();
+    expect(pool.maxWorkers).toBe(1);
+
+    const io = await tempFile("preempt-io.txt", "conteúdo");
+    const alvo = await tempFile("preempt-alvo.txt", "needle\n");
+
+    // A lane `io` é **residente**: o worker fica vivo (ocioso) depois da task.
+    await pool.run({ kind: "readFile", path: io }, { lane: "io" }).done;
+    expect(pool.workerCount("io")).toBe(1);
+
+    // A lane `grep` não tem worker e o teto global está tomado ⇒ **preempção** do worker `io`.
+    const resultado = await pool.run(
+      { kind: "grep", query: "needle", files: [alvo] },
+      { lane: "grep" },
+    ).done;
+
+    expect(resultado.matches).toHaveLength(1);
+    expect(pool.workerCount("grep")).toBe(1);
+    expect(pool.workerCount("io")).toBe(0); // o worker `io` foi preemptado
+    // O teto global continua respeitado (nunca mais de `cap` workers vivos).
+    expect(totalWorkers(pool)).toBeLessThanOrEqual(pool.maxWorkers);
+  });
+
+  it("preempta quando a task da outra lane termina (a fila drena)", async () => {
+    const pool = makeCapOnePool();
+    const io = await tempFile("drain-io.txt", "conteúdo");
+    const alvo = await tempFile("drain-alvo.txt", "needle\n");
+
+    // A task `io` está **em andamento** (o worker ocupado não pode ser preemptado).
+    const ioTask = pool.run({ kind: "readFile", path: io }, { lane: "io" });
+    expect(pool.busy.io).toBe(1);
+
+    // A task `grep` não tem worker na lane e o teto global está tomado ⇒ **fica na fila**.
+    const grepTask = pool.run({ kind: "grep", query: "needle", files: [alvo] }, { lane: "grep" });
+    expect(pool.busy.grep).toBe(0);
+
+    // Quando a task `io` termina, o worker `io` fica ocioso e é preemptado ⇒ o grep roda.
+    const [resultado] = await Promise.all([grepTask.done, ioTask.done]);
+    expect(resultado.matches).toHaveLength(1);
+    expect(totalWorkers(pool)).toBeLessThanOrEqual(pool.maxWorkers);
+  });
+
+  it("teto na fila: a task que nunca é atribuída estoura com TaskTimeoutError", async () => {
+    const pool = makeCapOnePool();
+    // 64 KiB exatos: no modo regex o teto por arquivo é 64 KiB (maior ⇒ o arquivo é pulado).
+    const pesado = await tempFile("pesado.txt", "a".repeat(64 * 1024));
+
+    // A task `io` fica **ocupada** para sempre: o `RegExp` quadrático `(a*){2}b` nunca
+    // termina (o detector de padrões catastróficos **não** vê o `{2}`, que é limitado).
+    const ocupante = pool.run(
+      { kind: "grep", query: "(a*){2}b", files: [pesado], options: { regex: true } },
+      { lane: "io" },
+    );
+    ocupante.done.catch(() => undefined); // o ocupante só morre no `shutdown`
+    expect(pool.busy.io).toBe(1);
+
+    // A task da lane `grep` não tem worker e o teto global está tomado por uma task
+    // **ocupada** (que não pode ser preemptada) ⇒ ela **fica na fila** e o teto estoura.
+    const started = Date.now();
+    const handle = pool.run(
+      { kind: "grep", query: "needle", files: [pesado] },
+      { lane: "grep", timeoutMs: 300 },
+    );
+    await expect(handle.done).rejects.toBeInstanceOf(TaskTimeoutError);
+    await expect(handle.done).rejects.toMatchObject({ code: "task.timeout" });
+    const elapsed = Date.now() - started;
+    expect(elapsed).toBeGreaterThanOrEqual(250);
+    expect(elapsed).toBeLessThan(5000);
+    // A task **nunca rodou** ⇒ nenhum worker foi morto (o `io` segue vivo).
+    expect(pool.workerCount("io")).toBe(1);
+  });
+
+  it("teto na fila: a 2ª task da MESMA lane estoura enquanto a 1ª roda", async () => {
+    const pool = makeCapOnePool();
+    const pesado = await tempFile("mesma-lane.txt", "a".repeat(64 * 1024));
+
+    const ocupante = pool.run(
+      { kind: "grep", query: "(a*){2}b", files: [pesado], options: { regex: true } },
+      { lane: "io" },
+    );
+    ocupante.done.catch(() => undefined);
+    expect(pool.busy.io).toBe(1);
+
+    // A 2ª task da **mesma** lane espera o worker (que está ocupado) ⇒ o relógio, que cobre a
+    // **fila**, estoura em ~300 ms (e não em 30 s, e não para sempre).
+    const started = Date.now();
+    const handle = pool.run(
+      { kind: "readFile", path: pesado },
+      { lane: "io", timeoutMs: 300 },
+    );
+    await expect(handle.done).rejects.toBeInstanceOf(TaskTimeoutError);
+    const elapsed = Date.now() - started;
+    expect(elapsed).toBeGreaterThanOrEqual(250);
+    expect(elapsed).toBeLessThan(5000);
+    // A task que estourou **na fila** nunca ocupou o worker ⇒ o `busy` da lane segue 1.
+    expect(pool.busy.io).toBe(1);
   });
 });
 

@@ -3,7 +3,13 @@
  *
  * Sem rede, sem GUI, sem workers de verdade: o `FileSystem` é em memória e a CPU é injetada
  * (`availableParallelism`) para o dimensionamento do pool ser determinístico.
+ *
+ * ⚠️ **Exceção:** o teste do `grepFiles` **usa o worker de verdade** (o grep da workspace lê
+ * o disco **dentro** do worker — o `FileSystem` em memória não vale para ele).
  */
+import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 
 import {
@@ -13,6 +19,7 @@ import {
 } from "../src/core/editor";
 import type { FileSystem } from "../src/core/buffer";
 import type { DocumentChangedEvent, DocumentHandle } from "../src/shared";
+import { CancellationError } from "../src/shared";
 
 function memoryFs(files: Readonly<Record<string, string>>): FileSystem {
   return {
@@ -105,11 +112,13 @@ describe("createEditorCore (integração)", () => {
     });
     try {
       const snapshot = core.snapshot();
-      expect(snapshot.lanes).toEqual({ io: 0, index: 0, fileRead: 0 });
+      expect(snapshot.lanes).toEqual({ io: 0, index: 0, fileRead: 0, grep: 0 });
       expect(snapshot.pendingCallbacks).toBe(0);
       expect(core.pool.size("io")).toBe(2);
       expect(core.pool.size("fileRead")).toBe(2);
       expect(core.pool.size("index")).toBe(1);
+      // A lane `grep` é **própria** (o grep da workspace não compete com o find bar).
+      expect(core.pool.size("grep")).toBe(1);
       expect(core.properties.resolved("editor.ioWorkers")).toBe(2);
       expect(core.properties.resolved("render.backend")).toBe("canvas2d");
     } finally {
@@ -184,6 +193,42 @@ describe("createEditorCore (integração)", () => {
       );
     } finally {
       core.dispose();
+    }
+  });
+});
+
+describe("createEditorCore — o grep da workspace (na lane `grep`)", () => {
+  it("varre os arquivos no worker e devolve as ocorrências", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "scribe-core-grep-"));
+    const file = join(dir, "alvo.txt");
+    await writeFile(file, "primeira\nneedle aqui\noutra needle\n", "utf8");
+    const core = createEditorCore({ fileSystem: memoryFs({}), availableParallelism: 4 });
+    try {
+      const result = await core.grepFiles({ query: "needle", files: [file] });
+      expect(result.matches).toHaveLength(2);
+      expect(result.matches[0]?.line).toBe(1);
+      expect(result.filesScanned).toBe(1);
+      expect(result.truncated).toBe(false);
+    } finally {
+      core.dispose();
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("a busca cancelada (signal abortado) rejeita com CancellationError", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "scribe-core-grep-cancel-"));
+    const file = join(dir, "alvo.txt");
+    await writeFile(file, "needle\n", "utf8");
+    const core = createEditorCore({ fileSystem: memoryFs({}), availableParallelism: 4 });
+    try {
+      const controller = new AbortController();
+      controller.abort("usuário cancelou");
+      await expect(
+        core.grepFiles({ query: "needle", files: [file], signal: controller.signal }),
+      ).rejects.toBeInstanceOf(CancellationError);
+    } finally {
+      core.dispose();
+      await rm(dir, { recursive: true, force: true });
     }
   });
 });

@@ -25,6 +25,7 @@ import type { DocumentHighlight } from "./syntax-contract";
 import type { MainThreadBusy } from "./concurrency-contract";
 import type { CommandListResult } from "./command-contract";
 import type { ReplaceAllResult, SearchDocumentResult, SearchQuery } from "./search-contract";
+import type { GrepResult } from "./grep-contract";
 import type { Selection, SelectionSet } from "./selection-contract";
 import type { LspCompletionItem, LspDiagnostic, LspHoverResult, LspLocation, LspRenameResult, LspSignatureHelp, LspDocumentSymbol, LspCodeAction, LspTextEdit, LspFoldingRange, LspInlayHint } from "./lsp-contract";
 import type { DapBreakpoint, DapBreakpointSpec, DapEvaluation, DapEvaluationRequestContext, DapOutputEvent, DapScope, DapSessionState, DapStackFrame, DapStoppedEvent, DapThread, DapVariable } from "./dap-contract";
@@ -167,46 +168,15 @@ export interface GitCommitResult {
 }
 
 /**
- * Uma ocorrência da busca em todos os arquivos (o "grep").
+ * Os tipos da busca em todos os arquivos (`GrepMatch`/`GrepResult`) vivem em
+ * **`src/shared/grep-contract.ts`** (fonte da verdade): o contrato IPC **importa** de lá —
+ * antes este arquivo **espelhava** `src/core/workspace/grep.ts` e o renderer importava o tipo
+ * do **core**, o que amarrava o renderer ao core. Agora os três lados (core · IPC · renderer)
+ * falam o **mesmo** tipo.
  *
- * ⚠️ **Espelha** `GrepMatch` de `src/core/workspace/grep.ts`: o contrato IPC vive em
- * `shared` (a base da dependência) e não pode importar o core. As duas formas são
- * **estruturalmente idênticas** — se divergirem, o `tsc` falha no ponto de uso.
+ * ⚠️ Este arquivo **não** re-exporta os tipos (o barrel `src/shared/index.ts` já exporta o
+ * módulo inteiro — um re-export aqui criaria um nome ambíguo no barrel).
  */
-export interface GrepMatch {
-  /** Caminho do arquivo (o mesmo string que o `main` varrreu). */
-  readonly path: string;
-  /** Linha da ocorrência — **0-based**. */
-  readonly line: number;
-  /** Coluna da ocorrência — **0-based**, em code units UTF-16. */
-  readonly column: number;
-  /** A **linha inteira** onde a ocorrência está (sem o terminador de linha). */
-  readonly text: string;
-}
-
-/**
- * Resultado de uma varredura da workspace (`search.files`).
- *
- * ⚠️ **Espelha** `GrepResult` de `src/core/workspace/grep.ts` (mesma razão do espelho acima).
- */
-export interface GrepResult {
-  /** Ocorrências ordenadas por `(path, line, column)`. */
-  readonly matches: readonly GrepMatch[];
-  /** `true` = o resultado está **incompleto** (bateu no teto de matches/arquivos). */
-  readonly truncated: boolean;
-  /** Quantos arquivos foram **de fato varridos**. */
-  readonly filesScanned: number;
-  /**
-   * Os **avisos** da busca (o que foi desligado/ajustado — **nunca** um crash).
-   *
-   * Ex.: "padrão catastrófico recusado", "a busca acento-insensitiva foi desligada no modo
-   * regex", "o arquivo X excede o teto de N code units por arquivo".
-   *
-   * ⚠️ **Espelha** `GrepResult.warnings` do core: sem este campo o renderer **nunca** via
-   * os avisos (o `tsc` não acusa — o espelho é estrutural).
-   */
-  readonly warnings?: readonly string[];
-}
 
 /** Opções da busca em todos os arquivos (`search.files`). */
 export interface SearchFilesOptions {
@@ -216,6 +186,13 @@ export interface SearchFilesOptions {
   readonly maxMatches?: number;
   /** Teto de arquivos varridos. */
   readonly maxFiles?: number;
+  /**
+   * Orçamento de tempo da varredura, em **ms** (default 20 s).
+   *
+   * A varredura para **entre arquivos** ⇒ o resultado sai **incompleto** (`truncated: true`)
+   * com um aviso. O `main` **clampa** o valor (o teto duro é 60 s).
+   */
+  readonly budgetMs?: number;
   /** Busca acento-insensitiva (default `true`): "acao" casa com "ação". */
   readonly ignoreAccents?: boolean;
   /**

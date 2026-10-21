@@ -12,6 +12,12 @@
  *
  * Este arquivo é bundleado (esbuild) e executado por `worker_threads`. Importa valor do shared
  * porque o bundler resolve tudo numa única saída CJS.
+ *
+ * **Tarefas que rodam aqui:** `readFile`/`writeFile` (I/O), `scanLines`/`index`/`search`/
+ * `syntaxTokens` (CPU sobre o texto registrado) e **`grep`** — a busca na workspace: a
+ * **leitura** (`node:fs`, respeitando o teto por arquivo) e a **varredura** acontecem **no
+ * worker** ⇒ o processo principal nunca materializa um arquivo de 2 GB e um `RegExp`
+ * patológico **não** trava o app (o **teto duro** do pool mata este worker).
  */
 import { open, readFile, writeFile, rename, rm, stat, chmod } from "node:fs/promises";
 import { randomBytes } from "node:crypto";
@@ -20,6 +26,7 @@ import { parentPort, workerData } from "node:worker_threads";
 import type {
   DocumentHandle,
   DocumentHighlight,
+  GrepTaskOptions,
   HighlightLine,
   HighlightSpan,
   IndexResult,
@@ -34,6 +41,8 @@ import type {
 import { normalizeSearchQuery, scanText } from "../../shared/search-contract";
 import { tokenizeCompiledLine } from "../syntax/tokenizer";
 import type { CompiledGrammar, CompiledPattern, CompiledCapture } from "../syntax/tokenizer";
+import { grepWorkspace } from "../workspace/grep";
+import { nodeGrepReadFile } from "../workspace/grep-fs";
 
 // ── SerializedGrammar → CompiledGrammar (deserialização no worker) ───────────────────────────
 
@@ -217,10 +226,31 @@ export function createWorkerRuntime(
 ): WorkerRuntime {
   const texts = new Map<DocumentHandle, RegisteredText>();
   const cancelled = new Set<number>();
+  /**
+   * Controller de abort por task **em andamento** (cancelamento **cooperativo**).
+   *
+   * O `{ kind: "cancel" }` do pool aborta o controller da task ⇒ o `grep` **vê** o abort no
+   * meio da varredura (é o que faz o `Ctrl+Shift+F` não ficar varrendo a workspace atrás
+   * da digitação). O abort **não** interrompe um `RegExp` em curso (o motor do JS não é
+   * interrompível) — nesse caso o que para a task é o **teto duro** do pool (o worker é
+   * matado).
+   */
+  const controllers = new Map<number, AbortController>();
+  /**
+   * O **maior** id de task que o worker **já atendeu** (recebeu o request).
+   *
+   * Serve para distinguir o cancel **tardio** (a task **já respondeu** ⇒ o cancel é
+   * ignorado — sem vazar entrada no `cancelled`) do cancel **antes do start** (a task ainda
+   * nem chegou ⇒ o cancel precisa ser lembrado, para a task responder "cancelada").
+   */
+  let lastHandledId = 0;
 
-  const runRequest = async (request: WorkerRequest): Promise<WorkerResponse> => {
+  const runRequest = async (
+    request: WorkerRequest,
+    signal: AbortSignal,
+  ): Promise<WorkerResponse> => {
     try {
-      const value = await executeTask(request, texts);
+      const value = await executeTask(request, texts, signal);
       const counters = request.counters;
       if (counters) {
         Atomics.add(counters, counterCell, 1);
@@ -247,15 +277,39 @@ export function createWorkerRuntime(
         return;
       }
       if (message.kind === "cancel") {
+        const controller = controllers.get(message.id);
+        if (controller !== undefined) {
+          // Task **em andamento**: aborta (o pós-execução responde "cancelada").
+          cancelled.add(message.id);
+          controller.abort(message.reason);
+          return;
+        }
+        if (message.id <= lastHandledId) {
+          // ⚠️ Cancel **tardio**: a task **já respondeu** ⇒ ignora. Sem isto, o `cancelled`
+          // vaza uma entrada por cancel tardio (o `Set` só é limpo no caminho pós-execução).
+          return;
+        }
+        // Cancel **antes do start**: a task tem de responder "cancelada" (o request que
+        // vem a seguir encontra o id no `cancelled`).
         cancelled.add(message.id);
         return;
       }
+      // A task **chegou** ao worker: a partir daqui um cancel para este id é **tardio**
+      // (ou a task ainda está em andamento — tratada no ramo acima).
+      lastHandledId = Math.max(lastHandledId, message.id);
       if (cancelled.has(message.id)) {
         cancelled.delete(message.id);
         reply(cancelledResponse(message.id, undefined));
         return;
       }
-      const response = await runRequest(message);
+      const controller = new AbortController();
+      controllers.set(message.id, controller);
+      let response: WorkerResponse;
+      try {
+        response = await runRequest(message, controller.signal);
+      } finally {
+        controllers.delete(message.id);
+      }
       if (cancelled.has(message.id)) {
         cancelled.delete(message.id);
         reply(cancelledResponse(message.id, "cancelado durante a execução"));
@@ -292,9 +346,26 @@ async function fileMode(path: string): Promise<number | undefined> {
   }
 }
 
+/**
+ * Erro da escrita **cancelada**: o `rename` (o ponto sem volta) **não** aconteceu ⇒ o
+ * **destino ficou intacto** (o conteúdo novo estava no tmp, que foi removido).
+ *
+ * ⚠️ O pool **não mata** o worker de uma escrita (a graça do cancel não é armada para
+ * quem escreve) ⇒ esta é a forma de a escrita **terminar em paz** depois do cancel.
+ */
+class WriteAbortedError extends Error {
+  readonly code = "write.aborted";
+
+  constructor(message = "a escrita foi cancelada antes do rename (o destino ficou intacto)") {
+    super(message);
+    this.name = "WriteAbortedError";
+  }
+}
+
 async function executeTask(
   request: WorkerRequest,
   texts: Map<DocumentHandle, RegisteredText>,
+  signal: AbortSignal,
 ): Promise<TaskResultMap[TaskKind]> {
   const payload = request.payload;
   switch (payload.kind) {
@@ -333,8 +404,21 @@ async function executeTask(
           // (um script executável continua executável depois do save).
           await chmod(tmpPath, mode);
         }
+        // ⚠️ O `rename` é o **ponto sem volta**: até aqui o **destino está intacto** (o
+        // conteúdo novo está no tmp). Se o cancel chegou, o tmp é removido e a escrita é
+        // abortada ⇒ o destino **nunca** fica truncado.
+        if (signal.aborted) {
+          await rm(tmpPath, { force: true }).catch(() => undefined);
+          throw new WriteAbortedError();
+        }
         await rename(tmpPath, target);
       } catch (error) {
+        if (error instanceof WriteAbortedError || signal.aborted) {
+          // Cancelado: o **destino não é tocado** (nem o fallback de escrita direta) ⇒
+          // nada de truncamento; o tmp órfão é removido.
+          await rm(tmpPath, { force: true }).catch(() => undefined);
+          throw error;
+        }
         // Ainda assim deu EXDEV (ou o tmp não pôde ser criado) ⇒ grava **direto** no
         // destino: perde a atomicidade, mas **salva o arquivo**.
         console.warn("Scribe: escrita atômica falhou, gravando direto no destino:", error);
@@ -355,6 +439,27 @@ async function executeTask(
     }
     case "syntaxTokens":
       return tokenizeSyntaxTask(payload, texts, request.counters);
+    case "grep": {
+      // A busca na workspace: a **leitura** e a **varredura** acontecem **aqui** (no
+      // worker) ⇒ o processo principal nunca materializa um arquivo grande e um `RegExp`
+      // patológico **não** trava o app (o teto duro do pool mata este worker).
+      const options: GrepTaskOptions = payload.options ?? {};
+      return grepWorkspace({
+        query: payload.query,
+        files: payload.files,
+        // ⚠️ O spread vem **antes** do port e do signal: assim nenhum campo do payload
+        // (que é serializado) consegue sobrescrever o port de leitura ou o abort.
+        ...options,
+        readFile: nodeGrepReadFile,
+        signal,
+        // O `onError` é uma **closure** ⇒ não cruza a fronteira (DEC-CON-4/11). O worker
+        // registra o arquivo pulado (grande demais/ilegível) no **log do processo** — o
+        // `stderr` do worker cai no terminal do main (mesma observabilidade de antes).
+        onError: (path, error) => {
+          console.warn(`Scribe: grep pulou "${path}": ${error.message}`);
+        },
+      });
+    }
   }
 }
 

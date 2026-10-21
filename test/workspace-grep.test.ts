@@ -9,6 +9,8 @@
  * - o acento é **insensível** (inclusive em NFD) e o dobramento é **1:1**;
  * - os **filtros** (arquivo grande, binário, ilegível) pulam o arquivo sem derrubar a busca;
  * - os **tetos** (matches/arquivos) marcam `truncated`;
+ * - o **orçamento de tempo** (soft) corta a varredura **entre arquivos** e devolve o
+ *   resultado parcial (com aviso);
  * - o **`AbortSignal`** cancela a leitura no meio;
  * - a leitura é **paralela** (concorrência > 1) e o resultado sai **ordenado**.
  *
@@ -25,6 +27,7 @@ import {
   GREP_FILE_TOO_LARGE,
   GREP_REGEX_MAX_FILE_LENGTH,
   isCatastrophicPattern,
+  stripGroupPrefixes,
 } from "../src/core/workspace/grep";
 import { ACCENT_FOLD_SENTINEL, hasNonAscii } from "../src/core/workspace/grep-accents";
 import { CancellationError, SearchInputError } from "../src/shared";
@@ -571,6 +574,48 @@ describe("grepWorkspace — o padrão catastrófico (não trava o app)", () => {
     ).rejects.toBeInstanceOf(SearchInputError);
   }, 2_000);
 
+  it("uma alternância ambígua ANINHADA é recusada ANTES de varrer", async () => {
+    // `^((a|aa))+b$` é exponencial (medido: 295 ms com n=36, dobra a cada +4 chars):
+    // o `|` está **dentro** do grupo aninhado ⇒ o corpo do grupo externo não tem
+    // alternância de topo (o detector antigo não via ⇒ o padrão passava).
+    const lidos: string[] = [];
+    const pending = grepWorkspace({
+      query: "^((a|aa))+b$",
+      files: ["/w/a.txt"],
+      readFile: (path: string): Promise<string> => {
+        lidos.push(path);
+        return Promise.resolve("a".repeat(200));
+      },
+      regex: true,
+    });
+    await expect(pending).rejects.toBeInstanceOf(SearchInputError);
+    await expect(pending).rejects.toMatchObject({ code: "search.pattern" });
+    // O padrão é recusado **antes** da varredura (nenhum arquivo foi lido).
+    expect(lidos).toEqual([]);
+  }, 2_000);
+
+  it("o prefixo de grupo (`?:`) NÃO escapa da recusa (o backtracking é o mesmo)", async () => {
+    // `^((?:a|aa))+b$` tem o **mesmo** backtracking de `^((a|aa))+b$` (medido: 10,7 s em
+    // 40 chars, nos dois casos) — o prefixo `?:` (grupo **não-capturante**) é **sintaxe**,
+    // não conteúdo ⇒ ele não pode entrar na comparação das alternativas (o detector
+    // antigo comparava "?:a" com "aa" ⇒ nenhuma era prefixo da outra ⇒ o padrão passava).
+    const lidos: string[] = [];
+    const pending = grepWorkspace({
+      query: "^((?:a|aa))+b$",
+      files: ["/w/a.txt"],
+      readFile: (path: string): Promise<string> => {
+        lidos.push(path);
+        return Promise.resolve("a".repeat(200));
+      },
+      regex: true,
+    });
+    await expect(pending).rejects.toBeInstanceOf(SearchInputError);
+    await expect(pending).rejects.toMatchObject({ code: "search.pattern" });
+    // O padrão é recusado **antes** da varredura (nenhum arquivo foi lido).
+    expect(lidos).toEqual([]);
+  }, 2_000);
+
+
   it("uma regex normal NÃO é recusida (a detecção é conservadora)", async () => {
     const files = { "/w/a.txt": "um dois tres" };
     const result = await grepWorkspace({
@@ -702,6 +747,101 @@ describe("grepWorkspace — os avisos (nunca um crash)", () => {
   });
 });
 
+describe("grepWorkspace — o orçamento de tempo (soft)", () => {
+  it("estoura o orçamento ⇒ resultado incompleto, com aviso, e preserva o que já achou", async () => {
+    const files = {
+      "/w/a.txt": "alvo um",
+      "/w/b.txt": "alvo dois",
+      "/w/c.txt": "alvo três",
+    };
+    // Um relógio que "anda": 1 s por chamada. O orçamento (1,5 s) estoura no **segundo**
+    // arquivo ⇒ o primeiro já varrido é preservado, o terceiro nunca é lido.
+    let tick = 0;
+    const now = (): number => {
+      tick += 1000;
+      return tick;
+    };
+    const result = await grepWorkspace({
+      query: "alvo",
+      files: Object.keys(files),
+      readFile: fsOf(files),
+      concurrency: 1,
+      budgetMs: 1500,
+      now,
+    });
+    expect(result.truncated).toBe(true);
+    // O aviso do orçamento está lá (texto exato).
+    expect(result.warnings ?? []).toContain(
+      "a busca foi interrompida por tempo (1500 ms) — o resultado está incompleto",
+    );
+    // O que já foi encontrado é **preservado** (resultado parcial honesto).
+    expect(result.matches.map((m) => m.path)).toEqual(["/w/a.txt"]);
+    expect(result.filesScanned).toBe(1);
+  });
+
+  it("o orçamento não estourado ⇒ `truncated: false` e nenhum aviso", async () => {
+    const files = { "/w/a.txt": "alvo", "/w/b.txt": "alvo" };
+    // Um relógio que **não** anda: o orçamento nunca estoura.
+    const now = (): number => 1000;
+    const result = await grepWorkspace({
+      query: "alvo",
+      files: Object.keys(files),
+      readFile: fsOf(files),
+      budgetMs: 1500,
+      now,
+    });
+    expect(result.truncated).toBe(false);
+    expect(result.warnings ?? []).toHaveLength(0);
+    expect(result.matches).toHaveLength(2);
+    expect(result.filesScanned).toBe(2);
+  });
+
+  it("`budgetMs <= 0` ⇒ sem orçamento (a busca nunca é cortada por tempo)", async () => {
+    const files = { "/w/a.txt": "alvo", "/w/b.txt": "alvo" };
+    // O relógio "anda" sem parar — mas, sem orçamento, a varredura vai até o fim.
+    let tick = 0;
+    const now = (): number => {
+      tick += 1000;
+      return tick;
+    };
+    const result = await grepWorkspace({
+      query: "alvo",
+      files: Object.keys(files),
+      readFile: fsOf(files),
+      budgetMs: 0,
+      now,
+    });
+    expect(result.truncated).toBe(false);
+    expect(result.warnings ?? []).toHaveLength(0);
+    expect(result.matches).toHaveLength(2);
+    expect(result.filesScanned).toBe(2);
+  });
+
+  it("a varredura que COMPLETOU não é truncada (o relógio estourou na volta)", async () => {
+    const files = { "/w/a.txt": "alvo" };
+    // Um relógio que "anda" 1 s por chamada: a checagem do orçamento vem **depois** do
+    // guard de "não há mais candidatos" ⇒ o estouro na **volta** (depois do único arquivo)
+    // **não** marca a varredura como truncada — o resultado está **completo**.
+    let tick = 0;
+    const now = (): number => {
+      tick += 1000;
+      return tick;
+    };
+    const result = await grepWorkspace({
+      query: "alvo",
+      files: Object.keys(files),
+      readFile: fsOf(files),
+      concurrency: 1,
+      budgetMs: 1500,
+      now,
+    });
+    expect(result.truncated).toBe(false);
+    expect(result.warnings ?? []).toHaveLength(0);
+    expect(result.filesScanned).toBe(1);
+    expect(result.matches).toHaveLength(1);
+  });
+});
+
 describe("hasNonAscii — o teste rápido do dobramento", () => {
   it("diz se o texto tem algum caractere não-ASCII", () => {
     expect(hasNonAscii("ascii simples")).toBe(false);
@@ -728,6 +868,15 @@ describe("isCatastrophicPattern — o detector de padrão catastrófico", () => 
     expect(isCatastrophicPattern("(a*|b)+")).toBe(true);
   });
 
+  it("acusa a alternância ambígua ANINHADA (o `|` dentro do grupo aninhado)", () => {
+    // O `|` do grupo **aninhado** não é uma alternativa de topo do corpo do grupo
+    // externo ⇒ o detector antigo (que só olhava o topo) deixava passar.
+    expect(isCatastrophicPattern("^((a|aa))+b$")).toBe(true);
+    expect(isCatastrophicPattern("((a|aa))+")).toBe(true);
+    expect(isCatastrophicPattern("(x(y|yy))+")).toBe(true);
+    expect(isCatastrophicPattern("((a|ab))+")).toBe(true);
+  });
+
   it("NÃO acusa as regex normais (a detecção é conservadora)", () => {
     expect(isCatastrophicPattern("(um|tres)")).toBe(false);
     expect(isCatastrophicPattern("(foo|far)+")).toBe(false);
@@ -736,8 +885,80 @@ describe("isCatastrophicPattern — o detector de padrão catastrófico", () => 
     expect(isCatastrophicPattern("(ab|ac)+")).toBe(false);
     expect(isCatastrophicPattern("https?://")).toBe(false);
     expect(isCatastrophicPattern("")).toBe(false);
+    // As alternativas **distintas** (nenhuma é prefixo da outra) não se sobrepõem.
+    expect(isCatastrophicPattern("(foo|bar)+")).toBe(false);
+    expect(isCatastrophicPattern("(a|b|c)+")).toBe(false);
+    // Quantificadores **limitados** e classes não são catastróficos.
+    expect(isCatastrophicPattern("\\d{2,4}")).toBe(false);
+    expect(isCatastrophicPattern("(\\w+)")).toBe(false);
+    // Um grupo aninhado **sem** alternância não é ambíguo.
+    expect(isCatastrophicPattern("((ab|cd))+")).toBe(false);
+  });
+
+  it("acusa a alternância ambígua com PREFIXO de grupo (`(?:…|…)`)", () => {
+    // O prefixo `?:` (grupo não-capturante) é **sintaxe**, não conteúdo ⇒ ele não pode
+    // entrar na comparação das alternativas (o detector antigo comparava "?:a" com "aa" ⇒
+    // nenhuma era prefixo da outra ⇒ o padrão **exponencial** escapava da detecção).
+    expect(isCatastrophicPattern("^((?:a|aa))+b$")).toBe(true);
+    expect(isCatastrophicPattern("(?:a|aa)+")).toBe(true);
+    // O **mesmo** backtracking do padrão sem prefixo ⇒ a recusa tem de ser a mesma.
+    expect(isCatastrophicPattern("^((a|aa))+b$")).toBe(true);
+    // O prefixo não **cria** ambiguidade: as alternativas distintas continuam permitidas.
+    expect(isCatastrophicPattern("(?:foo|bar)+")).toBe(false);
+    expect(isCatastrophicPattern("(?:a|b|c)+")).toBe(false);
+  });
+
+  it("o teto de profundidade cobre o aninhamento real (33/40/60 níveis)", () => {
+    // Medido: o padrão real (40 níveis) faz 5,5 s de backtracking em 34 chars (cresce
+    // exponencialmente) — o teto antigo (32) **deixava passar** 33/40/60 níveis.
+    for (const levels of [33, 40, 60]) {
+      const pattern = `${"(".repeat(levels)}(a|aa)${")".repeat(levels)}+`;
+      expect(isCatastrophicPattern(pattern), `nível ${levels}`).toBe(true);
+    }
+  });
+
+  it("200+ níveis não estouram a pilha (o aninhamento do usuário cabe)", () => {
+    // O teto de profundidade é 256 ⇒ 200 níveis são **analisados por inteiro** (sem
+    // `RangeError`) — e o padrão **inofensivo** no mesmo aninhamento continua permitido
+    // (a detecção não vira "recusa tudo que é fundo").
+    const profundo = `${"(".repeat(200)}(a|aa)${")".repeat(200)}+`;
+    expect(() => isCatastrophicPattern(profundo)).not.toThrow();
+    expect(isCatastrophicPattern(profundo)).toBe(true);
+    const inofensivo = `${"(".repeat(200)}a${")".repeat(200)}+`;
+    expect(isCatastrophicPattern(inofensivo)).toBe(false);
+  });
+
+
+  it("a recursão não estoura a pilha (padrão muito aninhado)", () => {
+    // 30 levels de parênteses: a análise recursiva tem teto de profundidade ⇒ devolve
+    // (true ou false) — nunca um `RangeError` (o app não pode cair por um padrão).
+    const profundo = `${"(".repeat(30)}(a|aa)${")".repeat(30)}+`;
+    expect(() => isCatastrophicPattern(profundo)).not.toThrow();
+    // O padrão sem alternância no fundo: nada de catastrófico.
+    const inofensivo = `${"(".repeat(30)}a${")".repeat(30)}+`;
+    expect(isCatastrophicPattern(inofensivo)).toBe(false);
   });
 });
+
+describe("stripGroupPrefixes — o prefixo de grupo é sintaxe, não conteúdo", () => {
+  it("remove o prefixo do começo e logo depois de um `(`", () => {
+    expect(stripGroupPrefixes("?:a|aa")).toBe("a|aa");
+    expect(stripGroupPrefixes("(?:a|aa)")).toBe("(a|aa)");
+    expect(stripGroupPrefixes("(?=a)b")).toBe("(a)b");
+    expect(stripGroupPrefixes("(?!a)b")).toBe("(a)b");
+    expect(stripGroupPrefixes("(?<nome>a)")).toBe("(a)");
+    expect(stripGroupPrefixes("(?<=a)b")).toBe("(a)b");
+    expect(stripGroupPrefixes("(?<!a)b")).toBe("(a)b");
+  });
+
+  it("preserva um `?` que NÃO é prefixo (o quantificador e o marcador *lazy*)", () => {
+    expect(stripGroupPrefixes("a?b")).toBe("a?b");
+    expect(stripGroupPrefixes("a?:b")).toBe("a?:b");
+    expect(stripGroupPrefixes("*?a")).toBe("*?a");
+    expect(stripGroupPrefixes("(a)?")).toBe("(a)?");
+  });
+});
+
 
 describe("foldAccents — o dobramento de acento", () => {
   it("tira o acento preservando o tamanho (1 code unit ⇒ 1)", () => {

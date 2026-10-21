@@ -26,7 +26,7 @@ import type { EditorCore, EditorCoreOptions } from "../core/editor";
 import { parseGitStatusBranch, parseGitStatusPorcelain } from "../core/git/git-status";
 import { indexFiles } from "../core/workspace/file-index";
 import type { DirectoryReader, FileIndexResult } from "../core/workspace/file-index";
-import { grepWorkspace } from "../core/workspace/grep";
+import { GREP_DEFAULT_MAX_FILES } from "../core/workspace/grep";
 import {
   IPC_CHANNEL,
   IPC_VERSION,
@@ -34,7 +34,6 @@ import {
   isAbortError,
   parseIpcCancel,
   parseIpcRequest,
-  SearchInputError,
   toDisposable,
 } from "../shared";
 import type {
@@ -42,6 +41,7 @@ import type {
   DocumentHandle,
   GitCommitResult,
   GitStatusResult,
+  GrepTaskOptions,
   IpcEventEnvelope,
   IpcRequest,
   IpcResponse,
@@ -738,32 +738,6 @@ export const nodeDirectoryReader: DirectoryReader = {
 };
 
 /**
- * Lê um arquivo de texto (o port do `grepWorkspace`).
- *
- * ⚠️ **O teto é respeitado aqui** (o port recebe o `maxLength` — o `grep` do core):
- * o `stat` vem **antes** da leitura ⇒ um arquivo grande demais é **recusado** (erro com o
- * código `search.tooLarge`) **sem nunca ser materializado**. Sem isto, o `main` lia o
- * arquivo **inteiro** (2 GB ⇒ OOM no processo principal) e só depois o core o descartava.
- *
- * O core trata o erro como "arquivo grande demais" (pula o arquivo e continua) e o
- * `onError` traduz para a mensagem de aviso.
- *
- * ⚠️ O `size` do `stat` é em **bytes** e o teto é em **code units** do texto decodificado:
- * um arquivo multibyte (acentos) pode ser recusado antes de o texto decodificado caber no
- * teto — é o lado **conservador** (nunca lemos mais do que o teto).
- */
-async function readTextFile(path: string, maxLength: number): Promise<string> {
-  const stats = await stat(path);
-  if (stats.size > maxLength) {
-    throw new SearchInputError(
-      "search.tooLarge",
-      `o arquivo "${path}" excede o teto de ${maxLength} code units por arquivo`,
-    );
-  }
-  return readFile(path, "utf8");
-}
-
-/**
  * Raiz da **workspace** de um diretório: a pasta que contém `.git` (o *work root*).
  *
  * ⚠️ **Escolha nossa** (o alvo não expõe o conceito): o *Quick Open* e o *grep* trabalham
@@ -1024,6 +998,81 @@ async function assertPathInsideWorkspace(
     throw new IpcProtocolError("invalid-args", "path-outside-workspace");
   }
   return host;
+}
+
+// ── `search.files`: confinamento das raízes + tetos da varredura ────────────────────────────
+
+/**
+ * Teto de arquivos que a busca entrega ao worker.
+ *
+ * ⚠️ A lista de arquivos **cruza o port** do `TaskPool` a cada tecla (o `postMessage` clona
+ * a lista inteira ⇒ ~1,6 MB com 20 000 paths) ⇒ o teto é imposto **no `main`** (a lista é
+ * cortada **antes** de chegar ao core), não só dentro do worker (achado BAIXO).
+ *
+ * É o mesmo teto do core ({@link GREP_DEFAULT_MAX_FILES}) — o `maxFiles` pedido pelo renderer
+ * **respeita** este teto (o `main` é quem decide o teto final).
+ */
+const GREP_MAX_FILES = GREP_DEFAULT_MAX_FILES;
+
+/**
+ * Teto duro do **orçamento de tempo** que o renderer pode pedir (60 s — o contrato IPC).
+ *
+ * O orçamento é **soft** (a varredura para *entre arquivos* e o resultado sai incompleto, com
+ * aviso) ⇒ o teto só limita o pior caso; o teto **duro** do `TaskPool` (30 s, que mata o
+ * worker) continua valendo por baixo.
+ */
+const GREP_MAX_BUDGET_MS = 60_000;
+
+/**
+ * Confinamento das raízes do `search.files` (achado MÉDIO — leitura arbitrária de arquivo).
+ *
+ * As raízes vêm do **renderer** ⇒ sem confinamento, um renderer comprometido mandava `/etc`
+ * (ou `$HOME`) e o app varria esse diretório e **devolvia o texto** das linhas casadas
+ * (canal de exfiltração).
+ *
+ * A política é a **mesma** do `createFile`:
+ * - a raiz pedida tem de estar **dentro** (ou ser igual) de uma raiz **conhecida**
+ *   ({@link knownWorkspaceRoots}: a raiz dos documentos abertos; o `cwd` como fallback);
+ * - a checagem é {@link assertPathInsideWorkspace} (lexical + symlink + realpath) ⇒ um
+ *   symlink **dentro** da workspace apontando para fora também é barrado;
+ * - uma raiz **fora** é **descartada** (com aviso no log) — a busca **não falha** (as raízes
+ *   legítimas — os diretórios dos documentos abertos — nunca caem aqui);
+ * - se **nenhuma** raiz sobreviver ⇒ a busca devolve um resultado **vazio**, com aviso.
+ */
+async function confineSearchRoots(
+  requested: readonly string[],
+  known: readonly string[],
+): Promise<{ readonly roots: readonly string[]; readonly discarded: readonly string[] }> {
+  const roots: string[] = [];
+  const discarded: string[] = [];
+  for (const candidate of requested) {
+    const absolute = resolve(candidate);
+    try {
+      await assertPathInsideWorkspace(absolute, known);
+    } catch {
+      // Fora da workspace (ou symlink para fora) ⇒ **descartada** (falha fechada).
+      discarded.push(absolute);
+      continue;
+    }
+    if (!roots.includes(absolute)) roots.push(absolute);
+  }
+  return { roots, discarded };
+}
+
+/** O teto de arquivos da busca (`maxFiles` do renderer respeita o mesmo teto). */
+function clampGrepMaxFiles(requested: number | undefined): number {
+  // ⚠️ Um valor **não positivo** significa "o default" (a mesma semântica do core,
+  // `positiveOr`) — não "zero arquivos".
+  if (requested === undefined || !Number.isFinite(requested) || requested <= 0) {
+    return GREP_MAX_FILES;
+  }
+  return Math.min(GREP_MAX_FILES, Math.floor(requested));
+}
+
+/** O orçamento de tempo pedido pelo renderer é clampado (nada de orçamento infinito). */
+function clampGrepBudgetMs(requested: number): number {
+  if (!Number.isFinite(requested)) return GREP_MAX_BUDGET_MS;
+  return Math.min(GREP_MAX_BUDGET_MS, Math.max(1, Math.floor(requested)));
 }
 
 // ── `git`: raiz do repositório, status e as operações de stage/commit/diff ─────────────────
@@ -1331,27 +1380,73 @@ async function dispatchIpc(
     case "search.files": {
       const query = requireString(request.args[0], "search.files", "query");
       const options = optionalSearchFilesOptions(request.args[1]);
-      const index = await workspaceIndex(options.roots ?? []);
-      // O `grep` varre os **caminhos absolutos** (o que o `readFile` do main abre).
-      const files = index.entries.map((entry) => entry.absolutePath);
-      return grepWorkspace({
-        query,
-        files,
-        readFile: readTextFile,
-        ...(signal !== undefined ? { signal } : {}),
+      // ── Confinamento das raízes (achado MÉDIO — leitura arbitrária de arquivo) ─────
+      // As raízes vêm do **renderer** ⇒ sem confinamento, um renderer comprometido mandava
+      // `/etc` (ou `$HOME`) e o app varria esse diretório e **devolvia o texto** das linhas
+      // casadas (canal de exfiltração). A raiz pedida tem de estar **dentro** de uma raiz
+      // **conhecida** (a dos documentos abertos; o `cwd` como fallback).
+      const known = await knownWorkspaceRoots(core);
+      const requested = options.roots ?? [];
+      let roots: readonly string[];
+      let discarded: readonly string[] = [];
+      if (requested.length === 0) {
+        // Sem raízes pedidas ⇒ a própria workspace conhecida (o `cwd` como fallback).
+        roots = known;
+      } else {
+        const confined = await confineSearchRoots(requested, known);
+        roots = confined.roots;
+        discarded = confined.discarded;
+      }
+      for (const root of discarded) {
+        console.warn(`Scribe: raiz da busca fora da workspace descartada: "${root}"`);
+      }
+      // O teto de arquivos: a lista **cruza o port** do `TaskPool` a cada tecla ⇒ o `main`
+      // corta a lista **antes** de entregar ao core (o `maxFiles` do renderer respeita o
+      // mesmo teto — o `main` é quem decide o teto final).
+      const maxFiles = clampGrepMaxFiles(options.maxFiles);
+      // O orçamento de tempo: o renderer **não** pode pedir um orçamento infinito.
+      const budgetMs =
+        options.budgetMs !== undefined ? clampGrepBudgetMs(options.budgetMs) : undefined;
+      // As opções do IPC → as opções da task `grep` (só as que existem no contrato — o
+      // `roots` é do `main`, ele resolve as raízes e entrega a lista **plana** de arquivos).
+      const grepOptions: GrepTaskOptions = {
+        maxFiles,
+        ...(budgetMs !== undefined ? { budgetMs } : {}),
         ...(options.maxMatches !== undefined ? { maxMatches: options.maxMatches } : {}),
-        ...(options.maxFiles !== undefined ? { maxFiles: options.maxFiles } : {}),
         ...(options.ignoreAccents !== undefined ? { ignoreAccents: options.ignoreAccents } : {}),
         // Regex (padrão cru) / case / binários — o mesmo contrato do find bar.
         ...(options.regex !== undefined ? { regex: options.regex } : {}),
         ...(options.caseSensitive !== undefined ? { caseSensitive: options.caseSensitive } : {}),
         ...(options.includeBinary !== undefined ? { includeBinary: options.includeBinary } : {}),
-        // Arquivo ilegível/diretório: pula e continua (o `grepWorkspace` já faz isso) — o
-        // aviso vai para o log do main (o resultado não carrega ruído).
-        onError: (path, error) => {
-          console.warn(`Scribe: grep pulou "${path}": ${error.message}`);
-        },
+      };
+      // O `grep` varre os **caminhos absolutos** (o que o worker lê) — cortados no teto.
+      // (Nenhuma raiz sobrevivida ⇒ a lista é vazia: a busca **não varre nada**.)
+      const files =
+        roots.length === 0
+          ? []
+          : (await workspaceIndex(roots)).entries
+              .slice(0, maxFiles)
+              .map((entry) => entry.absolutePath);
+      // ⚠️ A varredura roda **no worker** (lane `grep`): o `main` não lê nenhum arquivo —
+      // quem lê é o worker (`nodeGrepReadFile`), que respeita o teto por arquivo.
+      const result = await core.grepFiles({
+        query,
+        files,
+        options: grepOptions,
+        ...(signal !== undefined ? { signal } : {}),
       });
+      if (roots.length === 0) {
+        // Nenhuma raiz sobreviveu ⇒ o resultado é **vazio**, com o aviso (o painel da busca
+        // mostra os avisos — o descarte nunca é silencioso).
+        return {
+          ...result,
+          warnings: [
+            ...(result.warnings ?? []),
+            "nenhuma raiz da busca está dentro da workspace — a busca foi ignorada",
+          ],
+        };
+      }
+      return result;
     }
     case "command.list":
       // O contrato (`CommandListResult`) é `{ commands: [...] }` — devolver o array puro
@@ -2015,6 +2110,7 @@ function optionalSearchFilesOptions(value: unknown): {
   readonly roots?: readonly string[];
   readonly maxMatches?: number;
   readonly maxFiles?: number;
+  readonly budgetMs?: number;
   readonly ignoreAccents?: boolean;
   readonly regex?: boolean;
   readonly caseSensitive?: boolean;
@@ -2029,6 +2125,7 @@ function optionalSearchFilesOptions(value: unknown): {
     roots?: readonly string[];
     maxMatches?: number;
     maxFiles?: number;
+    budgetMs?: number;
     ignoreAccents?: boolean;
     regex?: boolean;
     caseSensitive?: boolean;
@@ -2039,7 +2136,7 @@ function optionalSearchFilesOptions(value: unknown): {
     const parsed = optionalStringArray(roots, "search.files");
     if (parsed !== undefined) options.roots = parsed;
   }
-  for (const key of ["maxMatches", "maxFiles"] as const) {
+  for (const key of ["maxMatches", "maxFiles", "budgetMs"] as const) {
     const field = record[key];
     if (field === undefined) continue;
     if (typeof field !== "number" || !Number.isFinite(field)) {

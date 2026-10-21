@@ -4,6 +4,35 @@ Todas as mudanças notáveis neste projeto.
 
 ---
 
+## [0.7.1] — 2026-10-21 (fim de tarde)
+
+### 🔍 Grep — a busca em todos os arquivos saiu do processo principal
+
+- **O scan (e a leitura) rodam agora no `worker`** — a busca em **todos os arquivos** da
+  workspace era **síncrona no processo principal**: um padrão regex patológico que escapasse do
+  detector de padrões catastróficos **travava o editor inteiro**. Agora é a task `grep` da lane
+  `grep` do `TaskPool` (o `main` não lê mais nenhum arquivo de texto).
+- **Teto duro (o pool mata o worker)** — `TaskPool.run(..., { timeoutMs })`: ao estourar, o
+  worker é encerrado e a busca devolve "interrompida por tempo" (o `RegExp` do JS não é
+  interrompível — matar o worker é a única saída). O relógio cobre **fila + execução**.
+- **Orçamento soft (20 s)** — a varredura para **entre arquivos** e devolve o resultado parcial
+  com aviso (configurável pelo IPC, com clamp).
+- **Cancelamento de verdade** — cancelar a busca aborta a varredura **no meio** (o `AbortSignal`
+  chega ao `RegExp` do worker); se o worker não responder em 2 s, ele é morto e a lane se recupera.
+- **Prioridade do pool** — a lane `grep` é de **fundo**: o realce de sintaxe (caminho da
+  digitação), o salvar e o find bar **nunca** esperam por ela (uma task de primeiro plano mata a
+  task de fundo marcada `preemptible`).
+- **Detector de padrões catastróficos mais forte** — a ambiguidade agora olha **recursivamente**
+  os grupos aninhados e **normaliza o prefixo `?:`** (`^((?:a|aa))+b$` passa a ser recusado); o
+  teto de profundidade foi de 32 para 256 (falha fechada).
+- **Confinamento das raízes da busca** — o `main` descarta uma raiz **fora** da workspace do
+  documento aberto (um renderer comprometido não varr mais o disco inteiro).
+- **Contrato único** — os tipos do grep vivem em `src/shared/grep-contract.ts` (o IPC e o
+  renderer usam o **mesmo** tipo; antes havia dois espelhos).
+- **1626 testes / 112 arquivos** · AppImage `Scribe-0.7.1.AppImage`.
+
+---
+
 ## [0.7.0] — 2026-10-21
 
 ### ✨ 5 features novas (o editor virou um IDE de verdade)

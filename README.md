@@ -368,7 +368,7 @@ ver [`docs/BACKLOG.md`](docs/BACKLOG.md).
 ## 📍 Onde estamos agora
 
 **Estado em uma linha:** ambiente ✅ (`healthy: true`) · binário-alvo **100% analisável** ✅ ·
-Track A (API Python + IPC) ✅ · **Fase 1 FECHADA** (P1.1–P1.6 ✅) · **Fase 2 ✅** (P2.1: 6 docs de arquitetura, 61 decisões) · **Fase 3 ✅** (P2.2: scaffold `src/` do **Scribe** — compila, testa e sobe) · **P2.4 ✅ fechada** (fatia vertical end-to-end: abrir · editar · undo/redo · cancelamento · realce · busca/replace em lane de background) · **P2.5 ✅** (salvar arquivo) · **P3 fechado** (P3.7/10/11/12) · **próximo: P1#1 — Seleção de texto** ([ver Roadmap](docs/ROADMAP.md)).
+Track A (API Python + IPC) ✅ · **Fase 1 FECHADA** (P1.1–P1.6 ✅) · **Fase 2 ✅** (P2.1: 6 docs de arquitetura, 61 decisões) · **Fase 3 ✅** (P2.2: scaffold `src/` do **Scribe** — compila, testa e sobe) · **P2.4 ✅ fechada** (fatia vertical end-to-end: abrir · editar · undo/redo · cancelamento · realce · busca/replace em lane de background) · **P2.5 ✅** (salvar arquivo) · **P3 fechado** (P3.7/10/11/12) · **app em 0.7.1** (LSP, DAP, plugins, workbench de seções, grep no worker — 1626 testes) · o placar vivo está em [`docs/BACKLOG.md`](docs/BACKLOG.md) e o estado do dia em [`docs/HANDOFF.md`](docs/HANDOFF.md).
 
 | Frente | Status |
 |---|---|

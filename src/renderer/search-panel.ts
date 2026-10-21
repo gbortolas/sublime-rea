@@ -13,7 +13,7 @@
  * **Escolha nossa (não observada no alvo):** o alvo não expõe a busca em arquivos; aqui o
  * painel é uma coluna de resultados agrupados por arquivo, com a contagem de ocorrências.
  */
-import type { GrepMatch, GrepResult } from "../core/workspace/grep";
+import type { GrepMatch, GrepResult } from "../shared";
 
 /** As **flags** de busca que o painel expõe (regex / case / binários). */
 export interface SearchPanelFlags {
@@ -193,6 +193,9 @@ export function groupMatchesByFile(matches: readonly GrepMatch[]): readonly Grep
  * - `empty` — a busca rodou e não achou nada;
  * - `results` — N ocorrências em M arquivos;
  * - `truncated` — o resultado está incompleto (bateu no teto).
+ *
+ * ⚠️ `truncated` vem **antes** de `empty`: uma busca interrompida por tempo pode não ter
+ * achado nada **ainda** — o painel não pode dizer "Nenhum resultado" (seria mentira).
  */
 export function describeSearchStatus(
   result: GrepResult | undefined,
@@ -203,14 +206,17 @@ export function describeSearchStatus(
     return { kind: "idle", total: 0, files: 0, text: "Buscar em todos os arquivos" };
   }
   const total = result.matches.length;
-  if (total === 0) return { kind: "empty", total: 0, files: 0, text: "Nenhum resultado" };
   const files = new Set(result.matches.map((match) => match.path)).size;
   const head = `${total} ${total === 1 ? "resultado" : "resultados"} em ${files} ${
     files === 1 ? "arquivo" : "arquivos"
   }`;
+  // ⚠️ O **truncamento tem precedência** sobre o "nenhum resultado": uma busca
+  // interrompida (por tempo) pode ainda não ter achado nada — o status precisa dizer
+  // que o resultado está incompleto (senão o painel mente com o "Nenhum resultado").
   if (result.truncated) {
     return { kind: "truncated", total, files, text: `${head} (resultado truncado)` };
   }
+  if (total === 0) return { kind: "empty", total: 0, files: 0, text: "Nenhum resultado" };
   return { kind: "results", total, files, text: head };
 }
 

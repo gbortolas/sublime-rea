@@ -32,6 +32,8 @@ import type {
   Edit,
   EditOrigin,
   GrammarRegistry,
+  GrepResult,
+  GrepTaskOptions,
   HighlightLine,
   HighlightSpan,
   MainThreadBusy,
@@ -55,12 +57,15 @@ import {
   CancellationError,
   DEFAULT_RENDER_BACKEND,
   Emitter,
+  GREP_TASK_TIMEOUT_MS,
   PROPERTY_IO_WORKERS,
   RENDER_BACKEND_PROPERTY,
   SEARCH_MAX_TEXT_LENGTH,
   SearchInputError,
   SelectionOps,
   SelectionSetOps,
+  TaskPreemptedError,
+  TaskTimeoutError,
   advanceSelections,
   parseResourceUri,
 } from "../../shared";
@@ -159,6 +164,24 @@ export interface EditorCoreOptions {
   readonly packageScanner?: ResourceScanner;
 }
 
+/**
+ * Parâmetros da **busca na workspace** (o "grep").
+ *
+ * ⚠️ A busca **não** roda no processo principal: ela vira a task `grep` da lane `grep` do
+ * `TaskPool` (o `main` não materializa mais o conteúdo de nenhum arquivo — a leitura é feita
+ * **dentro do worker**, `src/core/workspace/grep-fs.ts`).
+ */
+export interface GrepFilesParams {
+  /** O padrão cru (o que o usuário digitou). */
+  readonly query: string;
+  /** Os arquivos candidatos (caminhos absolutos). */
+  readonly files: readonly string[];
+  /** As opções (todas opcionais — o core/worker aplica os defaults). */
+  readonly options?: GrepTaskOptions;
+  /** Cancela a busca (o `AbortSignal` do IPC). */
+  readonly signal?: AbortSignal;
+}
+
 /** API mínima e assíncrona que o processo `main` consome. */
 export interface EditorCore {
   readonly registry: DocumentRegistry;
@@ -248,6 +271,21 @@ export interface EditorCore {
     query: SearchQuery,
     signal?: AbortSignal,
   ): Promise<SearchDocumentResult>;
+  /**
+   * Busca na **workspace** (o "grep") — roda **no worker** (task `grep`, lane `grep`).
+   *
+   * O processo principal **não** lê nenhum arquivo: a leitura e a varredura acontecem no
+   * worker (`nodeGrepReadFile`), então um `RegExp` patológico **não** trava a janela/IPC/LSP.
+   *
+   * ⚠️ **Teto duro:** se o worker estourar o teto (`TaskTimeoutError` — o pool o **matou**),
+   * o núcleo devolve um `GrepResult` **incompleto** (`truncated: true` + aviso) em vez de
+   * estourar o erro cru para a UI. O cancelamento (`CancellationError`) **propaga**.
+   *
+   * ⚠️ **Preempção:** a busca é de **fundo** — se o realce/salvar precisar do worker, o
+   * núcleo devolve um `GrepResult` **incompleto** com um aviso de "interrompida por outra
+   * operação" (o `TaskPreemptedError` **não** vaza para a UI).
+   */
+  grepFiles(params: GrepFilesParams): Promise<GrepResult>;
   /**
    * Substitui **todas** as ocorrências (literal, sem `$1`). Faz uma busca fresca; **recusa**
    * (`search.tooManyMatches`) quando o resultado foi truncado — substituição parcial silenciosa é
@@ -729,6 +767,12 @@ export function createEditorCore(options: EditorCoreOptions = {}): EditorCore {
   const poolOptions: TaskPoolOptions = {
     ioWorkers: properties.value(ioWorkersDef),
     indexWorkers: properties.value(indexWorkersDef),
+    // A lane `grep` é **isolada** da lane `index` (que serve o find bar): um grep longo
+    // **não** pode atrasar a busca interativa do documento aberto (DEC-CON-6/9).
+    // ⚠️ `grepWorkers` = o **número de workers** da lane `grep` (default **1**). Não há
+    // setting para isto (o alvo não expõe a busca em arquivos): o núcleo fixa **1** (um
+    // grep por vez — a lane é de **fundo**).
+    grepWorkers: 1,
     maxBackgroundThreads: properties.value(maxThreadsDef),
     availableParallelism: available,
     ...(options.idleTimeoutMs !== undefined ? { idleTimeoutMs: options.idleTimeoutMs } : {}),
@@ -737,7 +781,7 @@ export function createEditorCore(options: EditorCoreOptions = {}): EditorCore {
 
   const schedulerOptions: SchedulerOptions = {
     isUIThread: options.isUIThread ?? true,
-    laneProbe: (): Readonly<Record<"io" | "index" | "fileRead", number>> => pool.busy,
+    laneProbe: (): Readonly<Record<PoolLane, number>> => pool.busy,
     ...(options.now !== undefined ? { now: options.now } : {}),
     ...(options.scheduleFlush !== undefined ? { scheduleFlush: options.scheduleFlush } : {}),
   };
@@ -1227,6 +1271,76 @@ export function createEditorCore(options: EditorCoreOptions = {}): EditorCore {
       { handle },
     );
     return { revision, text, result };
+  }
+
+  /**
+   * Busca na **workspace** (o "grep") — **no worker** (a task `grep` da lane `grep`).
+   *
+   * ⚠️ **Por que no worker:** a varredura é CPU-bound e a leitura é de disco — no processo
+   * principal, um `RegExp` patológico travava a janela, o IPC e o LSP. No worker, o pior
+   * caso é o **teto duro** (o pool mata o worker) e a lane se recupera.
+   *
+   * ⚠️ **Teto duro (política):** o `TaskTimeoutError` **não** vaza para a UI — o núcleo
+   * devolve um `GrepResult` **incompleto** (`truncated: true` + aviso). O
+   * `CancellationError` (o `signal` do IPC abortou) **propaga**: cancelar é uma ação do
+   * usuário, não um resultado.
+   *
+   * ⚠️ **Preempção (política):** a busca é de **fundo** (`preemptible: true`) — se uma task
+   * de **primeiro plano** (o **realce de sintaxe**, o **salvar**) precisar do slot, o pool
+   * **mata** o worker do grep ⇒ a task é rejeitada com `TaskPreemptedError` e o núcleo
+   * devolve um `GrepResult` **incompleto** com um aviso **diferente** (o usuário precisa
+   * saber que **ele** não fez nada de errado — foi outra operação que precisou do worker).
+   */
+  async function runGrep(params: GrepFilesParams): Promise<GrepResult> {
+    const { query, files, options, signal } = params;
+    try {
+      return await scheduler.post(
+        "background",
+        () =>
+          pool.run(
+            {
+              kind: "grep",
+              query,
+              files,
+              ...(options !== undefined ? { options } : {}),
+            },
+            {
+              lane: "grep",
+              priority: "background",
+              // A busca é de **fundo**: ela pode ser **morta** para servir uma task de
+              // primeiro plano (o realce de sintaxe e o salvar não podem esperar por ela).
+              preemptible: true,
+              // Teto **duro**: o worker é morto se estourar (o `RegExp` não é interrompível).
+              timeoutMs: GREP_TASK_TIMEOUT_MS,
+              ...(signal !== undefined ? { signal } : {}),
+            },
+          ).done,
+      );
+    } catch (error) {
+      if (error instanceof TaskTimeoutError) {
+        return {
+          matches: [],
+          truncated: true,
+          filesScanned: 0,
+          warnings: [
+            `a busca foi interrompida por tempo (${error.timeoutMs} ms) — o resultado está incompleto`,
+          ],
+        };
+      }
+      if (error instanceof TaskPreemptedError) {
+        // ⚠️ Aviso **diferente** do de tempo: o grep foi **matado** para o realce/salvar
+        // pegar o worker — o usuário não fez nada de errado (a busca é de fundo).
+        return {
+          matches: [],
+          truncated: true,
+          filesScanned: 0,
+          warnings: [
+            "a busca foi interrompida por outra operação (o resultado está incompleto)",
+          ],
+        };
+      }
+      throw error;
+    }
   }
 
   /**
@@ -1730,6 +1844,11 @@ export function createEditorCore(options: EditorCoreOptions = {}): EditorCore {
       assertNotDisposed();
       const { revision, result } = await runSearch(handle, query, signal);
       return { revision, result };
+    },
+
+    async grepFiles(params: GrepFilesParams): Promise<GrepResult> {
+      assertNotDisposed();
+      return runGrep(params);
     },
 
     replaceAll(

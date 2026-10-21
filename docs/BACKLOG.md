@@ -860,15 +860,22 @@ Problemas identificados ao testar o AppImage pela primeira vez:
 - [x] **🐛 Enter não inseria quebra de linha** ✅ — `Ctrl+A` e `Ctrl+End` também corrigidos.
 - Gates: `typecheck`/`lint` exit 0 · **1585 testes / 108 arquivos** · E2E por CDP **9/9**.
 
-## 📌 Fila aberta (2026-10-21, noite) — para a próxima sessão
+## 📌 Fila aberta (2026-10-21, fim de tarde) — para a próxima sessão
 
 > Tudo aqui é **funcional e conhecido** (declarado/verificado), não bug escondido. Ordenado por
 > valor/esforço.
 
-- [ ] **🔍 Grep — mover o scan para o worker** — o `scanText` é **síncrono no main**: um padrão
-      regex que escape do detector de padrões catastróficos ainda trava o app. O `TaskPool` já
-      tem a lane `index` (o find bar usa) ⇒ `TaskKind: "grep"` com leitura no worker.
-      `src/core/workspace/grep.ts`, `src/core/concurrency/worker-entry.ts`.
+- [x] **🔍 Grep — mover o scan para o worker** ✅ **fechado (2026-10-21, fim de tarde)**. A busca
+      em **todos os arquivos** da workspace saiu do **processo principal**: task `grep` na lane
+      `grep` do `TaskPool` (leitura + scan no worker; `src/core/workspace/grep-fs.ts` respeita o
+      teto por arquivo). Entregue: **teto duro** (o pool mata o worker preso ⇒ `TaskTimeoutError`),
+      **orçamento soft** de 20 s (corta entre arquivos, parcial + aviso), **cancelamento** que
+      aborta a varredura no meio (com graça de 2 s que mata o worker preso), **prioridade do pool**
+      (o grep é "de fundo" e `preemptible`: realce/salvar/find bar nunca esperam por ele),
+      **detector de regex catastrófica** com regra de alternância **aninhada** (+ prefixo `?:`),
+      **confinamento das raízes** da busca e **contrato único** (`src/shared/grep-contract.ts`).
+      **1626 testes / 112 arquivos** · E2E: o app **não congela** com regex patológica (main a 0 % de CPU).
+      Detalhes: `docs/HANDOFF.md` §🔍 Grep no worker.
 - [ ] **🌐 Multi-root de verdade** — as raízes ainda são **achatadas em 1** (`resolveWorkspaceRoots`
       expande até o `.git` e dedup). Falta: a pasta do **projeto aberto** como workspace, o prefixo
       `basename(root)/` no ⌘P/grep e o `workspace.files` devolvendo as raízes.

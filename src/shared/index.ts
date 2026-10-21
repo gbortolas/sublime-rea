@@ -18,6 +18,7 @@ export * from "./extension-contract";
 export * from "./ipc-contract";
 export * from "./syntax-contract";
 export * from "./search-contract";
+export * from "./grep-contract";
 export * from "./selection-contract";
 export * from "./theme-contract";
 export * from "./themes";

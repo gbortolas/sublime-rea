@@ -176,6 +176,17 @@ teto = `min(setting, cpus − 1)` para não saturar a máquina (o alvo usa `sysc
 afinidade/dimensionamento — `[INFERIDO]`). **"escolha nossa"** no teto por CPU.
 Evidence IDs: `CON-E18`, `REN-E26`, `CON-E4`, `CON-U6`.
 
+**DEC-CON-13 — Trabalho de **fundo** tem lane própria, teto duro e preemptabilidade explícita.**
+*Racional:* o alvo não expõe o conceito (a busca em arquivos é **escolha nossa**). Mas a lição do
+`grep` (2026-10-21) é geral: um trabalho CPU-bound de fundo (varredura de vários arquivos) **não**
+pode (a) bloquear a thread principal, (b) segurar o único slot do pool a ponto de atrasar o
+caminho interativo (realce de sintaxe na digitação, salvar, find bar) nem (c) ficar pendurado
+para sempre. Daí três mecanismos: **lane própria** (`grep`, cold-start), **teto duro** (`timeoutMs`:
+o worker é morto — o `RegExp` do JS não é interrompível, é a única saída) e **preemptibilidade**
+(`preemptible`: uma task de primeiro plano mata a task de fundo que ocupa o slot). **"escolha
+nossa (não observada no alvo)"**.
+Evidence IDs: — (decisão nossa, sem evidência do alvo).
+
 **DEC-CON-10 — Diagnóstico primeiro-classe: nomear workers e medir "UI ocupada?".**
 *Racional:* o alvo nomeia threads (`prctl(PR_SET_NAME)`: `io_worker`, `file_read_thread`, …) e o host
 expõe `g_is_main_thread_blocking`/`handling_message` (`CON-E5`, `CON-E6`, `CON-U1`, `CON-U2`). Nós damos
@@ -211,7 +222,7 @@ Evidence IDs: `BUF-U4` (limite); `CON-E9`/`CON-E10` (pool p/ o scan).
 
 ```ts
 // ---- Identidade, tarefas e lanes -------------------------------------------
-export type PoolLane = "io" | "index" | "fileRead";                       // lanes do TaskPool (DEC-CON-2/3/9)
+export type PoolLane = "io" | "index" | "fileRead" | "grep";                // lanes do TaskPool (DEC-CON-2/3/9)
 export type Priority = "input" | "edit" | "layout" | "background";        // lanes do Scheduler (canônico, igual a 06)
 /** Handle opaco = id + geração empacotados; nunca um objeto (canônico: igual a 01/03/06). */
 export type DocumentHandle = number & { readonly __brand: "DocumentHandle" };
@@ -240,7 +251,15 @@ export interface Scheduler {
 // ---- TaskPool: pools de trabalho (DEC-CON-2/3/4/9) --------------------------
 export interface TaskPool {
   /** Executa uma tarefa; `lane` escolhe o pool (io = N fixo; fileRead = ≤2 on-demand). */
-  run<T>(task: Task<T>, opts?: { lane?: PoolLane; priority?: Priority; signal?: AbortSignal }): TaskHandle<T>;
+  run<T>(task: Task<T>, opts?: {
+    lane?: PoolLane;
+    priority?: Priority;
+    signal?: AbortSignal;
+    /** Teto duro (ms): ao estourar, o worker é morto (o RegExp do JS não é interrompível). */
+    timeoutMs?: number;
+    /** A task é de fundo e pode ser morta para servir uma task de primeiro plano. */
+    preemptible?: boolean;
+  }): TaskHandle<T>;
   /** Tamanho efetivo da lane (após teto por CPU e setting). */
   size(lane: PoolLane): number;
   /** Reconstrói o pool quando o usuário muda `io_workers`/`index_workers`. */

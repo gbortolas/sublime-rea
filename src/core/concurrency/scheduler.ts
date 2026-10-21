@@ -44,7 +44,7 @@ export class SchedulerDisposedError extends Error {
 /** Ordem estrita das lanes (DEC-CON-5). */
 export const PRIORITY_ORDER: readonly Priority[] = ["input", "edit", "layout", "background"];
 
-const POOL_LANES: readonly PoolLane[] = ["io", "index", "fileRead"];
+const POOL_LANES: readonly PoolLane[] = ["io", "index", "fileRead", "grep"];
 
 /** Agenda de flush injetável (determinismo de teste). Default: `setImmediate`. */
 export type FlushScheduler = (cb: () => void) => void;
@@ -186,7 +186,7 @@ export class SchedulerImpl implements Scheduler {
     const lanes = this.laneProbe
       ? this.laneProbe()
       : ((): Readonly<Record<PoolLane, number>> => {
-          const zero = { io: 0, index: 0, fileRead: 0 };
+          const zero = { io: 0, index: 0, fileRead: 0, grep: 0 };
           return zero;
         })();
     return {

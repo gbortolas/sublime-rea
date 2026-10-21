@@ -6,10 +6,11 @@
  * (buscando / N resultados em M arquivos / nada encontrado / truncado) e os **toggles**
  * de regex/case/binários (a parte de DOM degrada sem quebrar — ela é verificada pelo smoke test).
  */
-import { describe, expect, it } from "vitest";
+import { afterAll, beforeAll, describe, expect, it } from "vitest";
 
 import type { GrepMatch, GrepResult } from "../src/core/workspace/grep";
 import {
+  attachSearchPanel,
   basenameOf,
   DEFAULT_SEARCH_PANEL_FLAGS,
   describeSearchStatus,
@@ -17,6 +18,7 @@ import {
   groupMatchesByFile,
   toggleFlag,
 } from "../src/renderer/search-panel";
+import { FakeElement, firstByClass, installFakeDom, uninstallFakeDom } from "./helpers/fake-dom";
 
 function match(path: string, line: number, column: number, text = "a linha do arquivo"): GrepMatch {
   return { path, line, column, text };
@@ -118,6 +120,69 @@ describe("describeSearchStatus — o estado do painel", () => {
     const status = describeSearchStatus(resultOf([match("/w/a.txt", 0, 0)], true), false);
     expect(status.kind).toBe("truncated");
     expect(status.text).toBe("1 resultado em 1 arquivo (resultado truncado)");
+  });
+
+  it("vazio mas truncado (a busca foi interrompida) ⇒ 'truncated', não 'Nenhum resultado'", () => {
+    const status = describeSearchStatus(resultOf([], true), false);
+    expect(status.kind).toBe("truncated");
+    expect(status.text).toContain("(resultado truncado)");
+    expect(status.text).not.toBe("Nenhum resultado");
+  });
+
+  it("vazio e não truncado ⇒ continua 'Nenhum resultado' (regressão)", () => {
+    const status = describeSearchStatus(resultOf([], false), false);
+    expect(status.kind).toBe("empty");
+    expect(status.text).toBe("Nenhum resultado");
+  });
+});
+
+describe("o painel montado — a mensagem que o usuário vê", () => {
+  beforeAll(() => {
+    // O `instanceof HTMLElement` do painel — o Node não tem o global.
+    const globals = globalThis as { HTMLElement?: unknown };
+    globals.HTMLElement = FakeElement;
+  });
+
+  afterAll(() => {
+    uninstallFakeDom();
+    const globals = globalThis as { HTMLElement?: unknown };
+    delete globals.HTMLElement;
+  });
+
+  /**
+   * Monta o painel de verdade (contra o **DOM falso** do repo) e devolve a linha de status.
+   *
+   * @param result O resultado que a busca devolveu.
+   */
+  function mount(result: GrepResult): FakeElement {
+    const doc = installFakeDom();
+    const host = new FakeElement("div");
+    doc.createElement = (tagName: string): FakeElement => {
+      const element = new FakeElement(tagName);
+      element.ownerDocument = doc;
+      return element;
+    };
+    const panel = attachSearchPanel(host as unknown as HTMLElement, { onOpen: () => {} });
+    panel.setResults(result);
+    const status = firstByClass(host, "search-panel-status");
+    expect(status).toBeDefined();
+    return status!;
+  }
+
+  it("a busca interrompida (vazio + truncado) não mente: mostra o truncamento", () => {
+    const status = mount({
+      matches: [],
+      truncated: true,
+      filesScanned: 0,
+      warnings: ["a busca foi interrompida por tempo (20 s) — o resultado está incompleto"],
+    });
+    expect(status.textContent).toContain("(resultado truncado)");
+    expect(status.textContent).not.toBe("Nenhum resultado");
+  });
+
+  it("a busca vazia (sem truncamento) continua 'Nenhum resultado'", () => {
+    const status = mount({ matches: [], truncated: false, filesScanned: 12 });
+    expect(status.textContent).toBe("Nenhum resultado");
   });
 });
 

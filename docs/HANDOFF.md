@@ -1,10 +1,10 @@
 # HANDOFF — sublime-rea
 
 > **Documento de handoff entre sessões** (leia antes de retomar). Atualizado em **2026-10-21**.
-> Status: **🐛 varredura ✅ · ✨ 3+5+5 features ✅ · 🎨 design system ✅ · ✨ 3 features de última geração ✅ · 🐛 LSP de verdade ✅**<br>
-> Versão: **0.7.0** (AppImage gerado e verificado) · **1585 testes / 108 arquivos**<br>
-> Próximo: **fila aberta no BACKLOG** (grep no worker · multi-root de verdade · split editor ·
-> test explorer · snippets LSP)
+> Status: **🐛 varredura ✅ · ✨ 3+5+5 features ✅ · 🎨 design system ✅ · ✨ 3 features de última geração ✅ · 🐛 LSP de verdade ✅ · 🔍 grep no worker ✅**<br>
+> Versão: **0.7.1** (AppImage gerado e verificado) · **1626 testes / 112 arquivos**<br>
+> Próximo: **fila aberta no BACKLOG** (multi-root de verdade · split editor · test explorer ·
+> snippets LSP)
 
 ---
 
@@ -53,6 +53,11 @@ regex/case/binários/acento · ⌘P caminho completo + criar arquivo · 🖥️ 
 🔒 4 correções de segurança (RCE via `core.fsmonitor`/`gpgsign`, confinamento do Git, symlink na
 criação de arquivo) + 🐛 o `pyright` travava (o cliente LSP ignorava requests servidor→cliente) +
 🐛 Enter não inseria quebra de linha**<br>
+**✨ 0.7.1 — 🔍 Grep no worker: a busca em todos os arquivos saiu do processo principal (task
+`grep` na lane `grep` do `TaskPool`; leitura + scan no worker; teto duro que mata o worker
+preso; orçamento soft de 20 s; cancelamento que para a varredura no meio; detector de regex
+catastrófico com regra aninhada; confinamento das raízes da busca) + 3 bugs de E2E + 9 achados
+de revisão corrigidos (1626 testes / 112 arquivos)**
 
 **✅ Passo operacional resolvido (2026-10-16).** O `setup.py` foi rodado e o MCP `rea` foi relançado
 **já com `REA_GHIDRA_STARTUP_TIMEOUT_MS=900000`** (confirmado em `/proc/*/environ`) — **não** é mais
@@ -79,21 +84,28 @@ Sem o deadline maior, `open_binary`/`analyze` **via MCP** volta a estourar os 33
 > revisores + 1 security + 2 testers** em paralelo e **7 fixers**.
 > Detalhes: [§✨ 0.7.0](#-070--5-features--4-itens-da-fila--segurança-2026-10-21-noite).
 
-1. **🔍 Grep — mover o scan para o worker** — o `scanText` é **síncrono no main**: um padrão regex
-   que escape do detector de padrões catastróficos ainda trava o app. A lane `index` do `TaskPool`
-   já existe (o find bar usa) ⇒ `TaskKind: "grep"`.
-2. **🌐 Multi-root de verdade** — as raízes ainda são achatadas em 1 (`resolveWorkspaceRoots`
+> A sessão de 2026-10-21 (fim de tarde, **0.7.1**) fechou: **🔍 Grep no worker** — a busca em
+> **todos os arquivos** saiu do **processo principal** (task `grep` na lane `grep` do `TaskPool`;
+> a **leitura** e o **scan** rodam no worker) + **teto duro** (o pool mata o worker preso) +
+> **orçamento soft** de 20 s + **cancelamento** que para a varredura no meio + **prioridade do
+> pool** (o realce/salvar/find bar nunca esperam pelo grep) + detector de regex catastrófico
+> com **regra aninhada** + **confinamento das raízes** da busca. Foi uma rodada com **5
+> implementadores** (2 em paralelo + 1 integrador), **2 revisores + 1 security + 2 testers** e
+> **4 fixers**; o E2E achou **3 bugs** e a revisão achou **9** — **todos corrigidos**.
+> Detalhes: [§🔍 Grep no worker](#-grep-no-worker-2026-10-21-fim-de-tarde).
+
+1. **🌐 Multi-root de verdade** — as raízes ainda são achatadas em 1 (`resolveWorkspaceRoots`
    expande até o `.git` e dedup); falta a pasta do **projeto aberto** como workspace.
-3. **🪟 Split editor** (⌘\) — dois grupos de abas lado a lado (ainda não existe).
-4. **🧪 Test explorer** — rodar testes via LSP (`workspace/executeCommand` + `testing/*`).
-5. **📝 Snippets** — expansão de snippets **LSP** (`insertTextFormat: 2`) no popup de completação;
+2. **🪟 Split editor** (⌘\) — dois grupos de abas lado a lado (ainda não existe).
+3. **🧪 Test explorer** — rodar testes via LSP (`workspace/executeCommand` + `testing/*`).
+4. **📝 Snippets** — expansão de snippets **LSP** (`insertTextFormat: 2`) no popup de completação;
    ler `scope` do formato Sublime; `.sublime-completions` (hoje só `.sublime-snippet`).
-6. **🧩 DAP — adaptador Node** (`vscode-js-debug`) — exige download/empacotamento; **decidir antes**.
-7. **📐 Escopo do DAP** — `hitCondition`/`logMessage` chegam ao adaptador, mas **só `condition` tem
-   UI**; falta o badge de logpoint na lista de breakpoints.
-8. **🔧 `executeCommand` do core** — 11 dos 15 comandos anunciados pela paleta não rodam pelo IPC
+5. **🧩 DAP — adaptador Node** (`vscode-js-debug`) — exige download/empacotamento; **decidir antes**.
+6. **📐 Escopo do DAP** — `hitCondition`/`logMessage` chegam ao adaptador, mas **só `condition` tem
+   UI; falta o badge de logpoint na lista de breakpoints.
+7. **🔧 `executeCommand` do core** — 11 dos 15 comandos anunciados pela paleta não rodam pelo IPC
    (a UI funciona por um switch próprio).
-9. **🧹 Roda de limpeza** — o HANDOFF tem ~1250 linhas: consolidar as seções antigas num histórico.
+8. **🧹 Roda de limpeza** — o HANDOFF tem ~1300 linhas: consolidar as seções antigas num histórico.
 
 > ✅ **Pegadinha resolvida (2026-10-16, P3.9):** o `setup.py` agora **detecta** um JDK ≥ 21
 > compatível (`JAVA_HOME`, PATH, sdkman, `/usr/lib/jvm`) e escreve um **`export JAVA_HOME=…` ativo**
@@ -1276,6 +1288,56 @@ correções, **6/10 falham**.
 
 ---
 
+## 🔍 Grep no worker (2026-10-21, fim de tarde)
+
+**O item #1 da fila aberta.** A busca em **todos os arquivos** da workspace (o "grep" do VS Code) rodava
+**sincronamente no processo principal** (`src/main/index.ts` → `grepWorkspace`): o `scanText` era CPU puro
+no event loop ⇒ **um padrão regex patológico travava o editor inteiro** (janela, IPC e LSP paravam).
+
+### O que foi entregue
+
+| Camada | Entrega |
+|---|---|
+| **contrato** | `src/shared/grep-contract.ts` (NOVO) — `GrepMatch`/`GrepResult`/`GrepTaskOptions`/`GrepTaskPayload` + `GREP_DEFAULT_BUDGET_MS` (20 s) e `GREP_TASK_TIMEOUT_MS` (30 s). O `ipc-contract.ts` **parou de espelhar** o tipo (fonte única: core · IPC · renderer falam o mesmo tipo). |
+| **task** | `TaskKind: "grep"` + lane `PoolLane: "grep"` (1 worker, cold-start, reciclada por idle). A task leva o **padrão**, a **lista de arquivos** e as **opções** (tudo serializável). |
+| **worker** | `src/core/workspace/grep-fs.ts` (NOVO) — o port `node:fs` que respeita o teto por arquivo (`stat` antes de ler ⇒ um arquivo de 2 GB **nunca** é materializado) e recusa não-regulares (FIFO/device). `worker-entry.ts` — a task `grep` + um `AbortController` por task (o `cancel` do pool aborta a varredura **entre arquivos**). |
+| **pool** | **Teto duro** (`timeoutMs`): ao estourar, o pool **mata** o worker e rejeita com `TaskTimeoutError` (`code: "task.timeout"`); o relógio cobre **fila + execução**. **Preempção**: sem slot, uma task de primeiro plano preempta um slot ocioso e, se preciso, **mata** a task de **fundo** marcada `preemptible` (`TaskPreemptedError`). **Graça de cancelamento** (2 s): o worker preso é morto ⇒ a lane se recupera. |
+| **core** | `EditorCore.grepFiles({ query, files, options, signal })` — `scheduler.post("background")` + `pool.run({ kind: "grep" }, { lane: "grep", timeoutMs, signal, preemptible: true })`; o `TaskTimeoutError`/`TaskPreemptedError` viram um `GrepResult` **incompleto** com aviso (o `CancellationError` propaga). |
+| **main** | `case "search.files"` ⇒ `core.grepFiles(...)`; o `readTextFile` (que lia o arquivo no main) **saiu**; as raízes são **confinadas** à workspace do documento aberto; `maxFiles`/`budgetMs` são clampados **antes** de cruzar o port. |
+| **motor** | `grepWorkspace` ganhou **orçamento soft** (`budgetMs`, corta entre arquivos, resultado parcial + aviso) e relógio injetável (`now`); o **detector de regex catastrófica** olha grupos **aninhados** e normaliza o prefixo `?:` (profundidade 32 → 256, falha fechada). |
+
+### Por que a task é "de fundo" (`preemptible`)
+
+O `grep` pode segurar o único slot do pool por até 30 s. Se o realce de sintaxe (caminho da digitação),
+o salvar ou o find bar esperassem por ele, o editor "engasgaria". Com `preemptible`, uma task de
+**primeiro plano** que encontra a lane de fundo ocupada **mata** o worker dela: o grep devolve
+"interrompida por outra operação" e o realce volta na hora.
+
+### Verificação
+
+- Gates: `typecheck`/`lint`/`build` exit 0 · **1626 testes / 112 arquivos** (baseline 1585/108).
+- **E2E por CDP** (2 rodadas): o app **não congela** com regex patológica (main a 0 % de CPU, worker a
+  100 %, rAF a 60 fps, latência de IPC 0,7 ms), o orçamento soft corta aos 20 s, o aviso de
+  "interrompida" aparece, o cancelamento **para** o worker e o status do painel mostra
+  "(resultado truncado)".
+- **3 bugs de E2E** (o cancelamento deixava a lane morta com a thread a 100 % · o detector tinha
+  falso negativo com `?:` · o painel escondia "(resultado truncado)") e **9 achados de revisão**
+  (3 ALTOs no motor · 1 ALTO de prioridade no pool · 2 MÉDIOS de segurança: a graça de cancelamento
+  podia matar um escritor e as raízes não eram confinadas) — **todos corrigidos**.
+- 📦 AppImage `release/Scribe-0.7.1.AppImage` (boota com `env` limpo; LSP + plugin host ok).
+
+### Limitações declaradas
+
+- O detector de regex catastrófica é **conservador**: padrões muito aninhados ou com truques de
+  sintaxe (lookahead, backreference) podem escapar ⇒ o **teto duro** do pool é a rede final (o worker
+  morre; o app não trava).
+- O `grep` **perde o resultado parcial** quando é interrompido por tempo ou preemptado.
+- O confinamento das raízes é **por raiz pedida**: um **symlink de arquivo** dentro da workspace
+  continua sendo seguido (dívida pré-existente).
+- O `RegExp` **não** é interrompível: o corte acontece **entre arquivos**.
+
+---
+
 ## 🗂️ Estado do repositório
 
 - ✅ **Working tree LIMPO na abertura desta sessão** (2026-10-20) — a pendência de 2026-10-17
@@ -1295,6 +1357,15 @@ correções, **6/10 falham**.
   `env` limpo**: sobe, **os 2 servidores LSP iniciam**, plugin host pronto (pid real no log).
 - ✅ **📦 AppImage 0.7.0** — `release/Scribe-0.7.0.AppImage`, gerado e verificado nesta sessão
   (a 5 features + os 4 itens da fila + as correções de segurança).
+- ✅ **Working tree limpo ao fim desta sessão** (2026-10-21, fim de tarde) — **1 commit**:
+  `feat(grep): a busca na workspace sai do processo principal (0.7.1)` (ver `git log --oneline -3`).
+- ✅ **📦 AppImage 0.7.1** — `release/Scribe-0.7.1.AppImage` (117 MB), gerado e **testado com
+  `env` limpo**: sobe, **os 2 servidores LSP iniciam**, plugin host pronto (pid real no log).
+  ⚠️ O `AppImage` tem **lock de instância única** (`app.requestSingleInstanceLock()`): se outro
+  Scribe estiver aberto, o novo **sai em silêncio** (exit 0, sem log) — para testar em paralelo,
+  use `--user-data-dir=<dir> diferente`.
+- ✅ **Harness de verificação do grep** (reutilizável): `/tmp/opencode/cdp-grep3.mjs` (a 1ª
+  rodada completa do E2E do grep) e `/tmp/opencode/cdp-grep5*.mjs` (a 2ª rodada, por fase).
 - ✅ **Servidores LSP instalados** — `typescript-language-server` + `typescript@5` + `pyright`
   (**etapa 13/13** do `setup/setup.py`; opcional — sem eles o app funciona, mas fica sem
   diagnóstico/completecão). ⚠️ O `typescript` precisa ser o **5.x**: o 7+ (tsgo) **não tem**

@@ -76,7 +76,7 @@ export class FakeScheduler implements Scheduler {
   }
 
   snapshot(): MainThreadBusy {
-    return { busyMs: 0, pendingCallbacks: 0, lanes: { io: 0, index: 0, fileRead: 0 } };
+    return { busyMs: 0, pendingCallbacks: 0, lanes: { io: 0, index: 0, fileRead: 0, grep: 0 } };
   }
 }
 

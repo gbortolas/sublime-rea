@@ -91,7 +91,7 @@ describe("SchedulerImpl — coalescing e prioridade estrita", () => {
     const p2 = scheduler.post("background", () => 2);
 
     expect(scheduler.snapshot().pendingCallbacks).toBe(2);
-    expect(scheduler.snapshot().lanes).toEqual({ io: 0, index: 0, fileRead: 0 });
+    expect(scheduler.snapshot().lanes).toEqual({ io: 0, index: 0, fileRead: 0, grep: 0 });
 
     flush();
     await p1;

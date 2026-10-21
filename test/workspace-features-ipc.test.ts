@@ -18,7 +18,8 @@ import { join } from "node:path";
 import { createEditorCore } from "../src/core/editor";
 import type { FileSystem } from "../src/core/buffer";
 import { handleIpcRequest } from "../src/main/index";
-import { clearWorkspaceIndexCache } from "../src/main/index";
+import { clearWorkspaceIndexCache, createIpcSignalRegistry } from "../src/main/index";
+import type { IpcHandlerDeps } from "../src/main/index";
 import { IPC_METHODS, IPC_VERSION } from "../src/shared";
 import type { DocumentHandle, GrepResult, IpcResponse, WorkspaceFilesResult } from "../src/shared";
 
@@ -68,8 +69,16 @@ async function call(
   method: string,
   args: readonly unknown[],
   core: Awaited<ReturnType<typeof createEditorCore>>,
+  extra?: { readonly signalId?: number; readonly deps?: IpcHandlerDeps },
 ): Promise<IpcResponse> {
-  return handleIpcRequest(core, { v: IPC_VERSION, id: 1, method, args });
+  const request = {
+    v: IPC_VERSION,
+    id: 1,
+    method,
+    args,
+    ...(extra?.signalId !== undefined ? { signalId: extra.signalId } : {}),
+  };
+  return handleIpcRequest(core, request, extra?.deps ?? {});
 }
 
 describe("main — `workspace.files` (o índice do Quick Open)", () => {
@@ -111,8 +120,15 @@ describe("main — `search.files` (o grep da workspace)", () => {
   it("acha as ocorrências nos arquivos da workspace", async () => {
     const root = await makeWorkspace();
     clearWorkspaceIndexCache();
-    const core = await createEditorCore({ fileSystem: memoryFs({}), availableParallelism: 2 });
+    // ⚠️ O documento aberto torna a workspace temporária uma raiz **conhecida**: o `main`
+    // **confina** as raízes da busca (o renderer não pode mandar varrer o disco inteiro).
+    const core = await createEditorCore({
+      fileSystem: memoryFs({ [join(root, "nota.txt")]: "sem alvo aqui\n" }),
+      availableParallelism: 2,
+    });
     try {
+      const opened = await call("document.open", [join(root, "nota.txt")], core);
+      expect(opened.ok).toBe(true);
       const response = await call("search.files", ["alvo", { roots: [root] }], core);
       expect(response.ok).toBe(true);
       const value = (response.ok ? response.value : undefined) as GrepResult;
@@ -135,6 +151,35 @@ describe("main — `search.files` (o grep da workspace)", () => {
     try {
       const response = await call("search.files", ["", { roots: [root] }], core);
       expect(response.ok).toBe(false);
+    } finally {
+      core.dispose();
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it("a busca cancelada (signal abortado) responde `cancelled` (o grep roda no worker)", async () => {
+    const root = await makeWorkspace();
+    clearWorkspaceIndexCache();
+    const signals = createIpcSignalRegistry();
+    // O documento aberto torna a workspace uma raiz **conhecida** (o `main` confina a busca)
+    // ⇒ o grep **roda de verdade** no worker (é o que o cancelamento precisa interromper).
+    const core = await createEditorCore({
+      fileSystem: memoryFs({ [join(root, "nota.txt")]: "sem alvo aqui\n" }),
+      availableParallelism: 2,
+    });
+    try {
+      const opened = await call("document.open", [join(root, "nota.txt")], core);
+      expect(opened.ok).toBe(true);
+      // O `signalId` liga o request ao `AbortSignal` do main (DEC-IPC-9): abortar aqui
+      // cancela a task `grep` **no worker** (o `cancel` do pool aborta a varredura).
+      const pending = call("search.files", ["alvo", { roots: [root] }], core, {
+        signalId: 7,
+        deps: { signals },
+      });
+      signals.abort(7);
+      const response = await pending;
+      expect(response.ok).toBe(false);
+      expect(response.ok ? undefined : response.error.code).toBe("cancelled");
     } finally {
       core.dispose();
       await rm(root, { recursive: true, force: true });
