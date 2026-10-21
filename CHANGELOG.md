@@ -6,6 +6,18 @@ Todas as mudanças notáveis neste projeto.
 
 ## [0.5.0] — 2026-10-21
 
+### 🐛 LSP no AppImage (o app abriu sem diagnóstico/completecão)
+
+- O **AppImage** não achava os servidores LSP: o `PATH` do launcher do desktop não tem o `bin` do
+  nvm ⇒ `spawn` falhava (ENOENT) e o app ficava sem LSP. Agora o main **acrescenta** o `bin` do node
+  gerenciado ao `PATH` (o mais novo primeiro — o `unshift` em laço punha o Node 14 na frente, e os
+  servidores LSP exigem Node ≥ 18).
+- O `tsserver.path` injetado no `initialize` apontava para o `node_modules` do projeto, **que não
+  existe no AppImage** ⇒ o servidor não achava o TypeScript. Agora o path só é usado se existir em
+  disco, senão cai no TypeScript **global** (e o `typescript@5` — o 7+/tsgo não tem `tsserver.js`).
+- O **stderr** do servidor LSP era descartado ⇒ o motivo real da falha sumia. Agora é bufferizado e
+  logado quando o handshake falha.
+
 ### ✨ 5 features
 
 - **🗃️ Undo por documento** — a pilha de undo era **global**: desfazer na aba B aplicava os deltas

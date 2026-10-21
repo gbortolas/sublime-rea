@@ -2433,7 +2433,13 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
 # Pacotes npm dos servidores LSP que o Scribe usa (BUILTIN_LSP_SERVERS em
 # `src/shared/lsp-contract.ts`). São **opcionais**: sem eles o app continua
 # funcionando (o LspManager só avisa e segue) — mas fica sem diagnóstico/completecão.
-LSP_SERVERS_NPM = ("typescript-language-server", "pyright")
+#
+# `typescript` entra na lista porque o `typescript-language-server` precisa do
+# `tsserver` (ele é *peer dependency*: sem o `typescript` instalado, o servidor
+# sobe mas nunca responde o `initialize` ⇒ timeout de 15 s).
+# ⚠️ **Fixado em 5.x**: o TypeScript 7+ (tsgo) **não tem** `lib/tsserver.js` ⇒ o LSP
+# do TypeScript não funciona com ele.
+LSP_SERVERS_NPM = ("typescript-language-server", "typescript@5", "pyright")
 
 
 def step_lsp_servers(ctx: Ctx, ui: UI) -> None:

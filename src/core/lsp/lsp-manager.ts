@@ -109,6 +109,11 @@ export class LspManager implements Disposable {
       await client.connect(initParams);
       return client;
     } catch (err) {
+      // O stderr do servidor tem a **razão real** da falha (o sintoma é só "timeout").
+      const stderrTail = transport.stderr.trim();
+      if (stderrTail.length > 0) {
+        console.warn(`Scribe: stderr do servidor LSP "${config.name}": ${stderrTail.slice(-600)}`);
+      }
       // O servidor **não** subiu (comando ausente, handshake falho): tira ele do registro.
       // Sem isso, o cliente ficaria registrado mas desconectado e **toda** operação de
       // documento para aquela extensão quebraria com `LSP_NOT_CONNECTED` — inclusive a

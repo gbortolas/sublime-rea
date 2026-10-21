@@ -12,7 +12,8 @@
  * (`process.versions.electron`) — por isso este módulo é importável em `node`/vitest.
  */
 import { execFileSync } from "node:child_process";
-import { statSync } from "node:fs";
+import { existsSync, readdirSync, statSync } from "node:fs";
+import { homedir } from "node:os";
 import { join, resolve } from "node:path";
 import type { BrowserWindow as ElectronBrowserWindow } from "electron";
 
@@ -1129,7 +1130,78 @@ export async function startMainProcess(): Promise<void> {
   });
 
   // ── LSP: inicializa servidores ──────────────────────────────────────────────────────────────
+  ensureLspServersOnPath();
   const lspManager = new LspManager(BUILTIN_LSP_SERVERS);
+
+  /**
+   * Acha o `tsserver.js` do TypeScript **5.x** (o que o `typescript-language-server` usa).
+   *
+   * Ordem: (1) o `typescript` do próprio projeto (dev/build local); (2) o `typescript` global do
+   * node gerenciado (nvm) — é o caso do **AppImage**, que não embute `node_modules`.
+   * ⚠️ O TypeScript **7+** (tsgo) **não tem** `tsserver.js` ⇒ o LSP não funciona com ele.
+   */
+  function resolveTsserverPath(): string | undefined {
+    try {
+      const local = require.resolve("typescript/lib/tsserver.js");
+      // ⚠️ No **AppImage** o `node_modules` do projeto não é embutido ⇒ o path resolvido
+      // **não existe** em disco ⇒ o servidor LSP rejeitaria o `tsserver` ⇒ handshake
+      // travado. Só use o path local se ele realmente existir.
+      if (existsSync(local)) return local;
+    } catch {
+      // sem `typescript` local — tenta o global
+    }
+    const home = homedir();
+    const roots: string[] = [];
+    const nvmRoot = join(home, ".nvm", "versions", "node");
+    try {
+      for (const v of readdirSync(nvmRoot).sort().reverse()) {
+        roots.push(join(nvmRoot, v, "lib", "node_modules"));
+      }
+    } catch {
+      // sem nvm
+    }
+    for (const root of roots) {
+      const candidate = join(root, "typescript", "lib", "tsserver.js");
+      if (existsSync(candidate)) return candidate;
+    }
+    return undefined;
+  }
+
+  /**
+   * Garante que os servidores LSP (`typescript-language-server`, `pyright-langserver`) estejam
+   * no `PATH` do processo.
+   *
+   * Eles são instalados pelo `npm -g` — que o `setup.py` roda no **shell do usuário**. Quando o
+   * app é aberto pelo **AppImage** (launcher do desktop), o `PATH` é o da sessão do desktop e
+   * **não** tem o `bin` do nvm ⇒ o spawn falhava com ENOENT e o app ficava sem LSP.
+   * Aqui acrescentamos o `bin` do node gerenciado (nvm), se existir.
+   */
+  function ensureLspServersOnPath(): void {
+    const path = process.env["PATH"] ?? "";
+    const parts = path.split(":").filter((p) => p.length > 0);
+    const has = (bin: string): boolean => parts.some((p) => existsSync(join(p, bin)));
+    if (has("typescript-language-server") && has("pyright-langserver")) return;
+
+    const home = homedir();
+    const candidates: string[] = [];
+    // nvm: ~/.nvm/versions/node/*/bin (o mais novo primeiro)
+    const nvmRoot = join(home, ".nvm", "versions", "node");
+    try {
+      const versions = readdirSync(nvmRoot)
+        .filter((v) => existsSync(join(nvmRoot, v, "bin")))
+        .sort()
+        .reverse();
+      for (const v of versions) candidates.push(join(nvmRoot, v, "bin"));
+    } catch {
+      // sem nvm — segue
+    }
+    // ⚠️ `unshift` em laço inverteria a ordem (o **mais antigo** do nvm ficaria na frente ⇒ o
+    // `node` v14 seria o do PATH ⇒ os servidores LSP (que exigem Node ≥ 18) não subem).
+    // `unshift(...candidates)` preserva a ordem: o mais novo primeiro.
+    const missing = candidates.filter((dir) => !parts.includes(dir));
+    if (missing.length > 0) parts.unshift(...missing);
+    if (parts.length > 0) process.env["PATH"] = parts.join(":");
+  }
 
   // Detecta pastas de workspace a partir do CWD (marcador: .git / package.json / pyproject.toml)
   function detectWorkspaceFolders(): readonly { readonly uri: string; readonly name: string }[] {
@@ -1166,8 +1238,9 @@ export async function startMainProcess(): Promise<void> {
     // onde está o `tsserver.js` — sem isso ele rejeita o handshake).
     let config = baseConfig;
     if (baseConfig.languageId === "typescript") {
-      try {
-        const tsserverPath = require.resolve("typescript/lib/tsserver.js");
+      const tsserverPath = resolveTsserverPath();
+      console.info(`Scribe: tsserver.path = ${tsserverPath ?? "(não encontrado)"}`);
+      if (tsserverPath !== undefined) {
         config = {
           ...baseConfig,
           initializationOptions: {
@@ -1175,10 +1248,9 @@ export async function startMainProcess(): Promise<void> {
             tsserver: { path: tsserverPath },
           },
         };
-      } catch {
-        // typescript não instalado — deixa o config original; o catch do
-        // `startServer` exibirá o warning padrão.
       }
+      // Sem `tsserver.js` (o TypeScript 7+/tsgo **não tem** `tsserver.js`; o servidor LSP
+      // precisa do TS 5.x) — deixa o config original e o `startServer` mostra o warning.
     }
 
     lspInitPromises.push(

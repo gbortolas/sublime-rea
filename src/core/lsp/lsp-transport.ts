@@ -72,6 +72,8 @@ class MessageBuffer {
 export class LspStdioTransport implements Disposable {
   private proc: ChildProcess | null = null;
   private readonly store = new DisposableStore();
+  /** Últimos 4 KB do stderr do servidor (diagnóstico quando o handshake falha). */
+  private stderrBuffer = "";
   private readonly buffer = new MessageBuffer();
 
   private readonly onMessageEmitter = new Emitter<string>();
@@ -156,9 +158,10 @@ export class LspStdioTransport implements Disposable {
       proc.stdout.on("data", onStdoutData);
       this.store.add(toDisposable(() => proc.stdout?.off("data", onStdoutData)));
 
-      // stderr — ignorado (logs de depuração do servidor)
-      proc.stderr?.on("data", () => {
-        // stderr do servidor LSP é ignorado intencionalmente
+      // stderr do servidor LSP: **bufferizado** (o erro real do servidor — ex.: "Could not find
+      // a valid TypeScript installation" — é a única pista quando o handshake trava).
+      proc.stderr?.on("data", (chunk: Buffer) => {
+        this.stderrBuffer = (this.stderrBuffer + chunk.toString("utf8")).slice(-4096);
       });
 
       this.store.add(toDisposable(() => {
@@ -229,6 +232,14 @@ export class LspStdioTransport implements Disposable {
   /** @inheritdoc */
   dispose(): void {
     this.disconnect();
+  }
+
+  /**
+   * Últimos 4 KB do **stderr** do servidor (o motivo real de um handshake que trava — ex.:
+   * "Could not find a valid TypeScript installation").
+   */
+  get stderr(): string {
+    return this.stderrBuffer;
   }
 
   private flushBuffer(): void {
