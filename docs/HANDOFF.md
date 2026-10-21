@@ -1072,6 +1072,12 @@ para `const const name = value;` e o popup sai do DOM ✓.
   commitado — ver `git log --oneline -1`.
   **Lição:** o passo "commit + working tree limpo" do protocolo precisa ser conferido com
   `git status --short` **antes** de encerrar a sessão, não assumido.
+- ✅ **Working tree limpo ao fim desta sessão** (2026-10-21, noite) — a varredura de usabilidade,
+  as 3 features e o wiring do dropdown foram commitados (`git log --oneline -4`).
+- ✅ **📦 AppImage 0.4.1** — `release/Scribe-0.4.1.AppImage` (117 MB), **gerado e testado**
+  (sobe, plugin host pronto, LSP iniciados).
+- ✅ **Servidores LSP instalados** — `typescript-language-server` + `pyright` (nova **etapa 13/13**
+  do `setup/setup.py`; opcional — sem eles o app funciona, mas fica sem diagnóstico/completecão).
 - `.gitignore` cobre `target/`, `tools/`, `setup/env.sh`, artefatos Ghidra, venvs, `dist/`,
   `node_modules/`, caches de IDE e `.serena/`.
 - **Stack do scaffold (Fase 3):** `package.json` + `package-lock.json` versionados; `dist/` e
