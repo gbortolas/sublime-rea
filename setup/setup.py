@@ -48,7 +48,7 @@ from pathlib import Path
 # ---------------------------------------------------------------------------
 # Constantes base
 # ---------------------------------------------------------------------------
-TOTAL_STEPS = 12
+TOTAL_STEPS = 13
 PROJECT_NAME = "sublime-rea"
 RICH_VERSION_FALLBACK = "13.9.4"
 BOOTSTRAP_ENV = "SUBLIME_REA_RICH_BOOTSTRAPPED"
@@ -2426,6 +2426,66 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     return parser.parse_args(argv)
 
 
+# ---------------------------------------------------------------------------
+# Etapa 13 — servidores LSP (diagnóstico/completecão/hover do Scribe)
+# ---------------------------------------------------------------------------
+
+# Pacotes npm dos servidores LSP que o Scribe usa (BUILTIN_LSP_SERVERS em
+# `src/shared/lsp-contract.ts`). São **opcionais**: sem eles o app continua
+# funcionando (o LspManager só avisa e segue) — mas fica sem diagnóstico/completecão.
+LSP_SERVERS_NPM = ("typescript-language-server", "pyright")
+
+
+def step_lsp_servers(ctx: Ctx, ui: UI) -> None:
+    ui.step(13, "Servidores LSP (TypeScript + Python)")
+    npm = shutil.which("npm")
+    if npm is None:
+        ui.warn("npm não encontrado no PATH — servidores LSP não instalados (opcional)")
+        ui.mark(13, "warn", "npm ausente")
+        return
+
+    missing = [pkg for pkg in LSP_SERVERS_NPM if shutil.which(pkg) is None]
+    if not missing:
+        ui.ok("servidores LSP já presentes: " + ", ".join(LSP_SERVERS_NPM))
+        ui.mark(13, "ok", "já instalados")
+        return
+
+    if ui.dry_run:
+        ui.show(f"{npm} install -g {' '.join(missing)}")
+        ui.mark(13, "dry", "plano impresso")
+        return
+
+    try:
+        proc = subprocess.run(
+            [npm, "install", "-g", *missing],
+            capture_output=True,
+            text=True,
+            timeout=600,
+            check=False,
+        )
+    except (OSError, subprocess.SubprocessError) as exc:
+        ui.warn(f"falha ao instalar os servidores LSP: {exc} (opcional)")
+        ui.mark(13, "warn", "falhou")
+        return
+
+    if proc.returncode != 0:
+        ui.warn(
+            "npm install -g falhou para os servidores LSP "
+            f"(código {proc.returncode}); são opcionais. Detalhe: "
+            f"{(proc.stderr or proc.stdout or '').strip()[:200]}"
+        )
+        ui.mark(13, "warn", "falhou")
+        return
+
+    still_missing = [pkg for pkg in LSP_SERVERS_NPM if shutil.which(pkg) is None]
+    if still_missing:
+        ui.warn("ainda sem " + ", ".join(still_missing) + " no PATH (opcional)")
+        ui.mark(13, "warn", "parcial")
+        return
+    ui.ok("servidores LSP instalados: " + ", ".join(LSP_SERVERS_NPM))
+    ui.mark(13, "ok", "instalados")
+
+
 def run_all(ctx: Ctx, ui: UI, args: argparse.Namespace) -> int:
     ui.header(ctx.pins(), args.dry_run)
     step_os(ctx, ui)
@@ -2439,6 +2499,7 @@ def run_all(ctx: Ctx, ui: UI, args: argparse.Namespace) -> int:
     step_env(ctx, ui, args.write_rc)
     step_target(ctx, ui)
     step_mcp(ctx, ui, rea_cmd)
+    step_lsp_servers(ctx, ui)
     step_doctor(ctx, ui, rea_cmd)
     return 0
 
