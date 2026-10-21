@@ -1534,15 +1534,19 @@ def step_rizin(ctx: Ctx, ui: UI) -> None:
 
         src_dir = extract_tmp / ctx.rizin_extracted_dirname
         if not (src_dir / "bin" / "rizin").is_file():
-            candidates = sorted(p for p in extract_tmp.iterdir() if p.is_dir())
-            if candidates:
-                src_dir = candidates[0]
-            else:
+            # O tarball pode ser "flat" (bin/ na raiz, sem diretório wrapper)
+            # ou ter um wrapper (<nome>/bin/rizin). Escolher por ordem alfabética
+            # pega "bin" e instala os binários soltos na raiz — por isso a busca
+            # é pelo diretório que de fato contém bin/rizin.
+            candidates = [extract_tmp, *sorted(p for p in extract_tmp.iterdir() if p.is_dir())]
+            match = next((d for d in candidates if (d / "bin" / "rizin").is_file()), None)
+            if match is None:
                 raise SetupFailure(
                     EXIT_GHIDRA,
                     "diretório extraído do Rizin não encontrado",
-                    [f"nada em {extract_tmp}"],
+                    [f"nenhum diretório com bin/rizin em {extract_tmp}"],
                 )
+            src_dir = match
 
         _swap_dir(ctx.rizin_install_dir, src_dir)
 
@@ -1596,7 +1600,10 @@ def _rizin_plan(ctx: Ctx, ui: UI) -> None:
     ui.info(f"extraindo em {ctx.rea_tools_dir} (via dir temporário, mv atômico)...")
     ui.dry(f"mkdir <tmpdir>/ && tar -xJf {ctx.rizin_tarball_path} -C <tmpdir>/")
     ui.dry(f"mv {ctx.rizin_install_dir} {ctx.rizin_install_dir}.old.<pid>  # backup")
-    ui.dry(f"mv <tmpdir>/{ctx.rizin_extracted_dirname} {ctx.rizin_install_dir}")
+    ui.dry(
+        f"mv <tmpdir>/[<wrapper>/]  # wrapper se existir, senão o próprio <tmpdir> "
+        f"(tarball flat) — sempre o dir com bin/rizin → {ctx.rizin_install_dir}"
+    )
     ui.dry(f"rm -rf {ctx.rizin_install_dir}.old.<pid>")
 
 
@@ -1692,10 +1699,24 @@ def step_env(ctx: Ctx, ui: UI, write_rc: bool) -> None:
                 f'# export JAVA_HOME="/caminho/do/jdk-{ctx.ghidra_jdk_min}"  '
                 "# descomente se precisar forçar um JDK\n"
             )
+        # `rea` e `node` (>= 20) são globais no bin do Node detectado na etapa 4; shells
+        # não-interativos (scripts, CI, agentes) não herdam o PATH do nvm — por isso o
+        # env.sh também predispõe esse bin. Idempotente: o arquivo é reescrito por inteiro.
+        path_line = ""
+        for cmd in ("rea", "node"):
+            found = shutil.which(cmd)
+            if found:
+                bindir = str(Path(found).parent)
+                path_line = (
+                    f'export PATH="{bindir}:$PATH"  # {cmd} detectado pelo setup '
+                    "(Node >= 20 + CLI rea)\n"
+                )
+                break
         _write_atomic(
             ENV_FILE,
             "# Gerado por setup/setup.py — 'source' este arquivo para exportar o ambiente do sublime-rea.\n"
-            f'export REA_TOOLS_DIR="{ctx.rea_tools_dir}"\n'
+            + path_line
+            + f'export REA_TOOLS_DIR="{ctx.rea_tools_dir}"\n'
             f'export REA_TOOLS_ALIAS="{ctx.rea_tools_alias}"\n'
             f'export GHIDRA_INSTALL_DIR="{ctx.ghidra_install_dir}"\n'
             f'export {OPENCODE_PWNTOOLS_KEY}="{ctx.pwntools_python}"\n'
@@ -2046,11 +2067,30 @@ def _jsonc_env_value_span(
     return None
 
 
+def _jsonc_rea_server_span(
+    text: str, mcp: tuple[int, int] | None
+) -> tuple[int, int] | None:
+    """Span do objeto do servidor ``rea`` dentro de ``mcp``.
+
+    O opencode já não aninha servidores em ``mcp.servers``: o schema vigente é
+    ``mcp.<nome>`` direto. Aceitamos **ambos** — ``mcp.servers.rea`` (legado) e
+    ``mcp.rea`` (atual) — senão a gravação do env silencia com warn e o registro
+    do MCP fica sem as variáveis.
+    """
+    if not mcp:
+        return None
+    servers = _jsonc_key_object(text, "servers", mcp[0])
+    if servers:
+        rea = _jsonc_key_object(text, "rea", servers[0])
+        if rea:
+            return rea
+    return _jsonc_key_object(text, "rea", mcp[0])
+
+
 def _jsonc_rea_env_value(text: str, key: str) -> object | None:
-    """Valor atual de ``mcp.servers.rea.environment[key]`` (ou None)."""
+    """Valor atual de ``mcp[.servers].rea.environment[key]`` (ou None)."""
     mcp = _jsonc_key_object(text, "mcp")
-    servers = _jsonc_key_object(text, "servers", mcp[0]) if mcp else None
-    rea = _jsonc_key_object(text, "rea", servers[0]) if servers else None
+    rea = _jsonc_rea_server_span(text, mcp)
     env = _jsonc_key_object(text, "environment", rea[0]) if rea else None
     if not env:
         return None
@@ -2059,14 +2099,13 @@ def _jsonc_rea_env_value(text: str, key: str) -> object | None:
 
 
 def _jsonc_set_rea_env(text: str, key: str, value: str) -> tuple[str | None, bool]:
-    """Insere/atualiza ``key=value`` em ``mcp.servers.rea.environment``.
+    """Insere/atualiza ``key=value`` em ``mcp[.servers].rea.environment``.
 
     Edição **cirúrgica por texto** (preserva comentários/formatação do JSONC);
     retorna ``(novo_texto, mudou)`` ou ``(None, False)`` se a estrutura não existe.
     """
     mcp = _jsonc_key_object(text, "mcp")
-    servers = _jsonc_key_object(text, "servers", mcp[0]) if mcp else None
-    rea = _jsonc_key_object(text, "rea", servers[0]) if servers else None
+    rea = _jsonc_rea_server_span(text, mcp)
     if not rea:
         return None, False
     rea_open, rea_close = rea
@@ -2176,7 +2215,7 @@ def _ensure_opencode_env(ctx: Ctx, ui: UI, key: str, value: str) -> bool:
     original = path.read_text(encoding="utf-8", errors="replace")
     new_text, changed = _jsonc_set_rea_env(original, key, value)
     if new_text is None:
-        ui.warn(f"não encontrei 'mcp.servers.rea.environment' em {path}; ajuste {key} manualmente")
+        ui.warn(f"não encontrei 'mcp[.servers].rea.environment' em {path}; ajuste {key} manualmente")
         return False
     if not changed:
         ui.ok(f"{key} já consta em {path}")
@@ -2184,7 +2223,10 @@ def _ensure_opencode_env(ctx: Ctx, ui: UI, key: str, value: str) -> bool:
 
     try:
         data = json.loads(_strip_jsonc(new_text))
-        assert data["mcp"]["servers"]["rea"]["environment"][key] == value
+        mcp = data["mcp"]
+        servers = mcp.get("servers")
+        rea = (servers.get("rea") if isinstance(servers, dict) else None) or mcp.get("rea")
+        assert rea["environment"][key] == value
     except Exception as exc:  # noqa: BLE001 - nunca gravar jsonc inválido
         ui.warn(f"edição do jsonc não validou ({exc}); mantendo o original")
         return False
@@ -2198,17 +2240,21 @@ def _ensure_opencode_env(ctx: Ctx, ui: UI, key: str, value: str) -> bool:
 
 # Aviso por chave quando o registro MCP não puder recebê-la.
 _MCP_ENV_HINTS = {
+    "REA_RIZIN_COMMAND": (
+        "o provider nativo Rizin ficará inacessível até você adicioná-la ao "
+        "environment do servidor rea (REA_RIZIN_COMMAND)"
+    ),
     OPENCODE_PWNTOOLS_KEY: (
         "a ferramenta inspect_binary_layout seguirá indisponível na sessão do agente até você "
-        "adicioná-la ao mcp.servers.rea.environment"
+        "adicioná-la ao `environment` do servidor rea (opencode.jsonc)"
     ),
     GHIDRA_STARTUP_TIMEOUT_KEY: (
         "o provider Ghidra usará o deadline default (330 s) e pode falhar em alvos com "
-        "auto-análise longa até você adicioná-la ao mcp.servers.rea.environment"
+        "auto-análise longa até você adicioná-la ao `environment` do servidor rea (opencode.jsonc)"
     ),
     "JAVA_HOME": (
         "o provider Ghidra dependerá do JAVA_HOME herdado do shell; adicione um JDK >= 21 "
-        "ao mcp.servers.rea.environment para o MCP funcionar em qualquer ambiente"
+        "ao `environment` do servidor rea (opencode.jsonc) para o MCP funcionar em qualquer ambiente"
     ),
 }
 
