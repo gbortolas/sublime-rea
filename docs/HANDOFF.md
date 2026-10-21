@@ -1078,6 +1078,20 @@ linha dobrada que quebra em N rows desalinha a contagem em N−1; a busca do Ctr
 **case-sensitive**; o `scope` do formato Sublime não é lido; a lista de snippets de pacote só muda
 quando o índice de pacotes é reconstruído.
 
+### 🐛 LSP no AppImage (achado no caminho)
+
+O AppImage abria **sem LSP** (sem diagnóstico/completecão/hover): o `PATH` do launcher do desktop não
+tem o `bin` do nvm ⇒ `spawn` falhava com ENOENT. Três correções: (1) o main **acrescenta** o `bin`
+do node gerenciado ao `PATH` (o mais novo primeiro — o `unshift` em laço punha o **Node 14** na
+frente, e os servidores exigem Node ≥ 18); (2) o `tsserver.path` injetado no `initialize` só é
+usado **se existir em disco** (no AppImage o `node_modules` do projeto não existe) — senão cai no
+TypeScript **global**, e o `setup` passa a fixar o `typescript@5` (o **7+/tsgo não tem
+`lib/tsserver.js`**); (3) o **stderr** do servidor LSP deixou de ser descartado (o sintoma era só
+"timeout de 15 s") e agora é logado quando o handshake falha.
+
+**Verificado** com o AppImage e um **env limpo** (`env -i PATH=/usr/bin:/bin`): os **dois**
+servidores LSP iniciam ✓.
+
 ---
 
 ## 🗂️ Estado do repositório
