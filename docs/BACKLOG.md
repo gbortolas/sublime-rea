@@ -821,6 +821,34 @@ Problemas identificados ao testar o AppImage pela primeira vez:
       atraso, `didClose`, `didChange` incremental, `tsserver.path` do AppImage, `npm` fora do nvm.
       **1176 testes / 94 arquivos** · E2E de usabilidade **TUDO OK** · E2E das features **21/21**.
 
+## 📌 Fila aberta (2026-10-21, noite) — para a próxima sessão
+
+> Tudo aqui é **funcional e conhecido** (declarado/verificado), não bug escondido. Ordenado por
+> valor/esforço.
+
+- [ ] **🧩 DAP — salvar antes de depurar** — o debuggee roda o arquivo **do disco**; com buffer
+      não salvo o depurador para em código diferente do editor (sem aviso).
+      `src/core/dap/dap-manager.ts` (`buildLaunchArgs`).
+- [ ] **🧩 DAP — adaptador Node** (`vscode-js-debug`) — exige download/empacotamento (~50 MB);
+      **decidir antes** (ou usar um adaptador "fake" para TS/JS).
+- [ ] **📝 Snippets** — (a) expandir snippets **LSP** (`insertTextFormat: 2`) no popup de
+      completação; (b) ler o `scope` do formato Sublime; (c) suportar `.sublime-completions`
+      (hoje só `.sublime-snippet`).
+- [ ] **🔍 Grep** — (a) suportar **regex** (o `SearchQuery` do shared já tem `regex`); (b) opción
+      de ignorar binários; (c) a busca cobre a "workspace" (pasta dos docs abertos até a raiz
+      `.git`) — falta a **pasta do projeto multi-root**; (d) acento-insensitivo além da forma
+      pré-composta.
+- [ ] **⌘P** — (a) usar a **pasta do projeto aberto** (multi-root) como workspace; (b) pontuação
+      pelo **caminho completo**; (c) "criar arquivo" a partir do Quick Open (VS Code faz).
+- [ ] **🖥️ Folding × soft wrap** — o `VisualRowIndex` não conhece linhas colapsadas ⇒ linha
+      dobrada que quebra desalinha a contagem de rows.
+- [ ] **🪟 Split editor** (⌘\) — dois grupos de abas lado a lado.
+- [ ] **🧪 Test explorer** — rodar testes via LSP (`workspace/executeCommand` + `testing/*`).
+- [ ] **📐 Escopo do DAP** — `hitCondition`/`logMessage` estão no contrato e chegam ao adaptador,
+      mas **só `condition` tem UI**; falta o badge de logpoint na lista de breakpoints da UI.
+- [ ] **🧹 Roda de limpeza** — `docs/HANDOFF.md` e `docs/BACKLOG.md` cresceram muito (o HANDOFF tem
+      ~1200 linhas): consolidar as seções antigas (P2.x/P3.x) num arquivo de histórico.
+
 ---
 
 ## 🏠 P3 — Housekeeping (2026-10-20, bootstrap)

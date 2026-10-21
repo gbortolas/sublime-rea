@@ -1,8 +1,10 @@
 # HANDOFF — sublime-rea
 
 > **Documento de handoff entre sessões** (leia antes de retomar). Atualizado em **2026-10-21**.
-> Status: **🐛 varredura de usabilidade ✅ · ✨ 3 features (lupa, multi-cursor, snippets) ✅ · ✨ 5 features (undo por documento, logpoints, rows visuais, Ctrl+D, snippets de pacote) ✅**<br>
-> Próximo: **snippets de pacote (fiação no renderer) · DAP — adaptador Node (vscode-js-debug)**
+> Status: **🐛 varredura ✅ · ✨ 3+5 features ✅ · 🎨 design system ✅ · ✨ 3 features de última geração ✅ · 🐛 LSP de verdade ✅**<br>
+> Versão: **0.6.0** (AppImage gerado e verificado) · **1176 testes / 94 arquivos**<br>
+> Próximo: **fila aberta no BACKLOG** (DAP salvar-antes-de-depurar · snippets LSP · regex no grep ·
+> split editor · test explorer)
 
 ---
 
@@ -14,7 +16,8 @@
 > [`BACKLOG.md`](BACKLOG.md). Não peça contexto: ele está todo em `docs/`.
 
 **Estado em uma linha:** ambiente ✅ · binário-alvo **100% analisável** ✅ · Track A (API Python +
-IPC) ✅ · **FASE 1 FECHADA** · **FASE 2 FECHADA** · **FASE 3 FECHADA** · P2.4/Slices A-D ✅ ·
+IPC) ✅ · **FASE 1 FECHADA** · **FASE 2 FECHADA** · **FASE 3 FECHADA** · **App 0.6.0 pronto pra uso**
+(varredura de usabilidade · design system · 11 features · LSP/DAP/plugins sadios) · P2.4/Slices A-D ✅ ·
 P2.4b/c ✅ · P2.5 (salvar) ✅ · P3.10/11/12 (dívidas) ✅ · P1#1 (seleção) ✅ · P1#2 (gutter) ✅ ·
 **P1#3 (scrollbar) ✅ · P1#4 (find bar toggles) ✅ · P2#5 (múltiplos cursores) ✅** ·
 **P2#7 (drag & drop) ✅ · Infra (GitHub repo + CI/Release) ✅ · P2#6 (abas) ✅ · P2#8 (temas) ✅** ·
@@ -54,18 +57,31 @@ Sem o deadline maior, `open_binary`/`analyze` **via MCP** volta a estourar os 33
 
 **Próximas tarefas:**
 
-> A sessão de 2026-10-21 (noite) fez uma **varredura completa de usabilidade** a partir do
-> relato do usuário ("o app tá uma zona: não dá pra ler nem editar, popups sobrepostos, fontes
-> frankenstein") e entregou, no mesmo dia, **3 features**: **lupa colorida no minimap**,
-> **multi-cursor com undo/redo por cursor** e **snippets com dropdown de escolhas + variáveis TM**.
-> Os 7 bugs de usabilidade achados (e o crash que matava o app) estão em
-> [§🐛 Varredura de usabilidade](#-varredura-de-usabilidade-2026-10-21).
+> A sessão de 2026-10-21 (dia + noite) fechou: **varredura de usabilidade** (7 bugs + o crash que
+> matava o app), **3 features** (lupa colorida, multi-cursor com undo por cursor, snippets com
+> escolhas + variáveis TM), **5 features** (undo por documento, logpoints/hitCondition, soft wrap em
+> rows visuais, Ctrl+D, snippets de pacote), uma **auditoria com 5 agentes** (16 bugs corrigidos,
+> incluindo um **RCE** via `git diff`), o **design system** da casca (contraste AA, tema claro com
+> degraus) e **3 features de última geração** (⌘P/Quick Open, sticky scroll, grep na workspace) —
+> e, no caminho, o **LSP de verdade** (o TypeScript estava **sem diagnóstico nenhum**).
+> Detalhes: [§🐛 Varredura](#-varredura-de-usabilidade-2026-10-21), [§✨ 5 features](#-5-features-2026-10-21-madrugada),
+> [§🎨 Design system](#-design-system--3-features-de-última-geração-2026-10-21-noite).
 
-1. **📝 Snippets — próximos passos** — expansão de snippets **LSP** (`insertTextFormat: 2`) no popup
-   de completação e leitura de `scope`/variáveis do formato Sublime nos snippets de pacote.
-2. **🧩 DAP — adaptador Node** (`vscode-js-debug`) — exige download/empacotamento; decidir antes.
-3. **🖥️ Folding × soft wrap** — o `VisualRowIndex` não conhece linhas colapsadas ⇒ uma linha
-   dobrada que quebra desalinha a contagem de rows (limitação conhecida, declarada).
+1. **🧩 DAP — salvar antes de depurar** — o debuggee roda o arquivo **do disco**: com buffer não
+   salvo, o depurador para em código diferente do que o editor mostra (sem aviso).
+   `src/core/dap/dap-manager.ts` (`buildLaunchArgs`).
+2. **🧩 DAP — adaptador Node** (`vscode-js-debug`) — exige download/empacotamento; **decidir antes**.
+3. **📝 Snippets** — expansão de snippets **LSP** (`insertTextFormat: 2`) no popup de completação;
+   ler `scope` do formato Sublime; `.sublime-completions` (hoje só `.sublime-snippet`).
+4. **🔍 Grep** — hoje é **literal** e insensível a acento só na forma pré-composta; falta **regex**
+   (o contrato `SearchQuery` já tem), a opção de ignorar binários por padrão e a busca em
+   arquivos **não versionados**.
+5. **⌘P** — a "workspace" é a pasta dos documentos abertos até a raiz `.git`; falta usar a pasta
+   do **projeto aberto** (multi-root) e o fuzzy com **path completo** na pontuação.
+6. **🖥️ Folding × soft wrap** — o `VisualRowIndex` não conhece linhas colapsadas ⇒ uma linha
+   dobrada que quebra desalinha a contagem de rows (limitação declarada).
+7. **🪟 Split editor** (⌘\) — dois grupos de abas lado a lado (ainda não existe).
+8. **🧪 Test explorer** — rodar testes via LSP (`workspace/executeCommand` + `testing/*`).
 
 > ✅ **Pegadinha resolvida (2026-10-16, P3.9):** o `setup.py` agora **detecta** um JDK ≥ 21
 > compatível (`JAVA_HOME`, PATH, sdkman, `/usr/lib/jvm`) e escreve um **`export JAVA_HOME=…` ativo**
@@ -73,6 +89,12 @@ Sem o deadline maior, `open_binary`/`analyze` **via MCP** volta a estourar os 33
 > `python3 setup/setup.py` (idempotente) e depois `set -a; . ./setup/env.sh; set +a`. Verificar com
 > `rea doctor --client opencode --provider ghidra --format json` → espera `healthy: true`
 > (verificado em 2026-10-16 sem nenhum export manual).
+
+> ⚠️ **Pegadinha desta sessão (2026-10-21):** o **AppImage só é confiável se for testado com
+> `env` limpo** (`env -i PATH=/usr/bin:/bin HOME=$HOME xvfb-run -a ./release/Scribe-*.AppImage
+> --no-sandbox`) — no shell do dev o `PATH` tem o nvm e **esconde** bugs de boot (foi assim que
+> passou um `ReferenceError` de zona morta temporal e o LSP "sem diagnóstico" — o primeiro só
+> apareceu no AppImage, o segundo só com um **arquivo com acento/emoji**).
 
 **Ambiente do CLI (obrigatório):** `set -a; . ./setup/env.sh; set +a`.
 
@@ -1174,12 +1196,20 @@ E2E de usabilidade **TUDO OK** · E2E das features **21/21**.
   commitado — ver `git log --oneline -1`.
   **Lição:** o passo "commit + working tree limpo" do protocolo precisa ser conferido com
   `git status --short` **antes** de encerrar a sessão, não assumido.
-- ✅ **Working tree limpo ao fim desta sessão** (2026-10-21, noite) — a varredura de usabilidade,
-  as 3 features e o wiring do dropdown foram commitados (`git log --oneline -4`).
-- ✅ **📦 AppImage 0.4.1** — `release/Scribe-0.4.1.AppImage` (117 MB), **gerado e testado**
-  (sobe, plugin host pronto, LSP iniciados).
-- ✅ **Servidores LSP instalados** — `typescript-language-server` + `pyright` (nova **etapa 13/13**
-  do `setup/setup.py`; opcional — sem eles o app funciona, mas fica sem diagnóstico/completecão).
+- ✅ **Working tree limpo ao fim desta sessão** (2026-10-21, noite) — **6 commits**:
+  `cbbc4e4` (fix do boot do AppImage) · `b625ecf` (design system + 3 features + LSP de verdade) ·
+  `2ef0e42` (minimap/diagnósticos/foco da find bar) · `36a0565` (auditoria: 16 bugs) ·
+  `be14f29` (5 features) · `7d5a12b` (LSP no AppImage) — ver `git log --oneline -8`.
+- ✅ **📦 AppImage 0.6.0** — `release/Scribe-0.6.0.AppImage` (117 MB), **gerado e testado com
+  `env` limpo**: sobe, **os 2 servidores LSP iniciam**, plugin host pronto (pid real no log).
+- ✅ **Servidores LSP instalados** — `typescript-language-server` + `typescript@5` + `pyright`
+  (**etapa 13/13** do `setup/setup.py`; opcional — sem eles o app funciona, mas fica sem
+  diagnóstico/completecão). ⚠️ O `typescript` precisa ser o **5.x**: o 7+ (tsgo) **não tem**
+  `lib/tsserver.js` ⇒ o LSP do TypeScript não funciona com ele.
+- ✅ **Harness de verificação** (reutilizável na próxima sessão): `/tmp/opencode/cdp-usable.mjs`
+  (usabilidade), `cdp-panel.mjs` (painel de depuração), `cdp-choice.mjs` (dropdown de snippets),
+  `cdp-doctor.mjs` (diagnóstico geral), `cdp-mm-toggle.mjs` (minimap) — todos via CDP com
+  `xvfb-run`; o padrão está em `cdp-panel.mjs`.
 - `.gitignore` cobre `target/`, `tools/`, `setup/env.sh`, artefatos Ghidra, venvs, `dist/`,
   `node_modules/`, caches de IDE e `.serena/`.
 - **Stack do scaffold (Fase 3):** `package.json` + `package-lock.json` versionados; `dist/` e
