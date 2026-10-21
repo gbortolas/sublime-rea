@@ -1,8 +1,8 @@
 # HANDOFF — sublime-rea
 
 > **Documento de handoff entre sessões** (leia antes de retomar). Atualizado em **2026-10-20**.
-> Status: **🧩 DAP (Debug Adapter Protocol) ✅**<br>
-> Próximo: **snippets avançados** ou **undo/redo por cursor (multi-cursor)**
+> Status: **📝 Snippets avançados ✅**<br>
+> Próximo: **DAP — expansões** ou **undo/redo por cursor (multi-cursor)**
 
 ---
 
@@ -35,7 +35,8 @@ no minimap — "lupa" estilo VS Code ✅** ·
 **🔧 P3.5 — Rizin provisionado ✅ · 🔬 Análise via Rizin concluída ✅** ·
 **⚡ P2.4b — Tokenização em worker com deadline (TaskKind syntax, SerializedGrammar, SYNC_SYNTAX_THRESHOLD=50) ✅** ·
 **🧩 P5 — Code Actions (Ctrl+.) ✅ · P5 — Find References (Ctrl+Shift+F12) ✅ · P5 — Rename Symbol (F2) ✅ · P4#24 — LSP Formatting (Ctrl+Shift+I) ✅ · P4#25 — Folding ✅ · P4#26 — Inlay Hints ✅ · 🌐 Multi-root workspace ✅ · 🐙 Git blame na status bar ✅ · 🐙 Git diff indicators no gutter ✅** ·
-**🧩 DAP (Debug Adapter Protocol) — sessão de depuração Python (debugpy), breakpoints no gutter, painel de pilha/variáveis/saída, F5/F9/F10/F11 ✅**<br>
+**🧩 DAP (Debug Adapter Protocol) — sessão de depuração Python (debugpy), breakpoints no gutter, painel de pilha/variáveis/saída, F5/F9/F10/F11 ✅** ·
+**📝 Snippets avançados (P4#18b) — placeholders aninhados, ciclagem de tab stops (Tab/Shift+Tab), espelhos ao vivo e transformações `${N/re/fm/fl}` ✅**<br>
 
 **✅ Passo operacional resolvido (2026-10-16).** O `setup.py` foi rodado e o MCP `rea` foi relançado
 **já com `REA_GHIDRA_STARTUP_TIMEOUT_MS=900000`** (confirmado em `/proc/*/environ`) — **não** é mais
@@ -51,15 +52,17 @@ Sem o deadline maior, `open_binary`/`analyze` **via MCP** volta a estourar os 33
 
 **Próximas tarefas:**
 
-> A sessão de 2026-10-20 **finalizou a feature DAP** (que estava WIP não commitado no working
-> tree): fiação do renderer (`debug-panel`), breakpoints no gutter, atalhos de teclado via menu,
-> **44 testes novos** e o **bug do `DapClient.dispose()`** descoberto e corrigido pelos testes.
+> A sessão de 2026-10-20 (tarde) **entregou Snippets avançados** (P4#18b, ver seção própria) e
+> **consertou 3 bugs do `setup.py`** que travavam o bootstrap em máquina nova (layout flat do
+> Rizin, schema novo do `opencode.jsonc`, `KeyError` na hint). O E2E por CDP validou 8/8
+> expectativas no app real (`/tmp/opencode/cdp-snippet.mjs`).
 
-1. **📝 Snippets avançados** — suporte a placeholders, tab stops, transformações e
-   aninhamento (expansão do P4#18 existente).
-2. **🧩 DAP — expansões** — avaliar adaptador Node (`vscode-js-debug`), *conditional
+1. **🧩 DAP — expansões** — avaliar adaptador Node (`vscode-js-debug`), *conditional
    breakpoints*, *watch expressions* e inspeção de hover de variáveis parada.
-3. **🔄 Undo/redo por cursor** — histórico granular para múltiplos cursores (expansão do P2#5).
+2. **🔄 Undo/redo por cursor** — histórico granular para múltiplos cursores (expansão do P2#5).
+3. **📝 Snippets — follow-ups declarados** — dropdown para `${N|a,b,c|}` (hoje usa a 1ª
+   escolha), variáveis TM (`$TM_FILENAME` etc.), snippets de pacotes (`.sublime-snippet` via
+   `PackageResolver`) e expansão de snippets LSP (`insertTextFormat: 2`) no popup de completação.
 
 > ✅ **Pegadinha resolvida (2026-10-16, P3.9):** o `setup.py` agora **detecta** um JDK ≥ 21
 > compatível (`JAVA_HOME`, PATH, sdkman, `/usr/lib/jvm`) e escreve um **`export JAVA_HOME=…` ativo**
@@ -807,6 +810,49 @@ teste é que foi alinhado (e agora trava o contrato).
 
 ---
 
+## 📝 Snippets avançados — P4#18b (2026-10-20, tarde)
+
+Expansão do P4#18 existente (que só tinha `$N`, `${N:default}` e caret no 1º tabstop).
+
+### O que mudou
+
+| Camada | Entrega |
+|---|---|
+| `src/renderer/snippets.ts` (**reescrito**, puro) | AST com **aninhamento** (`}` balanceado, `\}`), **escolhas** `${N\|a,b,c\|}` (default = 1ª), **transformações** `${N/regex/format/flags}` (split nos 1º e último `/` não-escapados, regex inválida degrada com 1 `warn`), `$$`/`$0`/multi-dígito, `${FOO}` → literal; **espelhos renderizados na expansão inicial** (antes saíam vazios); saída `occurrences` (com `id`/`parentId`/`isPrimary`/`transform`) + `visitOrder` |
+| `src/renderer/snippet-session.ts` (**NOVO**, puro) | Sessão imutável: `createSnippetSession`, `nextTabStop`/`previousTabStop` (Tab/Shift+Tab; `$0` encerra), `applyEdit` → desloca offsets + re-renderiza **espelhos** e **ancestrais** (aninhamento via cadeia `parentId`, não por sobreposição de ranges) devolvendo `updates` (1 roundtrip por espelho, **ordem = ordem de aplicação**) |
+| `src/renderer/main.ts` | `snippetSession` no `DocumentSession`; Tab com sessão cicla e **seleciona** a parada; Esc/mousedown fora/troca-aberta/undo-redo encerram; `insertText` com sessão **bypassa o splice local** (caminho IPC imediato — coerência dos espelhos > latência zero, só dentro de sessão); `propagateSnippetEdit()` em `replaceText` aplica os `updates` e ajusta o caret por espelho anterior |
+| Testes | `test/renderer-snippets.test.ts` (20) + `test/renderer-snippet-session.test.ts` (19) |
+
+### Verificação
+
+- Gates: `typecheck`/`lint`/`test`/`build` exit 0 · **626 testes / 56 arquivos** (baseline 587/54).
+- **E2E real via CDP** (`/tmp/opencode/cdp-snippet.mjs`, `xvfb-run` + `Input.dispatchKeyEvent`):
+  **8/8 expectativas** no app aberto — expansão com espelhos (`i`×3), espelho ao vivo (`j`),
+  edit do `$2`, encerramento em `$0`, 2ª sessão, substituição de parada, **Shift+Tab retrocede**,
+  **Esc** encerra e a tecla seguinte é texto normal.
+
+### Limitações declaradas
+
+- Sem dropdown de escolhas (usa a 1ª); sem variáveis TM (`$FOO` fica literal); sem modificadores
+  de caso no format; edição manual dentro de um **espelho** encerra a sessão; mudanças externas
+  (LSP/extensão) durante a sessão não rastreadas; seleção multi-cursor não realinhada quando um
+  espelho anterior desloca o caret.
+
+### Achados de ambiente desta sessão (já corrigidos no `setup.py`)
+
+- **`node` do nvm era v14** (default) → `npm`/`rea` não existiam no shell não-interativo; o
+  `env.sh` agora **exporta o `PATH` do bin detectado** (idempotente).
+- **Tarball do Rizin é "flat"** (`bin/` na raiz, sem wrapper `rizin-v0.9.1/`) → o fallback
+  antigo pegava `candidates[0]` = `bin` (ordem alfabética) e instalava os binários soltos; agora
+  a busca é pelo diretório que **contém `bin/rizin`**.
+- **`opencode.jsonc` tem schema novo** (`mcp.rea`, sem `mcp.servers.`) → `_jsonc_set_rea_env`
+  silenciava com warn e o **`_MCP_ENV_HINTS` sem a chave `REA_RIZIN_COMMAND` derrubava a etapa
+  com `KeyError`** (o `rea doctor` nunca rodava). Agora aceita ambos os schemas.
+- Para rodar `npm`/`rea` manualmente: `set -a; . ./setup/env.sh; set +a` **já basta** (passa a
+  incluir o `PATH` do node 24).
+
+---
+
 ```bash
 cd /home/gbortolas/ai/workspaces/sublime-rea
 set -a; . ./setup/env.sh; set +a          # ← obrigatório para o CLI
@@ -831,20 +877,8 @@ Material de apoio: skill `reverse-engineer-anything` (+ `references/native-and-a
 
 ## 🗂️ Estado do repositório
 
-- Repo **git** inicializado (não era antes). `git log --oneline` para o histórico.
-- ⚠️ **Working tree COM pendências** (2026-10-17, fim da sessão da repaginação — **nada commitado**):
-  - **Desta sessão (design + 3 bugs)**: `src/renderer/{index.html,index.css,main.ts,minimap.ts}`,
-    `src/shared/{theme-contract.ts,themes.ts}`, `src/core/syntax/theme.ts`,
-    `src/core/render/{atlas.ts,canvas2d-backend.ts}`, `src/main/index.ts`,
-    `src/core/render/{atlas,canvas2d-backend}.test.ts`, `test/syntax-highlight.test.ts`.
-  - **WIP do usuário** (já estava antes desta sessão, NÃO é meu): refactor backspace/delete →
-    `controller.replaceText` em `src/renderer/main.ts` (mesmo arquivo!); `.idea/runConfigurations/*` e
-    `test/smoke.test.ts` **staged** (`git add` feito pelo usuário); `release/*` (AppImage/asar rebuildados);
-    `.gitignore` (para versionar `.idea/runConfigurations/`).
-  - Por isso a sessão **não commitou**: separar exigiria `git add -p` interativo. **Sugestão**: commit do
-    design+bugs primeiro (as mudanças de `main.ts` desta sessão são rastreáveis: `applyChromeTheme`,
-    `createAtlasTinter`, `activeSource`, `syntaxTheme`, sidebar/breadcrumbs) e o WIP do usuário depois.
-  - Baseline verde no fim da sessão: `typecheck`/`lint`/`build` exit 0 · **449 testes / 44 arquivos**.
+- ✅ **Working tree LIMPO na abertura desta sessão** (2026-10-20) — a pendência de 2026-10-17
+  (repaginação + WIP) já tinha sido resolvida pelos commits posteriores (`git log --oneline`).
 - `.gitignore` cobre `target/`, `tools/`, `setup/env.sh`, artefatos Ghidra, venvs, `dist/`,
   `node_modules/`, caches de IDE e `.serena/`.
 - **Stack do scaffold (Fase 3):** `package.json` + `package-lock.json` versionados; `dist/` e

@@ -667,3 +667,49 @@ Problemas identificados ao testar o AppImage pela primeira vez:
   - **Limitações**: só Python embutido (Node adiado); sem conditional breakpoints/watch;
     parada não move o caret para o frame
   - Gates: typecheck/lint/build exit 0 · **587 testes / 54 arquivos** (baseline 543/50)
+
+## 📝 Snippets avançados — P4#18b (2026-10-20, tarde)
+
+- [x] **P4#18b — Snippets avançados** ✅ **fechado** (2026-10-20). Expansão do P4#18:
+      placeholders aninhados, ciclagem de tab stops, espelhos ao vivo e transformações.
+      Entregue:
+  - `src/renderer/snippets.ts` (reescrito) — AST com **aninhamento** (`}` balanceado,
+    `\}`), **escolhas** `${1|a,b,c|}` (default = 1ª, sem dropdown), **transformações**
+    `${1/regex/format/flags}` (split nos 1º/último `/` não-escapados; regex inválida
+    degrada com 1 `warn`), `$$`/`$0`/multi-dígito, `${FOO}` literal; **espelhos renderizados
+    na expansão inicial** + `occurrences` (`id`/`parentId`/`isPrimary`/`transform`) e
+    `visitOrder`
+  - `src/renderer/snippet-session.ts` (novo) — sessão **pura** e imutável: `nextTabStop`/
+    `previousTabStop` (Tab/Shift+Tab, `$0` encerra), `applyEdit` deslocando offsets e
+    re-renderizando **espelhos + ancestrais** (aninhamento por cadeia `parentId`) com
+    `updates` na ordem de aplicação
+  - `src/renderer/main.ts` — `snippetSession` na sessão do documento; parada atual
+    **selecionada** (usa o highlight de seleção existente); Esc/clique-fora/troca-aberta/
+    undo-redo encerram; `insertText` com sessão usa caminho IPC imediato (coerência dos
+    espelhos); `propagateSnippetEdit()` aplica espelhos e ajusta o caret
+  - **39 testes novos** (20 parser + 19 sessão) → **626 testes / 56 arquivos**
+    (baseline 587/54) · gates typecheck/lint/test/build **exit 0**
+  - **E2E por CDP** (`/tmp/opencode/cdp-snippet.mjs`): **8/8** no app real (espelhos
+    renderizados, espelho ao vivo, `$2`, fim em `$0`, Shift+Tab retrocede, Esc encerra)
+  - **Follow-ups declarados**: dropdown de escolhas · variáveis TM · snippets de pacotes
+    (`.sublime-snippet` via `PackageResolver`) · snippets LSP (`insertTextFormat: 2`) no
+    popup de completação
+
+## 🏠 P3 — Housekeeping (2026-10-20, bootstrap)
+
+- [x] **P3.13 — 3 bugs do `setup.py`** ✅ **fechado** (2026-10-20, achados ao rodar o bootstrap
+      numa máquina "limpa"; todos corrigidos no `setup.py`):
+      - **Rizin flat**: o tarball `rizin-v0.9.1-static-x86_64.tar.xz` extrai `bin/` na **raiz**
+        (sem wrapper `rizin-v0.9.1/`); o fallback escolhia `candidates[0]` (ordem alfabética =
+        `bin`) e instalava os binários soltos → `rizin-v0.9.1/bin/rizin` nunca existia. Agora a
+        busca é pelo diretório que **contém `bin/rizin`** (raiz do tmp ou wrapper).
+      - **Schema novo do `opencode.jsonc`**: servidores ficaram em `mcp.<nome>` (sem
+        `mcp.servers.`) → a gravação do `environment` silenciava com warn; pior, o
+        `_MCP_ENV_HINTS` **não tinha a chave `REA_RIZIN_COMMAND`** → `KeyError` derrubava a
+        etapa 11 e o `rea doctor` (12) nunca rodava. Agora: helper `_jsonc_rea_server_span`
+        aceita **ambos** os schemas, validação de escrita alinhada e a hint existe.
+      - **`env.sh` sem `PATH`**: com o default do nvm em v14, `rea`/`npm` não existiam em
+        shells não-interativos (o bootstrap do AGENTS.md falhava com `command not found`).
+        O `env.sh` gerado agora **prepende o bin do Node detectado** na etapa 4.
+      - Verificado: `python3 setup/setup.py` → **12/12 ✓** · `rea doctor` = `healthy: true`
+        em shell limpo (`env -i PATH=/usr/bin:/bin`) · `setup/env.sh` idempotente.
