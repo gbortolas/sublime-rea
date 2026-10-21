@@ -108,6 +108,62 @@ export interface WorkspaceFilesResult {
   readonly truncated: boolean;
   /** Avisos da varredura (diretórios ilegíveis, tetos) — nunca silencioso. */
   readonly warnings: readonly string[];
+  /**
+   * As raízes **efetivas** que o `main` varreu (absolutas).
+   *
+   * O `path` de cada `WorkspaceFile` é relativo a elas — o renderer precisa das
+   * raízes para resolver um caminho absoluto (ex.: "criar arquivo" a partir do ⌘P).
+   */
+  readonly roots?: readonly string[];
+}
+
+/** Resultado de `workspace.createFile` (criar um arquivo a partir do ⌘P). */
+export interface WorkspaceCreateFileResult {
+  /** Caminho **absoluto** do arquivo criado. */
+  readonly path: string;
+  /** `false` quando o arquivo **já existia** (não foi sobrescrito). */
+  readonly created: boolean;
+  /** Caminho relativo à raiz da workspace (o que a UI mostra). */
+  readonly relativePath: string;
+}
+
+/**
+ * Uma entrada do `git status` (o painel de *Source Control*).
+ *
+ * ⚠️ **Espelha** `GitStatusEntry` de `src/core/git/git-status.ts` (o contrato IPC vive em
+ * `shared` e não pode importar o core) — as duas formas são **estruturalmente idênticas**.
+ */
+export interface GitStatusEntry {
+  /** Os dois indicadores de status (`XY` do porcelain): índice e árvore de trabalho. */
+  readonly xy: string;
+  /** Caminho do arquivo, **relativo à raiz do repositório**. */
+  readonly path: string;
+  /** Caminho **anterior** (rename/cópia). */
+  readonly oldPath?: string;
+  /** Há mudança **staged** (índice). */
+  readonly staged: boolean;
+  /** Há mudança **unstaged** (árvore de trabalho). */
+  readonly unstaged: boolean;
+  /** Arquivo **não rastreado**. */
+  readonly untracked: boolean;
+  /** Arquivo **ignorado** (só com `--ignored`). */
+  readonly ignored?: boolean;
+  /** **Conflito** de merge. */
+  readonly conflicted?: boolean;
+}
+
+/** Resultado das operações de Git (status/stage/unstage) — o `main` já parseia. */
+export interface GitStatusResult {
+  /** Branch atual (`null` quando não há repositório). */
+  readonly branch: string | null;
+  readonly entries: readonly GitStatusEntry[];
+}
+
+/** Resultado de `git.commit`. */
+export interface GitCommitResult {
+  readonly ok: boolean;
+  /** Mensagem de erro do git (quando `ok === false`). */
+  readonly error?: string;
 }
 
 /**
@@ -140,6 +196,16 @@ export interface GrepResult {
   readonly truncated: boolean;
   /** Quantos arquivos foram **de fato varridos**. */
   readonly filesScanned: number;
+  /**
+   * Os **avisos** da busca (o que foi desligado/ajustado — **nunca** um crash).
+   *
+   * Ex.: "padrão catastrófico recusado", "a busca acento-insensitiva foi desligada no modo
+   * regex", "o arquivo X excede o teto de N code units por arquivo".
+   *
+   * ⚠️ **Espelha** `GrepResult.warnings` do core: sem este campo o renderer **nunca** via
+   * os avisos (o `tsc` não acusa — o espelho é estrutural).
+   */
+  readonly warnings?: readonly string[];
 }
 
 /** Opções da busca em todos os arquivos (`search.files`). */
@@ -152,6 +218,17 @@ export interface SearchFilesOptions {
   readonly maxFiles?: number;
   /** Busca acento-insensitiva (default `true`): "acao" casa com "ação". */
   readonly ignoreAccents?: boolean;
+  /**
+   * O padrão é uma **regex** (default `false` ⇒ literal).
+   *
+   * ⚠️ Com regex **ligada** a dobra de acentos fica **desligada** (dobrar o padrão
+   * quebraria a semântica de `[á-ú]`/`\p{…}`; dobrar o texto quebraria `\p{L}`).
+   */
+  readonly regex?: boolean;
+  /** Case-sensitive (default `false` ⇒ como o comportamento atual: case-insensitive). */
+  readonly caseSensitive?: boolean;
+  /** Inclui arquivos **binários** na varredura (default `false` ⇒ são pulados). */
+  readonly includeBinary?: boolean;
 }
 
 /**
@@ -271,6 +348,26 @@ export interface IpcMethods {
   "git.blame"(handle: DocumentHandle, line: number): { commitHash: string; author: string; timeAgo: string } | null;
   "git.diff"(handle: DocumentHandle): readonly { startLine: number; lineCount: number; kind: string }[];
   /**
+   * Cria um arquivo (vazio) dentro da workspace — o "criar arquivo" do ⌘P.
+   *
+   * ⚠️ O `main` **confina** o caminho a uma das raízes da workspace: path absoluto
+   * fora da raiz (ou com `..`) ⇒ erro `invalid-args`. Nunca sobrescreve um arquivo
+   * existente (devolve `created: false`).
+   */
+  "workspace.createFile"(path: string): WorkspaceCreateFileResult;
+  /** Status do repositório git da workspace (o painel de *Source Control*). */
+  "git.status"(root?: string): GitStatusResult;
+  /** Stage de um arquivo (`git add -- <path>`). */
+  "git.stage"(path: string, root?: string): GitStatusResult;
+  /** Unstage de um arquivo (`git restore --staged -- <path>`). */
+  "git.unstage"(path: string, root?: string): GitStatusResult;
+  /** Stage de tudo (`git add -A`). */
+  "git.stageAll"(root?: string): GitStatusResult;
+  /** Commit (`git commit -m <mensagem>`) — o `main` **nunca** interpola em shell. */
+  "git.commit"(message: string, root?: string): GitCommitResult;
+  /** Diff unificado cru (`git diff HEAD`) — o **renderer** faz o parse. */
+  "git.diffText"(path: string): string;
+  /**
    * Depuração (DAP) — o main resolve o caminho do documento e o adaptador pela extensão
    * (`BUILTIN_DAP_SERVERS`), dispara a sessão e devolve o estado resultante.
    */
@@ -352,6 +449,7 @@ export const IPC_METHODS = [
   "search.find",
   "search.replaceAll",
   "workspace.files",
+  "workspace.createFile",
   "search.files",
   "command.list",
   "command.execute",
@@ -369,6 +467,12 @@ export const IPC_METHODS = [
   "lsp.inlayHints",
   "git.blame",
   "git.diff",
+  "git.status",
+  "git.stage",
+  "git.unstage",
+  "git.stageAll",
+  "git.commit",
+  "git.diffText",
   "dap.start",
   "dap.stop",
   "dap.state",

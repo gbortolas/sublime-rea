@@ -16,12 +16,26 @@
  *    **puras** (sem DOM, sem I/O) para o teste unitário. Regras:
  *
  *    - **case-insensitive**;
- *    - os caracteres da query aparecem **em ordem** no candidato (subsequência);
- *    - **espaço na query = `\b`**: a query é splitada em **segmentos** e cada segmento
+ *    - o candidato é um **caminho** e a casa é feita **por segmento de caminho** (`/`, `\`):
+ *      os caracteres de um trecho da query precisam caber **no mesmo segmento** (a casa
+ *      **não atravessa** segmentos) e os segmentos do caminho são consumidos **em ordem**;
+ *    - os caracteres da query aparecem **em ordem** dentro do segmento (subsequência);
+ *    - **espaço na query = `\b`**: a query é splitada em **trechos** e cada trecho
  *      (a partir do 2º) precisa **começar no início de uma palavra** do candidato — é o que
  *      faz "fo bar" casar "foo/bar.ts" e **não** casar "foobar.ts";
+ *    - **barra na query = segmento de caminho**: a query é splitada **também** por `/` e
+ *      `\`, e cada trecho assim introduzido casa com **um** segmento do caminho (em ordem,
+ *      com **pulo** de segmento — como o VS Code). É o que faz "src/main.ts" casar
+ *      "src/main.ts" (e "src main" casar também).
  *    - a **pontuação** privilegia: **consecutividade** (bônus alto), **início de palavra**
- *      (bônus) e **caminho** (bônus quando a casa cai no *basename* do arquivo).
+ *      (bônus) e o **basename** (bônus **leve** — é o desempate, não o protagonista).
+ *
+ * ⚠️ **Mudança de UX (P2.x)**: o candidato do matching é o **caminho completo** (relativo à
+ * raiz, com o prefixo do nome da raiz no modo multi-root) — não só o *basename*. A casa é
+ * feita em **qualquer parte do caminho** ("renderer" acha "src/renderer/main.ts"), e dois
+ * arquivos de mesmo *basename* em pastas diferentes deixam de empatar quando a query fala
+ * da pasta. O *basename* continua sendo um **desempate leve** (bônus pequeno), nunca o
+ * fator dominante.
  *
  * Rótulo de origem: **escolha nossa** (o alvo não expõe nada equivalente) — a heurística
  * segue o *Goto File* do Sublime (a 1ª casa tende a ser no início de uma palavra) e o
@@ -57,12 +71,18 @@ const WORD_SEPARATORS = new Set([
 const SCORE_MATCH = 16;
 /** Bônus por caractere **consecutivo** (imediatamente após o anterior). */
 const SCORE_CONSECUTIVE = 32;
-/** Bônus por caractere no **início de uma palavra**. */
+/** Bônus por caractere no **início de uma palavra** (ou de um segmento do caminho). */
 const SCORE_WORD_START = 30;
-/** Bônus por caractere dentro do **basename** (depois da última `/`). */
-const SCORE_BASENAME = 12;
-/** Bônus quando a query inteira casou **dentro do basename**. */
-const SCORE_BASENAME_ONLY = 48;
+/**
+ * Bônus **leve** por caractere dentro do **basename** (depois da última `/`).
+ *
+ * ⚠️ É o **desempate**, não o protagonista: o candidato do matching é o caminho inteiro
+ * (é o `label` — o basename — que é exibido na lista). Por isso o valor é pequeno: 12/char
+ * + 48 (o "old") fazia o basename ganhar **de qualquer** casa no caminho.
+ */
+const SCORE_BASENAME = 4;
+/** Bônus **leve** quando a query inteira casou **dentro do basename**. */
+const SCORE_BASENAME_ONLY = 12;
 /** Bônus por segmento que começa no **início de uma palavra** (a query tinha espaço). */
 const SCORE_SEGMENT_BOUNDARY = 24;
 /** Penalidade por caractere pulado entre duas casas. */
@@ -86,18 +106,146 @@ function isWordStart(candidate: string, index: number): boolean {
 }
 
 /**
+ * Os limites (início/fim) do **segmento de caminho** em que `index` cai.
+ *
+ * O caminho é quebrado em `/` e `\` (o *basename* é o último segmento). O `end` é
+ * **exclusivo** — é o limite em que a casa de um trecho da query para de poder crescer.
+ */
+function segmentBounds(
+  candidate: string,
+  index: number,
+): { readonly start: number; readonly end: number } {
+  let start = index;
+  while (start > 0) {
+    const previous = candidate.charAt(start - 1);
+    if (previous === "/" || previous === "\\") break;
+    start -= 1;
+  }
+  let end = index;
+  while (end < candidate.length) {
+    const current = candidate.charAt(end);
+    if (current === "/" || current === "\\") break;
+    end += 1;
+  }
+  return { start, end };
+}
+
+/**
+ * Casa um **trecho** da query dentro de **um** segmento do caminho.
+ *
+ * A casa **não atravessa** segmentos: todos os caracteres do trecho precisam caber no mesmo
+ * segmento do caminho (é o que impede "src" de casar o "s" de um diretório e o "rc" de
+ * outro) e o trecho precisa caber **depois** da posição `from` (a ordem dos segmentos do
+ * caminho é preservada).
+ *
+ * O trecho pode estar num segmento **seguinte** ao do trecho anterior (o **pulo** de
+ * segmento, como o VS Code: "src main" acha "src/renderer/main.ts") — mas nunca no
+ * anterior (a ordem do caminho é respeitada).
+ *
+ * Devolve os índices casados (no candidato) ou `undefined` (não coube).
+ */
+function matchQuerySegment(
+  candidate: string,
+  lower: string,
+  segment: string,
+  from: number,
+  requireWordStart: boolean,
+): readonly number[] | undefined {
+  const head = segment.charAt(0);
+  let start = lower.indexOf(head, from);
+  while (start >= 0) {
+    if (!requireWordStart || isWordStart(candidate, start)) {
+      const bounds = segmentBounds(candidate, start);
+      const indices: number[] = [start];
+      let position = start + 1;
+      let matched = true;
+      for (let k = 1; k < segment.length; k += 1) {
+        const found = lower.indexOf(segment.charAt(k), position);
+        if (found < 0 || found >= bounds.end) {
+          matched = false;
+          break;
+        }
+        indices.push(found);
+        position = found + 1;
+      }
+      if (matched) return indices;
+    }
+    start = lower.indexOf(head, start + 1);
+  }
+  return undefined;
+}
+
+/**
+ * Um **trecho** da query (a casa de um trecho é feita dentro de **um** segmento do
+ * caminho do candidato).
+ */
+interface QueryChunk {
+  /** O trecho (em minúsculas). */
+  readonly text: string;
+  /**
+   * `true` ⇒ o trecho precisa **começar no início de uma palavra** do candidato.
+   *
+   * É a regra do `\b` do **espaço** (o 2º trecho em diante precisa de limite de palavra).
+   * Um trecho introduzido por **barra** (`/` ou `\`) é um **segmento de caminho**: ele casa
+   * *dentro* do segmento (sem exigir limite de palavra) — é a semântica de caminho do
+   * VS Code ("src/main" = "a pasta src e, dentro dela, algo que case com main").
+   */
+  readonly needsWordStart: boolean;
+}
+
+/**
+ * Quebra a query em **trechos**: por **espaço** e por **separador de caminho** (`/`/`\`).
+ *
+ * - o **espaço** separa trechos que exigem **limite de palavra** (`\b`) — a regra já
+ *   existente ("fo bar" casa "foo/bar.ts"; "foobar.ts" não);
+ * - a **barra** separa **segmentos de caminho** — "src/main.ts" casa "src/main.ts" (a query
+ *   fala o *caminho*, não uma sequência de letras soltas);
+ * - o 1º trecho da query **nunca** exige limite de palavra (a query pode começar no meio do
+ *   segmento — "maint" acha "main.ts").
+ *
+ * ⚠️ O separador que **introduz** o trecho é o que decide a regra: um separador com barra
+ * (mesmo misturado com espaço) vale como **segmento de caminho**.
+ */
+function splitQuery(query: string): readonly QueryChunk[] {
+  const chunks: QueryChunk[] = [];
+  /** Como o trecho atual foi introduzido (`undefined` = é o 1º da query). */
+  let separator: "space" | "path" | undefined;
+
+  // As partes alternam: [texto, separador, texto, …] (o separador é um grupo capturado).
+  for (const part of query.split(/([\s/\\]+)/)) {
+    if (part.length === 0) continue;
+    if (/^[\s/\\]+$/.test(part)) {
+      separator = /[\\/]/.test(part) ? "path" : "space";
+      continue;
+    }
+    chunks.push({
+      text: part.toLowerCase(),
+      needsWordStart: separator === "space" && chunks.length > 0,
+    });
+    separator = undefined;
+  }
+  return chunks;
+}
+
+/**
  * Casa a query no candidato e devolve a pontuação + as posições casadas.
  *
  * `undefined` quando a query **não casa** (nada a selecionar).
  *
  * A query vazia (ou só com espaços) casa com **tudo**, com pontuação `0` e sem índices.
+ *
+ * O candidato é tratado como um **caminho**: a casa é feita **por segmento** (a casa não
+ * atravessa `/` nem `\`) e os segmentos são consumidos **em ordem** — é o que permite casar
+ * em qualquer parte do caminho ("renderer" acha "src/renderer/main.ts") sem virar um
+ * "fuzzy" cego que mistura as pastas.
+ *
+ * ⚠️ A query é splitada por **espaço** e por **barra** (ver {@link splitQuery}): um trecho
+ * separado por barra casa **um** segmento do caminho (com pulo de segmento, como o VS Code)
+ * — é o que faz "src/main.ts" achar "src/main.ts".
  */
 export function fuzzyScore(query: string, candidate: string): FuzzyMatch | undefined {
-  const segments = query
-    .trim()
-    .split(/\s+/)
-    .filter((segment) => segment.length > 0);
-  if (segments.length === 0) return { score: 0, indices: [] };
+  const chunks = splitQuery(query.trim());
+  if (chunks.length === 0) return { score: 0, indices: [] };
 
   const lower = candidate.toLowerCase();
   // O "basename" é o que vem depois da última barra (`/` ou `\` — Windows).
@@ -105,43 +253,17 @@ export function fuzzyScore(query: string, candidate: string): FuzzyMatch | undef
 
   const indices: number[] = [];
   let score = 0;
-  let cursor = 0; // próxima posição livre no candidato
-  let previous = -1; // índice da última casa
+  let cursor = 0; // próxima posição livre no candidato (a ordem dos segmentos é preservada)
 
-  for (let s = 0; s < segments.length; s += 1) {
-    const segment = segments[s]!.toLowerCase();
-    // A partir do 2º segmento, a query tinha **espaço** ⇒ a casa precisa ser no início
-    // de uma palavra (a regra do `\b`).
-    const needsBoundary = s > 0;
-
-    let start = -1;
-    if (needsBoundary) {
-      // Procura a 1ª ocorrência que **comece uma palavra**.
-      let p = lower.indexOf(segment.charAt(0), cursor);
-      while (p >= 0) {
-        if (isWordStart(candidate, p)) {
-          start = p;
-          break;
-        }
-        p = lower.indexOf(segment.charAt(0), p + 1);
-      }
-    } else {
-      start = lower.indexOf(segment.charAt(0), cursor);
-    }
-    if (start < 0) return undefined;
-
-    // Casa o resto do segmento (fuzzy): o 1º caractere já está em `start`.
-    let position = start;
-    for (let k = 0; k < segment.length; k += 1) {
-      const found = lower.indexOf(segment.charAt(k), position);
-      if (found < 0) return undefined;
-      indices.push(found);
-      position = found + 1;
-    }
-    cursor = position;
-    if (needsBoundary) score += SCORE_SEGMENT_BOUNDARY;
+  for (const chunk of chunks) {
+    const matched = matchQuerySegment(candidate, lower, chunk.text, cursor, chunk.needsWordStart);
+    if (matched === undefined) return undefined;
+    for (const index of matched) indices.push(index);
+    cursor = matched[matched.length - 1]! + 1;
+    if (chunk.needsWordStart) score += SCORE_SEGMENT_BOUNDARY;
   }
 
+  let previous = -1; // índice da última casa
   for (const index of indices) {
     score += SCORE_MATCH;
     if (previous >= 0 && index === previous + 1) score += SCORE_CONSECUTIVE;
@@ -169,6 +291,9 @@ export function fuzzyScore(query: string, candidate: string): FuzzyMatch | undef
  *   aparecerem primeiro);
  * - query não vazia ⇒ só os itens que casam, ordenados por **score decrescente**
  *   (empate mantém a ordem original).
+ *
+ * O texto usado na casa é o que o chamador **passa** em `toText` — para os arquivos da
+ * workspace é o **caminho completo** (relativo à raiz), não o basename.
  */
 export function fuzzyFilter<T>(
   query: string,
@@ -464,6 +589,14 @@ export async function indexFiles(
     }
     // Com mais de uma raiz, o caminho relativo ganha o **nome da raiz** como prefixo
     // (senão "src/main.ts" de duas raízes seria ambíguo).
+    //
+    // ⚠️ **Multi-root (o `main` precisa mexer)**: o prefixo só existe quando `roots` tem
+    // **mais de uma** entrada — e hoje o `main` (`resolveWorkspaceRoots`) **achata** as
+    // raízes em uma só (ele expande cada candidata até a pasta com `.git` e deduplica).
+    // Para o modo multi-root, o `main` precisa: (a) **não** expandir/deduplicar as raízes
+    // quando há mais de uma candidata, e (b) mandar as raízes **expandidas** (as que o
+    // `indexFiles` usa) de volta ao renderer (o `WorkspaceFilesResult` não traz `roots`),
+    // para que o "criar arquivo" aponte para a raiz certa.
     const prefix = roots.length > 1 ? `${baseName(root)}/` : "";
     await walk(root, root, "", 0, patterns, prefix);
   }

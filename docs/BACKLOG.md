@@ -821,31 +821,69 @@ Problemas identificados ao testar o AppImage pela primeira vez:
       atraso, `didClose`, `didChange` incremental, `tsserver.path` do AppImage, `npm` fora do nvm.
       **1176 testes / 94 arquivos** · E2E de usabilidade **TUDO OK** · E2E das features **21/21**.
 
+## ✨ 5 features de última geração + 4 itens da fila (2026-10-21, noite) — **0.7.0**
+
+> Rodada com **9 implementadores em paralelo** (partições de arquivo disjuntas) + **3 revisores +
+> 1 security + 2 testers** em paralelo, e **7 fixers**. Tudo isso em uma sessão.
+
+- [x] **🐛 Problems** ✅ — painel de diagnósticos do LSP agrupados por arquivo, filtro, contagem
+      por severidade, "pular para o erro" e badge na status bar.
+      `src/renderer/problems-panel.ts` (novo) + IPC `lsp.diagnostics` (já existia).
+- [x] **📋 Outline** ✅ — estrutura do documento (símbolos do LSP) com hierarquia, filtro e
+      navegação por teclado; re-busca com debounce (compartilha o cache do sticky scroll).
+      `src/renderer/outline-view.ts` (novo).
+- [x] **📁 Explorer** ✅ — árvore de arquivos da workspace, expansível, com filtro incremental.
+      `src/core/workspace/file-tree.ts` + `src/renderer/explorer-tree.ts` (novos).
+- [x] **⑂ Source Control** ✅ — painel Git: status por arquivo, stage/unstage/stageAll, commit com
+      mensagem, branch, badge na status bar. `src/core/git/git-status.ts` (novo) +
+      `src/renderer/source-control.ts` (novo) + IPC `git.*`.
+- [x] **🔀 Diff** ✅ — visualizador do diff unificado com hunks navegáveis e "pular" para a linha.
+      `src/core/git/git-diff.ts` + `src/renderer/diff-view.ts` (novos) + IPC `git.diffText`.
+- [x] **🖥️ Workbench de seções** ✅ — a lateral virou um workbench (Explorer · Outline · Source
+      Control · Problems · Diff), uma seção por vez, com `aria-pressed` coerente.
+      `src/renderer/index.html` + `index.css` (+724 linhas de CSS dos 5 painéis, só tokens).
+- [x] **🧩 DAP — salvar antes de depurar** ✅ — gancho `beforeLaunch` no `DapManager` (aguardado
+      **antes** do `launch`; se falha, **nenhum** processo sobe) + flush→save→start no renderer.
+- [x] **🔍 Grep — regex/case/binários/acento** ✅ — regex com **recusa de padrões catastróficos**,
+      case-sensitive, toggle de binários, dobra 1:1 cobrindo NFD e bases não-ASCII.
+      ⚠️ o **scan é síncrono no main** (follow-up: mover para o worker).
+- [x] **⌘P — caminho completo + criar arquivo** ✅ — pontuação pelo caminho, query com `/`,
+      item "criar" (NOV) que nasce o arquivo ao lado do documento ativo.
+- [x] **🖥️ Folding × soft wrap** ✅ — linha colapsada = **0 rows**; folding aplicado antes de
+      publicar a contagem; scroll reancorado ao dobrar.
+- [x] **🔒 Segurança das superfícies novas** ✅ — `core.fsmonitor`/`commit.gpgsign`/`gpg.program`
+      neutralizados, `GIT_LITERAL_PATHSPECS`, confinamento do `root`/path do Git, `createFile`
+      **realpath-based** (symlink não escapa). `test/git-security-regression.test.ts` (10 testes).
+- [x] **🐛 O `pyright` travava** ✅ — o cliente LSP ignorava requests servidor→cliente (o pyright
+      pedia `workspace/configuration` e ficava bloqueado ⇒ sem símbolo/diagnóstico/hover em `.py`).
+      Agora todo request é respondido; desconhecido ⇒ erro `-32601`, **nunca** silêncio.
+- [x] **🐛 Enter não inseria quebra de linha** ✅ — `Ctrl+A` e `Ctrl+End` também corrigidos.
+- Gates: `typecheck`/`lint` exit 0 · **1585 testes / 108 arquivos** · E2E por CDP **9/9**.
+
 ## 📌 Fila aberta (2026-10-21, noite) — para a próxima sessão
 
 > Tudo aqui é **funcional e conhecido** (declarado/verificado), não bug escondido. Ordenado por
 > valor/esforço.
 
-- [ ] **🧩 DAP — salvar antes de depurar** — o debuggee roda o arquivo **do disco**; com buffer
-      não salvo o depurador para em código diferente do editor (sem aviso).
-      `src/core/dap/dap-manager.ts` (`buildLaunchArgs`).
-- [ ] **🧩 DAP — adaptador Node** (`vscode-js-debug`) — exige download/empacotamento (~50 MB);
-      **decidir antes** (ou usar um adaptador "fake" para TS/JS).
+- [ ] **🔍 Grep — mover o scan para o worker** — o `scanText` é **síncrono no main**: um padrão
+      regex que escape do detector de padrões catastróficos ainda trava o app. O `TaskPool` já
+      tem a lane `index` (o find bar usa) ⇒ `TaskKind: "grep"` com leitura no worker.
+      `src/core/workspace/grep.ts`, `src/core/concurrency/worker-entry.ts`.
+- [ ] **🌐 Multi-root de verdade** — as raízes ainda são **achatadas em 1** (`resolveWorkspaceRoots`
+      expande até o `.git` e dedup). Falta: a pasta do **projeto aberto** como workspace, o prefixo
+      `basename(root)/` no ⌘P/grep e o `workspace.files` devolvendo as raízes.
+- [ ] **🧩 Split editor** (⌘\) — dois grupos de abas lado a lado.
+- [ ] **🧪 Test explorer** — rodar testes via LSP (`workspace/executeCommand` + `testing/*`).
 - [ ] **📝 Snippets** — (a) expandir snippets **LSP** (`insertTextFormat: 2`) no popup de
       completação; (b) ler o `scope` do formato Sublime; (c) suportar `.sublime-completions`
       (hoje só `.sublime-snippet`).
-- [ ] **🔍 Grep** — (a) suportar **regex** (o `SearchQuery` do shared já tem `regex`); (b) opción
-      de ignorar binários; (c) a busca cobre a "workspace" (pasta dos docs abertos até a raiz
-      `.git`) — falta a **pasta do projeto multi-root**; (d) acento-insensitivo além da forma
-      pré-composta.
-- [ ] **⌘P** — (a) usar a **pasta do projeto aberto** (multi-root) como workspace; (b) pontuação
-      pelo **caminho completo**; (c) "criar arquivo" a partir do Quick Open (VS Code faz).
-- [ ] **🖥️ Folding × soft wrap** — o `VisualRowIndex` não conhece linhas colapsadas ⇒ linha
-      dobrada que quebra desalinha a contagem de rows.
-- [ ] **🪟 Split editor** (⌘\) — dois grupos de abas lado a lado.
-- [ ] **🧪 Test explorer** — rodar testes via LSP (`workspace/executeCommand` + `testing/*`).
+- [ ] **🧩 DAP — adaptador Node** (`vscode-js-debug`) — exige download/empacotamento (~50 MB);
+      **decidir antes** (ou usar um adaptador "fake" para TS/JS).
 - [ ] **📐 Escopo do DAP** — `hitCondition`/`logMessage` estão no contrato e chegam ao adaptador,
       mas **só `condition` tem UI**; falta o badge de logpoint na lista de breakpoints da UI.
+- [ ] **🔧 `executeCommand` do core** — 11 dos 15 comandos anunciados pela paleta **não** rodam
+      pelo IPC (`unknown-command`); a UI funciona (tem switch próprio), o contrato não.
+      `src/core/editor/editor-core.ts:1889-1936`.
 - [ ] **🧹 Roda de limpeza** — `docs/HANDOFF.md` e `docs/BACKLOG.md` cresceram muito (o HANDOFF tem
       ~1200 linhas): consolidar as seções antigas (P2.x/P3.x) num arquivo de histórico.
 

@@ -1,6 +1,6 @@
 {
   "name": "scribe",
-  "version": "0.6.0",
+  "version": "0.7.0",
   "private": true,
   "description": "Scribe — núcleo de editor de texto Electron/TypeScript (Fase 3 / P2.2; clean-room, ver docs/architecture/)",
   "license": "UNLICENSED",

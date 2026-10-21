@@ -40,6 +40,26 @@
               <path d="M9 1.5V5h3.8" />
             </svg>
           </button>
+          <!--
+            Seção **Outline** da barra lateral: a estrutura do documento ativo (a árvore de
+            símbolos do LSP). O botão segue o mesmo contrato dos outros: `aria-pressed`
+            marca a seção ativa.
+          -->
+          <button
+            id="activity-outline"
+            class="activity-item"
+            type="button"
+            title="Estrutura do documento"
+            aria-label="Estrutura do documento"
+            aria-pressed="false"
+          >
+            <svg viewBox="0 0 16 16" width="20" height="20" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false">
+              <rect x="1.6" y="2.2" width="5.2" height="3.4" rx="1.1" />
+              <rect x="4.8" y="10.4" width="5.2" height="3.4" rx="1.1" />
+              <path d="M3.2 5.6v5.2a1.6 1.6 0 0 0 1.6 1.6h1.8" />
+              <path d="M8.4 3.9h5.8M11.6 12.1h2.6" />
+            </svg>
+          </button>
           <button
             id="activity-search"
             class="activity-item"
@@ -83,7 +103,46 @@
               <path d="M12.8 12l1.6 1.6" />
             </svg>
           </button>
+          <!--
+            Seção **Source Control** da barra lateral. O botão entra nesta rodada de
+            markup; a seção é ligada na **próxima** (o host nasce vazio).
+          -->
+          <button
+            id="activity-source-control"
+            class="activity-item"
+            type="button"
+            title="Controle de código-fonte"
+            aria-label="Controle de código-fonte"
+            aria-pressed="false"
+          >
+            <svg viewBox="0 0 16 16" width="20" height="20" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false">
+              <circle cx="4.2" cy="3.3" r="1.8" />
+              <circle cx="4.2" cy="12.7" r="1.8" />
+              <circle cx="11.8" cy="8" r="1.8" />
+              <path d="M4.2 5.1v5.8" />
+              <path d="M4.2 5.6c0 1.7 1.4 2.4 3.3 2.4h2.5" />
+              <path d="M11.8 9.8c0 1.6-1.4 2.2-3.1 2.2" />
+            </svg>
+          </button>
           <div class="activity-spacer"></div>
+          <!--
+            Seção **Problems** da barra lateral (os diagnósticos do LSP). O botão entra
+            nesta rodada de markup; a seção é ligada na **próxima** (o host nasce vazio).
+          -->
+          <button
+            id="activity-problems"
+            class="activity-item"
+            type="button"
+            title="Problemas"
+            aria-label="Problemas"
+            aria-pressed="false"
+          >
+            <svg viewBox="0 0 16 16" width="20" height="20" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false">
+              <path d="M8 2.5 14.4 13.1H1.6z" />
+              <path d="M8 6.6v3" />
+              <path d="M8 11.4v.1" />
+            </svg>
+          </button>
           <button
             id="theme-toggle"
             class="activity-item"
@@ -101,7 +160,12 @@
           </button>
         </nav>
 
-        <!-- Explorador: lista os documentos abertos (fonte: as abas do DocumentController). -->
+        <!--
+          Barra lateral: um *workbench* de **seções** (estilo VS Code). Cada seção tem o
+          seu host (a árvore de arquivos, o outline, os problemas, …) e **um** fica visível
+          por vez — quem decide é a rail de atividades. A lista de "Abertos" (fonte: as abas
+          do DocumentController) acompanha a seção *explorer*.
+        -->
         <aside id="sidebar" aria-label="Explorador">
           <button
             id="sidebar-section-toggle"
@@ -117,6 +181,20 @@
             <span id="sidebar-count" class="sidebar-count">0</span>
           </button>
           <div id="sidebar-editors" class="sidebar-list" role="list"></div>
+          <!--
+            Hosts das **seções** da barra lateral (o *workbench*, estilo VS Code): **um por
+            vez** — o renderer decide qual fica visível (o botão da rail abre a sua seção).
+            Todos nascem `hidden`; a lista de "Abertos" acima acompanha a seção *explorer*.
+
+            O `style` inline é só a **dica de layout** (o host ocupa o espaço que sobra e
+            pode encolher — sem ele a lista interna não rola); a folha de estilo é a
+            dona da aparência.
+          -->
+          <div id="explorer-tree-host" hidden style="flex: 1 1 auto; min-height: 0;"></div>
+          <div id="outline-view" hidden style="flex: 1 1 auto; min-height: 0;"></div>
+          <div id="problems-panel-host" hidden style="flex: 1 1 auto; min-height: 0;"></div>
+          <div id="source-control-host" hidden style="flex: 1 1 auto; min-height: 0;"></div>
+          <div id="diff-view-host" hidden style="flex: 1 1 auto; min-height: 0;"></div>
           <!--
             Painel de busca na workspace (o "grep", Ctrl+Shift+F). Fica **oculto** por padrão
             (`hidden`); o renderer o revela quando a busca é aberta (a lista de "Abertos" sai
@@ -216,6 +294,25 @@
         <div class="status-group">
           <span id="status-doc" class="status-item">sem documento</span>
           <span id="status-dirty" class="status-item"></span>
+          <!--
+            Badges **clicáveis** da status bar (o mesmo contrato dos botões da rail): o clique
+            abre a seção correspondente da barra lateral. `role="button"` + `tabindex` tornam
+            o item alcançável pelo teclado (o renderer trata Enter/Espaço).
+          -->
+          <span
+            id="status-errors"
+            class="status-item clickable"
+            role="button"
+            tabindex="0"
+            title="Problemas"
+          ></span>
+          <span
+            id="status-git"
+            class="status-item clickable"
+            role="button"
+            tabindex="0"
+            title="Controle de código"
+          ></span>
         </div>
         <div class="status-group">
           <span id="status-blame" class="status-item"></span>

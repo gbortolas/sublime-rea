@@ -4,15 +4,100 @@
  * O painel é **autocontido**: cria o próprio DOM dentro do `host` que o chamador passa
  * (mesma convenção do painel de depuração), cuida do foco e tem `dispose()`. Ele **não**
  * fala com a ponte: quem busca é o `main` (via IPC) — o painel só reflete o estado e
- * emite **intenções** (`onOpen`, `onQueryChange`, `onClose`).
+ * emite **intenções** (`onOpen`, `onQueryChange`, `onOptionsChange`, `onClose`).
  *
- * A lógica **pura** (agrupar por arquivo, descrever o estado) vive em funções exportadas
- * e **sem DOM** — é o que o vitest testa (o renderer não tem DOM no ambiente de teste).
+ * A lógica **pura** (agrupar por arquivo, descrever o estado, alternar as flags de
+ * regex/case/binários) vive em funções exportadas e **sem DOM** — é o que o vitest testa (o renderer
+ * não tem DOM no ambiente de teste).
  *
  * **Escolha nossa (não observada no alvo):** o alvo não expõe a busca em arquivos; aqui o
  * painel é uma coluna de resultados agrupados por arquivo, com a contagem de ocorrências.
  */
 import type { GrepMatch, GrepResult } from "../core/workspace/grep";
+
+/** As **flags** de busca que o painel expõe (regex / case / binários). */
+export interface SearchPanelFlags {
+  /** O padrão é uma **expressão regular** (default `false` = literal). */
+  readonly regex: boolean;
+  /** A busca **diferencia maiúsculas** (default `false` = ignora o case, como o find bar). */
+  readonly caseSensitive: boolean;
+  /**
+   * Inclui os arquivos **binários** na varredura (default `false` = são ignorados).
+   *
+   * ⚠️ É o item de backlog que **não tinha toggle na UI** — agora tem (o mesmo padrão dos
+   * toggles de regex/case).
+   */
+  readonly includeBinary: boolean;
+}
+
+/** As flags iniciais do painel (o default do `grep`: literal, sem case e sem binários). */
+export const DEFAULT_SEARCH_PANEL_FLAGS: SearchPanelFlags = {
+  regex: false,
+  caseSensitive: false,
+  includeBinary: false,
+};
+
+/** O id de um toggle do painel. */
+export type SearchPanelFlagId = "regex" | "caseSensitive" | "includeBinary";
+
+/** A visão (pura) de um toggle: rótulo, dica e estado. */
+export interface SearchPanelToggleView {
+  readonly id: SearchPanelFlagId;
+  /** O texto do botão (curto). */
+  readonly label: string;
+  /** A dica (`title`/`aria-label`). */
+  readonly title: string;
+  /** `true` = ligado (`aria-pressed`). */
+  readonly pressed: boolean;
+}
+
+/**
+ * Alterna **uma** flag (puro — o DOM só aplica o resultado).
+ *
+ * É a lógica dos toggles do painel, fora do DOM: o clique no botão calcula o novo estado
+ * com isto e o publica em `onOptionsChange`.
+ */
+export function toggleFlag(flags: SearchPanelFlags, id: SearchPanelFlagId): SearchPanelFlags {
+  switch (id) {
+    case "regex":
+      return { ...flags, regex: !flags.regex };
+    case "caseSensitive":
+      return { ...flags, caseSensitive: !flags.caseSensitive };
+    case "includeBinary":
+      return { ...flags, includeBinary: !flags.includeBinary };
+    default:
+      return flags;
+  }
+}
+
+/**
+ * A visão de um toggle (puro): o rótulo, a dica e o estado (ligado/desligado).
+ *
+ * O DOM do painel é montado a partir daqui ⇒ o que aparece no botão e o que o clique
+ * publica não podem divergir.
+ */
+export function describeToggle(flags: SearchPanelFlags, id: SearchPanelFlagId): SearchPanelToggleView {
+  switch (id) {
+    case "regex":
+      return { id, label: ".*", title: "Expressão regular", pressed: flags.regex };
+    case "caseSensitive":
+      return {
+        id,
+        label: "Aa",
+        title: "Diferenciar maiúsculas de minúsculas",
+        pressed: flags.caseSensitive,
+      };
+    case "includeBinary":
+      return {
+        id,
+        label: "Bin",
+        title: "Incluir arquivos binários",
+        pressed: flags.includeBinary,
+      };
+    default:
+      return { id, label: "", title: "", pressed: false };
+  }
+}
 
 /** Intenções emitidas pelo painel (o `main.ts` as traduz em IPC). */
 export interface SearchPanelOptions {
@@ -23,8 +108,12 @@ export interface SearchPanelOptions {
   readonly onOpen: (path: string, line: number, column: number) => void;
   /** O texto da busca mudou (o chamador decide o debounce e dispara a busca). */
   readonly onQueryChange?: (query: string) => void;
+  /** Uma flag mudou (o chamador refaz a busca com as flags novas). */
+  readonly onOptionsChange?: (flags: SearchPanelFlags) => void;
   /** O usuário pediu para fechar o painel. */
   readonly onClose?: () => void;
+  /** As flags iniciais (default {@link DEFAULT_SEARCH_PANEL_FLAGS}). */
+  readonly flags?: SearchPanelFlags;
 }
 
 /** Superfície do painel (o `main.ts` só reflete o estado por aqui). */
@@ -32,6 +121,8 @@ export interface SearchPanelBinding {
   dispose(): void;
   setResults(result: GrepResult): void;
   setBusy(busy: boolean): void;
+  /** As flags atuais (regex/case/binários) — o estado que o painel publica em `onOptionsChange`. */
+  getFlags(): SearchPanelFlags;
 }
 
 /** Um arquivo do resultado, com as ocorrências dele. */
@@ -184,6 +275,60 @@ export function attachSearchPanel(
     "font-size: var(--s-fs-sm);",
   ].join(" ");
 
+  // Os **toggles** (regex / case / binários): o estado vive no painel e é publicado em
+  // `onOptionsChange` (o `main.ts` do renderer refaz a busca com as flags novas).
+  let flags: SearchPanelFlags = { ...DEFAULT_SEARCH_PANEL_FLAGS, ...options.flags };
+  const toggleButtons = new Map<SearchPanelFlagId, HTMLButtonElement>();
+  /** Reflete o estado das flags nos botões (o `aria-pressed` é a fonte da verdade). */
+  const applyToggleState = (): void => {
+    for (const [id, button] of toggleButtons) {
+      const view = describeToggle(flags, id);
+      button.setAttribute("aria-pressed", String(view.pressed));
+      button.title = view.title;
+      button.classList.toggle("is-active", view.pressed);
+      // O estado "ligado" aparece **sem CSS** (o `index.css` é de outro agente): a cor muda.
+      button.style.color = view.pressed ? "var(--s-fg)" : "var(--s-muted)";
+      button.style.borderColor = view.pressed ? "var(--s-fg-muted)" : "var(--s-border)";
+    }
+  };
+  const toggleHost = document.createElement("div");
+  toggleHost.className = "search-panel-toggles";
+  toggleHost.setAttribute("role", "group");
+  toggleHost.setAttribute("aria-label", "Opções da busca");
+  toggleHost.style.cssText = ["display: flex;", "align-items: center;", "gap: var(--s-space-1);"].join(
+    " ",
+  );
+  for (const id of ["regex", "caseSensitive", "includeBinary"] as const) {
+    const view = describeToggle(flags, id);
+    const button = document.createElement("button");
+    button.className = "search-panel-toggle";
+    button.type = "button";
+    button.textContent = view.label;
+    button.title = view.title;
+    button.setAttribute("aria-label", view.title);
+    button.setAttribute("aria-pressed", String(view.pressed));
+    button.style.cssText = [
+      "flex: 0 0 auto;",
+      "min-width: 24px;",
+      "padding: 2px var(--s-space-1);",
+      "background: transparent;",
+      "border: 1px solid var(--s-border);",
+      "border-radius: var(--s-radius);",
+      "color: var(--s-muted);",
+      "font-family: var(--s-font-mono);",
+      "font-size: var(--s-fs-xs);",
+      "cursor: pointer;",
+    ].join(" ");
+    button.addEventListener("click", (): void => {
+      flags = toggleFlag(flags, id);
+      applyToggleState();
+      options.onOptionsChange?.(flags);
+    });
+    toggleButtons.set(id, button);
+    toggleHost.appendChild(button);
+  }
+  applyToggleState();
+
   const closeButton = document.createElement("button");
   closeButton.className = "search-panel-close";
   closeButton.type = "button";
@@ -199,7 +344,7 @@ export function attachSearchPanel(
     "cursor: pointer;",
   ].join(" ");
 
-  head.append(input, closeButton);
+  head.append(toggleHost, input, closeButton);
 
   const status = document.createElement("div");
   status.className = "search-panel-status";
@@ -360,6 +505,9 @@ export function attachSearchPanel(
     setBusy(next: boolean): void {
       busy = next;
       render();
+    },
+    getFlags(): SearchPanelFlags {
+      return flags;
     },
   };
 }

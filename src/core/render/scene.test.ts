@@ -14,7 +14,7 @@ import {
   type SearchHighlight,
   type VisualRowIndexLike,
 } from "./scene";
-import { collapsedLinesOf, VisualRowIndex } from "./soft-wrap";
+import { applyCollapsedLines, collapsedLinesOf, VisualRowIndex } from "./soft-wrap";
 import type { StickyContext } from "./sticky-scroll";
 
 /** Resolvedor de tema mínimo local ao teste (evita import cruzado entre módulos de `core`). */
@@ -119,6 +119,46 @@ function buildWithMeasure(
     extras?.rowIndex,
     extras?.sticky,
   );
+}
+
+/**
+ * Linhas **desenhadas** pela cena, lidas do **gutter** (é o número da linha que está lá).
+ *
+ * Devolve `{ line, y }` por linha desenhada: o número da linha como no gutter (1-based) e a
+ * row em px (o `y` do glifo). Usado para comparar a cena **com** índice e a cena **sem**
+ * índice: as duas têm de desenar as **mesmas linhas**, nas **mesmas rows**.
+ *
+ * ⚠️ As linhas do teste não podem ter dígitos no texto (o gutter é lido pelos glifos dos
+ * dígitos) — use linhas com letras.
+ */
+function drawnLines(scene: SceneInstances, atlas: GlyphAtlas): { line: number; y: number }[] {
+  const digitOfRegion = new Map<string, string>();
+  for (const digit of "0123456789") {
+    const g = atlas.resolveGlyph(digit, style);
+    digitOfRegion.set(`${g.region.x}:${g.region.y}`, digit);
+  }
+  const byRow = new Map<number, { x: number; digit: string }[]>();
+  for (const g of scene.glyphs) {
+    const digit = digitOfRegion.get(`${g.atlasX}:${g.atlasY}`);
+    if (digit === undefined) continue;
+    const list = byRow.get(g.y) ?? [];
+    list.push({ x: g.x, digit });
+    byRow.set(g.y, list);
+  }
+  const out: { line: number; y: number }[] = [];
+  for (const [y, digits] of [...byRow.entries()].sort((a, b) => a[0] - b[0])) {
+    // O número é desenhado **direita-alinhado** no gutter ⇒ o último dígito é o da direita.
+    const text = digits.sort((a, b) => b.x - a.x).map((d) => d.digit).join("");
+    out.push({ line: Number(text), y });
+  }
+  return out;
+}
+
+/** Rows visuais (0-based) desenhadas pela cena, a partir do `y` dos glifos. */
+function rowsOf(scene: SceneInstances): number[] {
+  // `y = paddingTop + row * lineHeight − scrollOffsetPx` — o layout do teste tem
+  // paddingTop = 4, lineHeight = 20 e scrollOffsetPx = 0.
+  return [...new Set(scene.glyphs.map((g) => g.y))].sort((a, b) => a - b).map((y) => (y - 4) / 20);
 }
 
 describe("buildInstances — virtualização", () => {
@@ -791,15 +831,16 @@ describe("buildInstances — folding × wrap (cena × índice)", () => {
   const atlas = new GlyphAtlas();
   const measure = (text: string): number => text.length * 10;
 
-  it("a linha colapsada reserva 1 row: o texto abaixo não salta", () => {
-    // A linha 1 (dentro da dobra) quebra em 3 rows — colapsada, reserva **1**.
+  it("a linha colapsada ocupa 0 rows: a contagem bate com o desenhado", () => {
+    // A linha 1 (dentro da dobra) quebra em 3 rows — colapsada, ocupa **0**.
     const lines = ["a", "b".repeat(26), "c"];
     const source = sourceOf(lines);
     const index = new VisualRowIndex(source, 100, measure);
     const folding = [{ startLine: 0, endLine: 1, kind: undefined, isCollapsed: true }];
     index.setCollapsedLines(collapsedLinesOf(folding));
-    // A linha 2 está na row 2 (a colapsada ocupou 1 row, não 3).
-    expect(index.rowOfLine(2)).toBe(2);
+    // A linha 2 está na row 1 (a colapsada não ocupou row nenhuma).
+    expect(index.rowOfLine(2)).toBe(1);
+    expect(index.rowCount).toBe(2);
 
     const scene = buildWithMeasure(
       source,
@@ -809,9 +850,178 @@ describe("buildInstances — folding × wrap (cena × índice)", () => {
       measure,
       { folding, rowIndex: index },
     );
-    // O texto da linha 2 é desenhado na row 2 (Y = paddingTop + 2 * lineHeight = 44).
-    expect(scene.glyphs.filter((g) => g.y === 44)).toHaveLength(1);
-    expect(scene.glyphs.every((g) => g.y === 44)).toBe(true);
+    // O texto da linha 2 é desenhado na row 1 (Y = paddingTop + 1 * lineHeight = 24).
+    expect(scene.glyphs.filter((g) => g.y === 24)).toHaveLength(1);
+    expect(scene.glyphs.every((g) => g.y === 24)).toBe(true);
+  });
+
+  it("as rows desenhadas são exatamente as rows contadas pelo índice", () => {
+    const lines = ["a", "b".repeat(26), "c"];
+    const source = sourceOf(lines);
+    const index = new VisualRowIndex(source, 100, measure);
+    const folding = [{ startLine: 0, endLine: 1, kind: undefined, isCollapsed: true }];
+    applyCollapsedLines(index, folding);
+    const scene = buildWithMeasure(
+      source,
+      wrapLayout(100),
+      atlas,
+      { first: 0, count: 3 },
+      measure,
+      { folding, rowIndex: index },
+    );
+    // Row 0 (linha 0) e row 1 (linha 2) — a linha dobrada (que ocuparia 3 rows) não ocupa
+    // row nenhuma: o texto abaixo da dobra **sobe**.
+    expect([...new Set(scene.glyphs.map((g) => g.y))].sort((a, b) => a - b)).toEqual([4, 24]);
+    // E a contagem publicada (a do índice) é a mesma ⇒ scroll e "line count" batem.
+    expect(index.rowCount).toBe(2);
+  });
+
+  it("as linhas colapsadas não são desenhadas e o indicador de dobra continua", () => {
+    const lines = ["a", "b".repeat(26), "c"];
+    const source = sourceOf(lines);
+    const index = new VisualRowIndex(source, 100, measure);
+    const folding = [{ startLine: 0, endLine: 1, kind: undefined, isCollapsed: true }];
+    const scene = buildWithMeasure(
+      source,
+      { ...wrapLayout(100), gutterWidth: 30 },
+      atlas,
+      { first: 0, count: 3 },
+      measure,
+      { folding, rowIndex: index },
+    );
+    // Row 0 (linha 0): o número "1", o texto "a" e o indicador de dobra "▸".
+    expect(scene.glyphs.filter((g) => g.y === 4)).toHaveLength(3);
+    // Row 1 (linha 2): o número "3" e o texto "c" — a linha colapsada (1) não tem glyphs.
+    expect(scene.glyphs.filter((g) => g.y === 24)).toHaveLength(2);
+    expect(scene.glyphs).toHaveLength(5);
+    // O indicador de dobra (▸) está no gutter da 1ª linha do bloco.
+    const marker = atlas.resolveGlyph("▸", style);
+    expect(
+      scene.glyphs.some((g) => g.atlasX === marker.region.x && g.atlasY === marker.region.y),
+    ).toBe(true);
+  });
+
+  it("regressão: sem folding, as rows da cena são as mesmas de sempre", () => {
+    const lines = ["a", "b".repeat(26), "c"];
+    const source = sourceOf(lines);
+    const index = new VisualRowIndex(source, 100, measure);
+    const scene = buildWithMeasure(
+      source,
+      wrapLayout(100),
+      atlas,
+      { first: 0, count: 3 },
+      measure,
+      { rowIndex: index },
+    );
+    // Linha 0 → row 0 · linha 1 (26 chars) → 3 rows (1, 2, 3) · linha 2 → row 4.
+    expect([...new Set(scene.glyphs.map((g) => g.y))].sort((a, b) => a - b)).toEqual([4, 24, 44, 64, 84]);
+    expect(index.rowCount).toBe(5);
+  });
+
+  it("sem soft wrap: a linha colapsada também não reserva row (os dois modos alinhados)", () => {
+    const lines = ["a", "b", "c"];
+    const source = sourceOf(lines);
+    const folding = [{ startLine: 0, endLine: 1, kind: undefined, isCollapsed: true }];
+    const scene = buildWithMeasure(source, layout(0), atlas, { first: 2, count: 1 }, measure, { folding });
+    // A linha 1 está colapsada (0 rows) ⇒ a linha 2 é a row 1 (Y = paddingTop + 1 * 20 = 24).
+    expect(scene.glyphs).toHaveLength(1);
+    expect(scene.glyphs.every((g) => g.y === 24)).toBe(true);
+  });
+
+  it("cena sem índice: a linha colapsada que quebraria não é desenhada e não conta row", () => {
+    // A linha 1 quebra em 3 rows (26 chars × 10px = 260px) — colapsada, ocupa **0**.
+    const lines = ["a", "b".repeat(26), "c"];
+    const source = sourceOf(lines);
+    const folding = [{ startLine: 0, endLine: 1, kind: undefined, isCollapsed: true }];
+    // **Sem** índice: a faixa é re-quebrada no frame (o caminho legado).
+    const scene = buildWithMeasure(source, wrapLayout(100), atlas, { first: 0, count: 3 }, measure, {
+      folding,
+    });
+    // Só as linhas 0 e 2 são desenhadas — a colapsada (que ocuparia 3 rows) não é desenhada…
+    expect(rowsOf(scene)).toEqual([0, 1]);
+    // … e não conta row: a linha 2 fica na row 1 (não na row 4).
+    expect(scene.glyphs.filter((g) => g.y === 4)).toHaveLength(1);
+    expect(scene.glyphs.filter((g) => g.y === 24)).toHaveLength(1);
+  });
+
+  it("com wrap, as duas cenas concordam na row **relativa à faixa**", () => {
+    // A row **absoluta** de uma linha depende das rows das linhas anteriores (O(documento))
+    // ⇒ só o índice a sabe. O que os dois caminhos **tem** de concordar é a row relativa à
+    // faixa (`row − firstRow`): sem isso, a mesma linha era desenhada em rows diferentes.
+    const lines = ["b".repeat(26), "c", "d"];
+    const source = sourceOf(lines);
+    const index = new VisualRowIndex(source, 100, measure);
+    const range = { first: 1, count: 2 };
+    const comIndice = buildWithMeasure(source, wrapLayout(100), atlas, range, measure, { rowIndex: index });
+    const semIndice = buildWithMeasure(source, wrapLayout(100), atlas, range, measure, {});
+    // A base do índice é a row **absoluta** da 1ª linha da faixa; a do caminho sem índice é
+    // **relativa à faixa** (0) — as rows relativas é que têm de bater.
+    const relativa = (scene: SceneInstances, firstRow: number): number[] =>
+      rowsOf(scene).map((r) => r - firstRow);
+    expect(relativa(comIndice, index.rowOfLine(range.first))).toEqual(relativa(semIndice, 0));
+  });
+});
+
+describe("buildInstances — paridade cena×índice (sem soft wrap)", () => {
+  const atlas = new GlyphAtlas();
+  const measure = (text: string): number => text.length * 10;
+  const lines = ["a", "b", "c", "d", "e"];
+  /** A dobra pega a linha 2 — a 1ª do bloco (a 2ª linha) continua visível (indicador ▸). */
+  const folding = [{ startLine: 1, endLine: 2, kind: undefined, isCollapsed: true }];
+
+  it("as duas cenas desenham as mesmas linhas, nas mesmas rows", () => {
+    const source = sourceOf(lines);
+    const index = new VisualRowIndex(source, 0, measure);
+    const range = { first: 0, count: lines.length };
+    const comIndice = buildWithMeasure(
+      source,
+      { ...layout(0), gutterWidth: 30 },
+      atlas,
+      range,
+      measure,
+      { folding, rowIndex: index },
+    );
+    const semIndice = buildWithMeasure(
+      source,
+      { ...layout(0), gutterWidth: 30 },
+      atlas,
+      range,
+      measure,
+      { folding },
+    );
+    // O **conjunto** de linhas desenhadas é o mesmo (a colapsada — a 3ª — não é desenhada).
+    expect(drawnLines(comIndice, atlas)).toEqual(drawnLines(semIndice, atlas));
+    // Os números do gutter são 1-based: as linhas 0, 1, 3 e 4 (a 2 — colapsada — some).
+    expect(drawnLines(comIndice, atlas).map((l) => l.line)).toEqual([1, 2, 4, 5]);
+    // E as **rows** são as mesmas: a colapsada não reservou row (a linha 3 ficou na row 2).
+    expect(drawnLines(comIndice, atlas).map((l) => l.y)).toEqual([4, 24, 44, 64]);
+    expect(index.rowCount).toBe(4);
+  });
+
+  it("a paridade vale também para uma faixa que começa no meio do documento", () => {
+    const source = sourceOf(lines);
+    const index = new VisualRowIndex(source, 0, measure);
+    const range = { first: 2, count: 3 };
+    const comIndice = buildWithMeasure(
+      source,
+      { ...layout(0), gutterWidth: 30 },
+      atlas,
+      range,
+      measure,
+      { folding, rowIndex: index },
+    );
+    const semIndice = buildWithMeasure(
+      source,
+      { ...layout(0), gutterWidth: 30 },
+      atlas,
+      range,
+      measure,
+      { folding },
+    );
+    expect(drawnLines(comIndice, atlas)).toEqual(drawnLines(semIndice, atlas));
+    // A linha colapsada (a 3ª) não é desenhada; as linhas 4 e 5 ocupam as rows 2 e 3.
+    expect(drawnLines(comIndice, atlas).map((l) => l.line)).toEqual([4, 5]);
+    expect(drawnLines(comIndice, atlas).map((l) => l.y)).toEqual([44, 64]);
   });
 });
 

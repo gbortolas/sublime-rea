@@ -16,6 +16,7 @@ import type { HighlightSpan, Scope, ThemeResolver } from "../../shared";
 import { SelectionOps, type Selection } from "../../shared";
 import type { GlyphAtlas } from "./atlas";
 import {
+  applyCollapsedLines,
   buildVisualRowMap,
   buildVisualRowMapFromIndex,
   collapsedLinesOf,
@@ -101,11 +102,15 @@ export interface LineLayout {
    * Row visual (índice da linha visual no documento inteiro, contando as linhas de wrap)
    * da **primeira** linha do range visível.
    *
-   * Só tem efeito com soft wrap (`wrapWidth > 0`).
-   *
-   * `undefined` (default) = comportamento atual: a row base da primeira linha visível é o
-   * seu índice de linha **lógica** (`range.first`) — a ancoragem no `first` visível é
-   * preservada e o `scrollOffsetPx` continua contado em linhas lógicas (a *deriva*).
+   * `undefined` (default) = a row base da faixa depende do modo (a **mesma** unidade nos
+   * dois caminhos — com/sem índice):
+   * - **sem soft wrap** (1 row por linha lógica): o índice de linha **lógica** (`range.first`)
+   *   menos as linhas colapsadas que vêm antes dela (as colapsadas não ocupam row) — a
+   *   ancoragem no `first` visível é preservada e o `scrollOffsetPx` continua contado em
+   *   linhas lógicas (a *deriva*);
+   * - **com soft wrap**: a row **relativa à faixa** (0) — a row absoluta de uma linha é a
+   *   soma das rows das linhas anteriores (O(documento)) ⇒ só o **índice** sabe calculá-la.
+   *   Quem sabe a row absoluta passa o índice (`rowIndex`) ou informa o `visualRowOffset`.
    *
    * Quando informado, o renderizador passa a contar a rolagem em **linhas visuais**: nesse
    * caso `scrollOffsetPx` deve estar na mesma unidade (row visual), senão o texto quebrado
@@ -306,26 +311,51 @@ export function buildInstances(
   const mw = measureWidth;
   const wrap = layout.wrapWidth > 0 && mw !== undefined;
 
-  // Preenche linhas colapsadas — a **mesma** regra do `VisualRowIndex` (1 row reservada).
-  const collapsedLines = collapsedLinesOf(folding);
+  // Linhas colapsadas (folding) — a **regra única de rows**: uma linha colapsada **não é
+  // desenhada** e **não ocupa row** (0 rows). O `applyCollapsedLines` aplica o folding ao
+  // índice (idempotente) — o renderer já o chama **antes** de publicar a contagem de rows
+  // (aqui é só a rede de segurança: a cena e o índice têm de concordar).
+  const collapsedLines =
+    rowIndex !== undefined ? applyCollapsedLines(rowIndex, folding) : collapsedLinesOf(folding);
 
   // `wrapLine` (soft-wrap.ts) é a implementação canônica da quebra: tem o early-exit "cabe
   // tudo" — linhas que cabem na largura **não** são quebradas.
   //
-  // Row base da faixa: por padrão o índice da linha **lógica** (`first`) — preserva a
-  // ancoragem atual (o scroll continua em linhas lógicas). `layout.visualRowOffset` permite
-  // ao renderizador informar a row visual absoluta (quando a rolagem passa a ser contada em
-  // rows visuais).
+  // ── Row base da faixa (a MESMA unidade nos dois caminhos) ─────────────────────────────────
   //
-  // Com o **índice** informado, a malha é montada a partir dos segmentos **já em cache**
-  // dele (a faixa não é re-quebrada a cada frame) e a contagem de rows é a do índice — que
-  // conhece as linhas colapsadas (a cena e o índice concordam sobre a posição de cada linha).
-  if (rowIndex !== undefined) rowIndex.setCollapsedLines?.(collapsedLines);
+  // A row base é a **row visual** da 1ª linha da faixa. Quem a define, em ordem de
+  // precedência:
+  //
+  // 1. `layout.visualRowOffset` — o renderizador informou a row visual **absoluta** da 1ª
+  //    linha visível (a rolagem passou a ser contada em rows visuais);
+  // 2. o **índice** (`rowIndex`) — a base é a row **absoluta** dele (`rowOfLine(first)`), que
+  //    conhece as linhas colapsadas (a malha vem dos segmentos já em cache do índice);
+  // 3. **sem** índice e **sem** wrap (1 row por linha lógica): a row absoluta de uma linha é o
+  //    seu índice lógico **menos** as colapsadas antes ⇒ `first − collapsedBefore(first)` —
+  //    exatamente o que o índice devolveria ⇒ os dois caminhos concordam;
+  // 4. **sem** índice e **com** wrap: a row absoluta de uma linha é a **soma das rows das
+  //    linhas anteriores** (O(documento)!) — só o índice sabe ⇒ a base é **relativa à faixa**
+  //    (0) e quem posiciona a faixa no documento é o `visualRowOffset`.
+  //
+  // ⚠️ **Dobra**: as linhas colapsadas não ocupam row ⇒ a row base da faixa tem de descontar
+  // as colapsadas **antes** dela (ou vir do índice, que já sabe).
+  //
+  // ⚠️ **Por que a base é relativa à faixa no caso 4**: usar `first − collapsedBefore(first)`
+  // ali misturava unidades (uma row **lógica** no lugar de uma row **visual**) e a cena sem
+  // índice desenhava as linhas em rows **diferentes** da cena com índice — as duas cenas
+  // discordavam da **mesma** linha. Agora as duas concordam na row **relativa à faixa**
+  // (`row − firstRow`) e, no modo sem wrap, também na row **absoluta**.
+  const firstRow =
+    layout.visualRowOffset !== undefined
+      ? layout.visualRowOffset
+      : wrap
+        ? 0
+        : first - collapsedBefore(collapsedLines, first);
   const rowMap: VisualRowMap =
     rowIndex !== undefined
       ? buildVisualRowMapFromIndex(rowIndex, first, end - first, collapsedLines)
       : buildVisualRowMap(source, first, end - first, layout.wrapWidth, mw, {
-          ...(wrap && layout.visualRowOffset !== undefined ? { firstRow: layout.visualRowOffset } : {}),
+          firstRow,
           ...(collapsedLines.size > 0 ? { collapsedLines } : {}),
         });
 
@@ -611,7 +641,7 @@ export function buildInstances(
       // (e que permite saber em qual segmento de wrap o match cai).
       const from = match.column;
       const to = match.column + match.length;
-      for (const seg of rowMap.paintSegmentsOf(match.line)) {
+      for (const seg of rowMap.segmentsOf(match.line)) {
         // Interseção do match com o segmento (offsets da linha).
         const s = Math.max(from, seg.start);
         const e = Math.min(to, seg.end);
@@ -709,7 +739,7 @@ export function buildInstances(
 
   // Indentation guides (P3.15) — as guias usam a **row visual** (a mesma do texto
   // desenhado): com wrap, o índice lógico subiria as guias N rows e elas cruzariam o texto.
-  const indentGuides = calcIndentGuides(source, layout, range, rowMap);
+  const indentGuides = calcIndentGuides(source, layout, range, rowMap, collapsedLines);
 
   // Sticky scroll: os **glifos** do bloco grudado entram **no fim** (ficam por cima do texto
   // normal da faixa visível — é o que faz o bloco "grudar" no topo).
@@ -962,8 +992,8 @@ function selectionEndPos(source: LineSource, selEnd: number): { line: number; co
  * Pinta a seleção (rects de fundo) entre `anchor` e `active` — **um rect por segmento** de wrap
  * atravessado (sem wrap: um rect por linha, como sempre).
  *
- * As linhas colapsadas (folding) não têm segmentos desenháveis: usa-se a row reservada e o
- * traçado da linha inteira (compatível com o caminho sem wrap).
+ * As linhas colapsadas (folding) não têm row (0 rows — a regra única) ⇒ não têm nada a
+ * pintar: a seleção "some" dentro da dobra (a linha não é desenhada).
  */
 function pushSelectionRects(
   rects: RectInstance[],
@@ -994,7 +1024,7 @@ function pushSelectionRects(
     // senão, vai até o fim da linha (text.length).
     const lineEndCol = line === endPos.line ? endPos.column : text.length;
     if (lineStartCol >= lineEndCol) continue;
-    for (const seg of rowMap.paintSegmentsOf(line)) {
+    for (const seg of rowMap.segmentsOf(line)) {
       // Interseção da seleção com o segmento (offsets da linha).
       const from = Math.max(lineStartCol, seg.start);
       const to = Math.min(lineEndCol, seg.end);
@@ -1039,12 +1069,16 @@ function pushSelectionRects(
  * ⚠️ As guias são posicionadas pela **row visual** da linha (`rowMap.rowOfLine`) — a mesma
  * unidade do texto desenhado. Com soft wrap, a row visual ≠ índice lógico (a linha pode
  * ocupar N rows) e as guias cruzariam o texto.
+ *
+ * ⚠️ As linhas **colapsadas** (folding) não são desenhadas (0 rows) ⇒ as guias as
+ * **atravessam** (o nível de indentação continua valendo através da dobra).
  */
 function calcIndentGuides(
   source: LineSource,
   layout: LineLayout,
   range: { first: number; count: number },
   rowMap: VisualRowMap,
+  collapsed: ReadonlySet<number>,
 ): IndentGuide[] | undefined {
   if (range.count <= 0) return undefined;
 
@@ -1057,13 +1091,15 @@ function calcIndentGuides(
   const rowOf = (line: number): number => rowMap.rowOfLine(line) ?? line - range.first;
   /** Row visual (absoluta) da **última** row de uma linha. */
   const lastRowOf = (line: number): number => {
-    const segs = rowMap.paintSegmentsOf(line);
+    const segs = rowMap.segmentsOf(line);
     return rowOf(line) + Math.max(1, segs.length) - 1;
   };
   /** Y do topo da row visual `row`. */
   const yOf = (row: number): number => paddingTop + row * lineHeight - scrollOffsetPx;
 
   for (let i = range.first; i < range.first + range.count && i < source.lineCount(); i++) {
+    // Linha colapsada: não é desenhada ⇒ a guia a **atravessa** (não abre/fecha nível).
+    if (collapsed.has(i)) continue;
     const text = source.line(i);
     const indent = leadingSpaces(text) / tabSize; // indent level
     const trimmed = text.trim();
@@ -1092,8 +1128,10 @@ function calcIndentGuides(
     }
   }
 
-  // Fecha guias pendentes no fim do range
-  const lastLine = Math.min(source.lineCount() - 1, range.first + range.count - 1);
+  // Fecha guias pendentes no fim do range — na última linha **desenhada** (a colapsada não
+  // tem row: ela não pode ser o fim de uma guia).
+  const lastLine = lastVisibleLineIn(source, range, collapsed);
+  if (lastLine < 0) return guides.length > 0 ? guides : undefined;
   const bandEnd = yOf(lastRowOf(lastLine) + 1) - 2;
   for (const [level, startLine] of visited) {
     const x = paddingLeft + level * tabSize * 8;
@@ -1105,6 +1143,31 @@ function calcIndentGuides(
   }
 
   return guides.length > 0 ? guides : undefined;
+}
+
+/**
+ * Última linha **desenhada** (não colapsada) do range — a que fecha as guias pendentes.
+ * `-1` quando o range não tem nenhuma linha desenhável (tudo colapsado ou fora do documento).
+ */
+function lastVisibleLineIn(
+  source: LineSource,
+  range: { first: number; count: number },
+  collapsed: ReadonlySet<number>,
+): number {
+  let line = Math.min(source.lineCount() - 1, range.first + range.count - 1);
+  if (line < range.first) return -1;
+  while (line >= range.first && collapsed.has(line)) line -= 1;
+  return line >= range.first ? line : -1;
+}
+
+/**
+ * Nº de linhas **colapsadas** antes de `line` — elas não ocupam row, então a row absoluta
+ * de `line` é a sua à menos essa contagem (sem soft wrap: 1 row por linha lógica).
+ */
+function collapsedBefore(collapsed: ReadonlySet<number>, line: number): number {
+  let count = 0;
+  for (const l of collapsed) if (l < line) count += 1;
+  return count;
 }
 
 /** Conta espaços iniciais (não tabs). */

@@ -20,6 +20,8 @@ import type {
   DocumentHighlight,
   DocumentInsertResult,
   DocumentUndoState,
+  GitCommitResult,
+  GitStatusResult,
   GrepResult,
   LspCodeAction,
   LspCompletionItem,
@@ -39,6 +41,7 @@ import type {
   SearchQuery,
   SelectionSet,
   SnippetsListResult,
+  WorkspaceCreateFileResult,
   WorkspaceFilesResult,
   DapBreakpoint,
   DapBreakpointSpec,
@@ -81,6 +84,39 @@ export interface ScribePreloadApi {
    * abertos); o main expande até a raiz da workspace e varre a árvore.
    */
   workspaceFiles(roots?: readonly string[]): Promise<WorkspaceFilesResult>;
+  /**
+   * Cria um arquivo **vazio** dentro da workspace (o "criar arquivo" do ⌘P).
+   *
+   * O `main` confina o path a uma das raízes da workspace (fora ⇒ `invalid-args`), **não
+   * aceita symlink no caminho** e **nunca** sobrescreve um arquivo existente
+   * (`created: false`).
+   */
+  createFile(path: string): Promise<WorkspaceCreateFileResult>;
+  /**
+   * Status do repositório git (o painel de *Source Control*).
+   *
+   * `root` é a raiz do repositório; sem ele, o `main` usa a raiz do documento ativo.
+   *
+   * ⚠️ O `root` **não** é fonte de verdade: o `main` só aceita uma raiz **dentro** da
+   * workspace (a raiz dos documentos abertos) — fora ⇒ `invalid-args` ("root-outside-
+   * workspace"). O mesmo vale para `gitStage`/`gitUnstage`/`gitStageAll`/`gitCommit`.
+   */
+  gitStatus(root?: string): Promise<GitStatusResult>;
+  /** Stage de um arquivo (`git add -- <path>`). */
+  gitStage(path: string, root?: string): Promise<GitStatusResult>;
+  /** Unstage de um arquivo (`git restore --staged -- <path>`). */
+  gitUnstage(path: string, root?: string): Promise<GitStatusResult>;
+  /** Stage de tudo (`git add -A`). */
+  gitStageAll(root?: string): Promise<GitStatusResult>;
+  /** Commit (`git commit -m <mensagem>`) — em falha, `{ ok: false, error }` (nunca rejeita). */
+  gitCommit(message: string, root?: string): Promise<GitCommitResult>;
+  /**
+   * Diff unificado cru (`git diff HEAD`) — o renderer faz o parse.
+   *
+   * O `path` tem de estar **dentro** da workspace — fora ⇒ `invalid-args`
+   * ("path-outside-workspace").
+   */
+  gitDiffText(path: string): Promise<string>;
   /**
    * Busca o padrão em **todos os arquivos** da workspace (o "grep", `Ctrl+Shift+F`).
    *
@@ -328,6 +364,26 @@ const api: ScribePreloadApi = {
     call<void>("document.close", [handle]),
   workspaceFiles: (roots?: readonly string[]): Promise<WorkspaceFilesResult> =>
     call<WorkspaceFilesResult>("workspace.files", roots === undefined ? [] : [roots]),
+  createFile: (path: string): Promise<WorkspaceCreateFileResult> =>
+    call<WorkspaceCreateFileResult>("workspace.createFile", [path]),
+  gitStatus: (root?: string): Promise<GitStatusResult> =>
+    call<GitStatusResult>("git.status", root === undefined ? [] : [root]),
+  gitStage: (path: string, root?: string): Promise<GitStatusResult> =>
+    call<GitStatusResult>("git.stage", root === undefined ? [path] : [path, root]),
+  gitUnstage: (path: string, root?: string): Promise<GitStatusResult> =>
+    call<GitStatusResult>("git.unstage", root === undefined ? [path] : [path, root]),
+  gitStageAll: (root?: string): Promise<GitStatusResult> =>
+    call<GitStatusResult>("git.stageAll", root === undefined ? [] : [root]),
+  gitCommit: (message: string, root?: string): Promise<GitCommitResult> =>
+    call<GitCommitResult>("git.commit", root === undefined ? [message] : [message, root]),
+  gitDiffText: (path: string): Promise<string> => {
+    // Validação **no preload** (como o `open`): path vazio ou com NUL faria o `fs` do main
+    // lançar uma exceção opaca — aqui o erro é tipado e local.
+    if (typeof path !== "string" || path.length === 0 || path.includes("\0")) {
+      return Promise.reject(new Error("Scribe: path de arquivo inválido"));
+    }
+    return call<string>("git.diffText", [path]);
+  },
   searchFiles: (
     query: string,
     options?: SearchFilesOptions,

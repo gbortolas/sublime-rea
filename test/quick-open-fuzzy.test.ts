@@ -2,6 +2,20 @@
  * Scribe — testes do **fuzzy matching** e do **índice de arquivos da workspace**.
  *
  * Só funções puras (nenhum DOM, nenhum I/O real): o port de diretórios é um fake em memória.
+ *
+ * ⚠️ **A regra mudou (pontuação pelo caminho completo)**: o candidato do matching é o
+ * **caminho** (relativo à raiz) e a casa é feita **por segmento de caminho** — a casa
+ * **não atravessa** `/`. Consequências (documentadas de propósito, é uma mudança de UX):
+ *
+ * - "fb" **não** casa mais com "foo/bar.ts" (o "b" está em outro segmento) — use "f bar";
+ * - o *basename* virou um **desempate leve**: a diferença de score entre "main.ts" e
+ *   "src/main.ts" caiu de ~100 para **5** (o *basename* não domina mais);
+ * - dois arquivos de mesmo *basename* **não empatam** mais quando a query fala da pasta
+ *   ("renderer main" acha "src/renderer/main.ts" e não "src/main.ts").
+ *
+ * ⚠️ **A query também é splitada por `/`** (e `\`): "src/main.ts" casa "src/main.ts" — a
+ * query fala o *caminho*, não uma sequência de letras soltas. Os trechos casam segmento a
+ * segmento, **em ordem** (com pulo de segmento, como o VS Code).
  */
 import { describe, expect, it, vi } from "vitest";
 
@@ -42,10 +56,17 @@ function fakeReader(tree: FakeTree, files: Record<string, string> = {}): Directo
 }
 
 describe("fuzzy — casar e não casar", () => {
-  it("casa uma query multi-caractere em ordem (fb → foo/bar.ts)", () => {
-    const match = fuzzyScore("fb", "foo/bar.ts");
+  it("casa uma query multi-caractere em ordem (f bar → foo/bar.ts)", () => {
+    const match = fuzzyScore("f bar", "foo/bar.ts");
     expect(match).toBeDefined();
-    expect(match!.indices).toEqual([0, 4]);
+    expect(match!.indices).toEqual([0, 4, 5, 6]);
+  });
+
+  it("a casa NÃO atravessa segmentos do caminho (fb ≠ foo/bar.ts)", () => {
+    // A casa é por segmento: "f" está em "foo" e "b" em "bar" — trechos diferentes.
+    expect(fuzzyScore("fb", "foo/bar.ts")).toBeUndefined();
+    // Nem misturando as pastas ("srcmain" não cabe em "src" nem em "main.ts").
+    expect(fuzzyScore("srcmain", "src/main.ts")).toBeUndefined();
   });
 
   it("casa uma query que é substring do candidato", () => {
@@ -71,6 +92,28 @@ describe("fuzzy — casar e não casar", () => {
   });
 });
 
+describe("fuzzy — a casa é feita no caminho inteiro", () => {
+  it("casa em qualquer parte do caminho (o diretório também casa)", () => {
+    const match = fuzzyScore("renderer", "src/renderer/main.ts");
+    expect(match).toBeDefined();
+    // O "renderer" do diretório (começo de uma palavra ⇒ bônus de início de palavra).
+    expect(match!.indices).toEqual([4, 5, 6, 7, 8, 9, 10, 11]);
+  });
+
+  it("preserva a ordem dos segmentos do caminho", () => {
+    // "main" vem depois de "renderer" no caminho — a query invertida não casa.
+    expect(fuzzyScore("main renderer", "src/renderer/main.ts")).toBeUndefined();
+  });
+
+  it("o prefixo da raiz (multi-root) também entra na casa", () => {
+    const match = fuzzyScore("proj src", "proj/src/a.ts");
+    expect(match).toBeDefined();
+    expect(match!.indices).toEqual([0, 1, 2, 3, 5, 6, 7]);
+    // A mesma query não casa na outra raiz.
+    expect(fuzzyScore("proj src", "other/src/a.ts")).toBeUndefined();
+  });
+});
+
 describe("fuzzy — a regra do espaço (segmento / \\b)", () => {
   it("com espaço, casa por segmento: 'fo bar' casa 'foo/bar.ts'", () => {
     const match = fuzzyScore("fo bar", "foo/bar.ts");
@@ -91,6 +134,47 @@ describe("fuzzy — a regra do espaço (segmento / \\b)", () => {
   });
 });
 
+describe("fuzzy — a query que fala o CAMINHO (barra)", () => {
+  it("a query com '/' casa o caminho (segmento a segmento)", () => {
+    // A query é splitada por '/' ⇒ cada trecho casa com **um** segmento do caminho.
+    expect(fuzzyScore("src/main.ts", "src/main.ts")).toBeDefined();
+    expect(fuzzyScore("src/main", "src/main.ts")).toBeDefined();
+    // O mesmo arquivo, escrito com espaço, casa também.
+    expect(fuzzyScore("src main", "src/main.ts")).toBeDefined();
+  });
+
+  it("os índices casados são os do caminho (o destaque aponta pro arquivo certo)", () => {
+    const match = fuzzyScore("src/main.ts", "src/main.ts");
+    expect(match).toBeDefined();
+    expect(match!.indices).toEqual([0, 1, 2, 4, 5, 6, 7, 8, 9, 10]);
+  });
+
+  it("o trecho casa DENTRO de um segmento (a casa não atravessa a barra)", () => {
+    // Um trecho só não atravessa o separador: "sm" não cabe em "src" nem em "main.ts".
+    expect(fuzzyScore("sm", "src/main.ts")).toBeUndefined();
+    // (a regra é a mesma do "fb" ≠ "foo/bar.ts" — o que muda é que a query **pode** usar a
+    // barra para dizer "o próximo segmento é este").
+  });
+
+  it("os trechos pulam segmentos (como o VS Code) mas nunca voltam", () => {
+    // "src" casa no 1º segmento e "main" no 3º — o segmento do meio é pulado.
+    expect(fuzzyScore("src/main", "src/renderer/main.ts")).toBeDefined();
+    // A ordem é respeitada: "main" vem **depois** de "src" no caminho.
+    expect(fuzzyScore("main/src", "src/main.ts")).toBeUndefined();
+  });
+
+  it("dentro do segmento a casa é fuzzy (subsequência), como no resto do módulo", () => {
+    // "sr" é uma subsequência de "src" ⇒ casa (é a mesma regra que faz "maint" casar
+    // "main.ts"); o que a regra **proíbe** é o trecho atravessar a barra.
+    expect(fuzzyScore("sr/main", "src/main.ts")).toBeDefined();
+    expect(fuzzyScore("maint", "src/main.ts")).toBeDefined();
+  });
+
+  it("a barra invertida (Windows) também é separador", () => {
+    expect(fuzzyScore("src\\main.ts", "src\\main.ts")).toBeDefined();
+  });
+});
+
 describe("fuzzy — pontuação", () => {
   it("a consecutividade vale mais que o espaçamento", () => {
     const consecutive = fuzzyScore("ab", "ab")!;
@@ -104,10 +188,30 @@ describe("fuzzy — pontuação", () => {
     expect(atStart.score).toBeGreaterThan(inTheMiddle.score);
   });
 
-  it("casar no basename vale mais que casar no diretório", () => {
+  it("o basename é um desempate LEVE (não domina mais)", () => {
     const inBasename = fuzzyScore("main", "main.ts")!;
     const inDirectory = fuzzyScore("main", "src/main.ts")!;
+    // O basename ainda ganha (é o que o usuário espera), mas por pouco: a fórmula antiga
+    // (12/char + 48) dava ~100 pontos de vantagem — agora a diferença é de 5.
     expect(inBasename.score).toBeGreaterThan(inDirectory.score);
+    expect(inBasename.score - inDirectory.score).toBeLessThan(20);
+  });
+
+  it("o caminho desempata dois arquivos de mesmo basename (não empatam mais)", () => {
+    const shallow = fuzzyScore("main", "src/main.ts")!;
+    const deep = fuzzyScore("main", "src/renderer/main.ts")!;
+    // Antes (o basename dominava) os dois empatavam; agora o caminho entra no score.
+    expect(shallow.score).not.toBe(deep.score);
+    expect(shallow.score).toBeGreaterThan(deep.score);
+  });
+
+  it("a query que fala a pasta escolhe o arquivo certo", () => {
+    const hits = fuzzyFilter(
+      "renderer main",
+      ["src/main.ts", "src/renderer/main.ts"],
+      (item) => item,
+    );
+    expect(hits.map((hit) => hit.item)).toEqual(["src/renderer/main.ts"]);
   });
 });
 
@@ -138,6 +242,12 @@ describe("fuzzyFilter — filtro e ordenação", () => {
     const equal = ["a.ts", "b.ts"];
     const hits = fuzzyFilter("t", equal, (item) => item);
     expect(hits.map((hit) => hit.item)).toEqual(["a.ts", "b.ts"]);
+  });
+
+  it("a query com a pasta separa o que o basename não separa", () => {
+    const hits = fuzzyFilter("src main", ["src/main.ts", "lib/main.ts"], (item) => item);
+    // "lib/main.ts" nem casa com "src main" — a casa é no caminho, não no basename.
+    expect(hits.map((hit) => hit.item)).toEqual(["src/main.ts"]);
   });
 });
 
@@ -179,6 +289,35 @@ describe("índice de arquivos — o que entra e o que fica de fora", () => {
     const reader = fakeReader(withIgnore, { "/ws/.gitignore": "*.log\n" });
     const index = await indexFiles(["/ws"], reader);
     expect(index.files).toEqual(["main.ts"]);
+  });
+});
+
+describe("índice de arquivos — multi-root", () => {
+  const multi: FakeTree = {
+    "/ws": [dir("src")],
+    "/ws/src": [file("a.ts")],
+    "/other": [dir("src")],
+    "/other/src": [file("a.ts")],
+  };
+
+  it("com mais de uma raiz, o caminho ganha o nome da raiz como prefixo", async () => {
+    const index = await indexFiles(["/ws", "/other"], fakeReader(multi));
+    expect(index.files).toEqual(["other/src/a.ts", "ws/src/a.ts"]);
+    // O caminho absoluto continua o do arquivo (o `main` abre por ele).
+    const entry = index.entries.find((item) => item.path === "other/src/a.ts");
+    expect(entry?.absolutePath).toBe("/other/src/a.ts");
+    expect(entry?.root).toBe("/other");
+  });
+
+  it("com uma raiz só, não há prefixo (o formato antigo)", async () => {
+    const index = await indexFiles(["/ws"], fakeReader(multi));
+    expect(index.files).toEqual(["src/a.ts"]);
+  });
+
+  it("o prefixo entra na pontuação (a raiz certa ganha)", async () => {
+    const index = await indexFiles(["/ws", "/other"], fakeReader(multi));
+    const hits = fuzzyFilter("other src", index.files, (item) => item);
+    expect(hits.map((hit) => hit.item)).toEqual(["other/src/a.ts"]);
   });
 });
 

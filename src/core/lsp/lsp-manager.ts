@@ -13,7 +13,7 @@ import { LspClient } from "./lsp-client";
 import { LspStdioTransport } from "./lsp-transport";
 import { LspError } from "./lsp-protocol";
 import type { CompletionItem, Hover, Diagnostic, InitializeParams, InitializeResult, Location, ReferenceParams, SignatureHelp, DocumentSymbol, DocumentSymbolLike, SymbolInformation, RenameParams, PrepareRenameParams, WorkspaceEdit, Range, Position, CodeAction, CodeActionParams, TextEdit, DocumentFormattingParams, FoldingRange, FoldingRangeParams, InlayHint, InlayHintParams, WorkspaceFolder, ClientCapabilities, TextDocumentContentChangeEvent } from "./lsp-protocol";
-import { SymbolKind, TextDocumentSyncKind } from "./lsp-protocol";
+import { SymbolKind, TextDocumentSyncKind, readConfigurationItems } from "./lsp-protocol";
 
 /**
  * Capacidades do cliente no `initialize`.
@@ -56,7 +56,20 @@ const CLIENT_CAPABILITIES: ClientCapabilities = {
     foldingRange: {},
     references: {},
   },
-  workspace: { workspaceFolders: true, configuration: true },
+  workspace: {
+    /**
+     * Por que mantemos `configuration: true`?
+     *
+     * Declarar a capability **faz o servidor perguntar**: o `pyright` envia
+     * `workspace/configuration` (server→cliente) e **fica bloqueado** esperando a
+     * resposta. A alternativa seria declarar `false` (o servidor deixa de perguntar) —
+     * mas aí o cliente perde o canal de configuração. Optamos por **responder** (o
+     * `LspClient` responde todo request servidor→cliente): o servidor destrava e o
+     * Scribe continua no controle.
+     */
+    workspaceFolders: true,
+    configuration: true,
+  },
 };
 
 /** Documento sincronizado com o servidor (texto + início de cada linha). */
@@ -83,6 +96,9 @@ export class LspManager implements Disposable {
   /** Pastas de workspace atuais (null = nenhuma, array vazio = single-root sem pasta). */
   private _workspaceFolders: readonly WorkspaceFolder[] | null = null;
 
+  /** Configuração por seção devolvida ao servidor em `workspace/configuration`. */
+  private readonly configuration = new Map<string, unknown>();
+
   /** Define as pastas de workspace. Envia `workspace/didChangeWorkspaceFolders` para servidores já conectados. */
   setWorkspaceFolders(folders: readonly WorkspaceFolder[] | null): void {
     const old = this._workspaceFolders;
@@ -104,6 +120,21 @@ export class LspManager implements Disposable {
         }
       }
     }
+  }
+
+  /**
+   * Define a configuração de uma seção (ex.: `"python.analysis"`) devolvida ao servidor
+   * em `workspace/configuration`.
+   *
+   * Sem seção configurada, a resposta é `null` — o servidor usa o **default** dele.
+   */
+  setConfiguration(section: string, value: unknown): void {
+    this.configuration.set(section, value);
+  }
+
+  /** Configuração de uma seção (`null` quando não há). */
+  getConfiguration(section: string): unknown {
+    return this.configuration.get(section) ?? null;
   }
 
   /**
@@ -142,6 +173,12 @@ export class LspManager implements Disposable {
     const client = new LspClient(transport);
     this.clients.set(config.name, client);
     this.store.add(client);
+
+    // Gancho do gerente: o cliente responde aos requests **servidor→cliente** com o
+    // estado do editor. Sem isto, o `pyright` trava no `workspace/configuration`
+    // (não há símbolo, nem diagnóstico, nem hover em `.py`).
+    client.setRequestHandler("workspace/workspaceFolders", () => this._workspaceFolders);
+    client.setRequestHandler("workspace/configuration", (params) => this.configurationResponse(params));
 
     // Encaminha diagnósticos deste servidor para o evento agregado
     client.onDiagnostics((params) => {
@@ -562,6 +599,16 @@ export class LspManager implements Disposable {
   }
 
   // ── Internos ──────────────────────────────────────────────────────────────────────────────
+
+  /**
+   * Resposta de `workspace/configuration`: **uma entrada por item pedido** (o servidor
+   * casa por posição). Sem configuração da seção ⇒ `null` (o servidor usa o default dele).
+   */
+  private configurationResponse(params: unknown): readonly unknown[] {
+    return readConfigurationItems(params).map((item) =>
+      item.section === undefined ? null : this.getConfiguration(item.section),
+    );
+  }
 
   private extensionFromUri(uri: string): string {
     const idx = uri.lastIndexOf(".");

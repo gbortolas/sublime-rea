@@ -41,6 +41,8 @@ import type {
   DocumentHighlight,
   DocumentInsertResult,
   EditorTheme,
+  GitCommitResult,
+  GitStatusResult,
   GrepResult,
   HighlightSpan,
   LspCodeAction,
@@ -69,6 +71,7 @@ import type {
   SnippetsListResult,
   TextStyle,
   Viewport,
+  WorkspaceCreateFileResult,
   WorkspaceFilesResult,
 } from "../shared";
 import {
@@ -81,8 +84,22 @@ import { attachCommandPalette } from "./command-palette";
 import type { CommandPaletteApi, CommandPaletteBinding } from "./command-palette";
 import { hideQuickOpen, showQuickOpen } from "./quick-open";
 import type { QuickOpenItem } from "./quick-open";
-import { attachSearchPanel } from "./search-panel";
-import type { SearchPanelBinding } from "./search-panel";
+import { attachSearchPanel, DEFAULT_SEARCH_PANEL_FLAGS } from "./search-panel";
+import type { SearchPanelBinding, SearchPanelFlags } from "./search-panel";
+import { mountExplorerTree } from "./explorer-tree";
+import type { ExplorerTreeHandle } from "./explorer-tree";
+import { mountOutlineView } from "./outline-view";
+import type { OutlineRevealTarget, OutlineViewHandle } from "./outline-view";
+import { mountProblemsPanel, problemEntries } from "./problems-panel";
+import type { ProblemCounts, ProblemEntry, ProblemsPanelHandle } from "./problems-panel";
+import {
+  describeSourceControlCounts,
+  formatSourceControlBadge,
+  mountSourceControlPanel,
+} from "./source-control";
+import type { SourceControlCounts, SourceControlPanelHandle } from "./source-control";
+import { mountDiffView } from "./diff-view";
+import type { DiffViewHandle } from "./diff-view";
 import { createCompletionPopup } from "./completions";
 import type { CompletionPopupBinding } from "./completions";
 import { attachCodeLoupe } from "./code-loupe";
@@ -149,18 +166,30 @@ import {
   type SceneHighlight,
   type SearchHighlight,
   type TextMeasurer,
+  type VisualRowIndexLike,
+  applyCollapsedLines,
   buildInstances,
   computeStickyContext,
   stickySymbolsFromLsp,
   type StickySymbol,
 } from "../core/render";
 import { createSyntaxTheme } from "../core/syntax";
+import { parseUnifiedDiff } from "../core/git/git-diff";
 
 const DEMO_LINE_COUNT = 200;
 const GLYPH_CHUNK = 2048;
 
 /** Debounce da busca dos símbolos do LSP (o sticky scroll) depois de uma edição. */
 const STICKY_SYMBOLS_DEBOUNCE_MS = 400;
+
+/**
+ * Backoff das **re-tentativas** da busca de símbolos (o *Outline*).
+ *
+ * O LSP pode ainda estar **conectando** quando o documento abre ⇒ o 1º resultado vem
+ * **vazio** (e o Outline nascia vazio). As tentativas são poucas e espaçadas (sem spam de
+ * IPC) e param assim que os símbolos chegam.
+ */
+const OUTLINE_RETRY_DELAYS_MS: readonly number[] = [1000, 2000, 4000];
 
 /**
  * Contexto de *sticky scroll* (o retorno de `computeStickyContext`).
@@ -782,6 +811,14 @@ interface ScribeBridge {
   onDiagnostics?(
     callback: (event: { handle: number; diagnostics: LspDiagnostic[] }) => void,
   ): () => void;
+  /**
+   * Os diagnósticos LSP **de um documento** (o cache do `main` — opcional).
+   *
+   * O `onDiagnostics` é *push* e pode perder o primeiro evento (o `open` inicial do
+   * boot é assíncrono) ⇒ o documento aberto no boot usa esta chamada para **buscar**
+   * o que o *push* perdeu.
+   */
+  diagnostics?(handle: number): Promise<LspDiagnostic[]>;
   /** Go-to-definition LSP (opcional). */
   definition?(handle: number, line: number, col: number): Promise<LspLocation | null>;
   /** Signature help LSP (opcional). */
@@ -853,6 +890,36 @@ interface ScribeBridge {
    * antigo não expõe o método ⇒ a aba fecha só do lado do renderer.
    */
   closeDocument?(handle: number): Promise<void>;
+  /**
+   * Cria um arquivo **vazio** na workspace (o "criar arquivo" do ⌘P) — **opcional**: um
+   * preload mais antigo não expõe o método ⇒ o item "criar" responde "indisponível".
+   *
+   * O `main` confina o caminho a uma das raízes da workspace e **nunca** sobrescreve um
+   * arquivo existente.
+   */
+  createFile?(path: string): Promise<WorkspaceCreateFileResult>;
+  /**
+   * Status do repositório git (o painel de *Source Control*) — **opcional**: um preload mais
+   * antigo não expõe o método ⇒ a seção fica vazia (degradação, sem crash).
+   *
+   * `root` é a raiz do repositório; sem ela, o `main` usa a raiz do documento ativo.
+   */
+  gitStatus?(root?: string): Promise<GitStatusResult>;
+  /** Stage de um arquivo (`git add -- <path>`) — **opcional** (mesma degradação do status). */
+  gitStage?(path: string, root?: string): Promise<GitStatusResult>;
+  /** Unstage de um arquivo (`git restore --staged -- <path>`) — **opcional**. */
+  gitUnstage?(path: string, root?: string): Promise<GitStatusResult>;
+  /** Stage de tudo (`git add -A`) — **opcional**. */
+  gitStageAll?(root?: string): Promise<GitStatusResult>;
+  /**
+   * Commit (`git commit -m <mensagem>`) — **opcional**.
+   *
+   * Em falha, o `main` devolve `{ ok: false, error }` (a promise **não** rejeita); o renderer
+   * mostra a mensagem no painel e **mantém** a mensagem de commit.
+   */
+  gitCommit?(message: string, root?: string): Promise<GitCommitResult>;
+  /** Diff unificado cru (`git diff HEAD`) — **opcional**: sem ele, o diff fica vazio. */
+  gitDiffText?(path: string): Promise<string>;
 }
 
 function readBridge(): ScribeBridge | undefined {
@@ -1957,6 +2024,17 @@ class DocumentController {
     return this.activeIndex;
   }
 
+  /**
+   * `true` quando há **lote pendente** (digitação que ainda não foi para o core).
+   *
+   * Quem salva por conta própria (o DAP, antes de depurar) usa isto para **não** limpar
+   * a marca de sujo: o usuário pode ter digitado durante o `await` — esse texto ainda não
+   * foi salvo.
+   */
+  get hasPendingBatch(): boolean {
+    return this.pendingBatch !== null;
+  }
+
   private lineHeight(): number {
     return Math.ceil(TEXT_STYLE.sizePx * 1.4);
   }
@@ -2166,7 +2244,13 @@ class DocumentController {
     this.renderer.start();
   }
 
-  private renderTabBar(): void {
+  /**
+   * Redesenha a barra de abas (e a lista de "Abertos").
+   *
+   * É **pública** porque o caminho do DAP salva o documento **fora** do controller (o
+   * `save()` engole a falha — o DAP precisa propagá-la) e ainda tem de atualizar a aba.
+   */
+  renderTabBar(): void {
     this.renderSidebar();
     const bar = document.getElementById("tab-bar");
     if (!bar) return;
@@ -2981,14 +3065,31 @@ function hasOpenContextPopup(popups: ContextPopups): boolean {
  */
 type QuickOpenPayload =
   | { readonly kind: "command"; readonly id: string }
-  | { readonly kind: "file"; readonly path: string };
+  | { readonly kind: "file"; readonly path: string }
+  /**
+   * O item **"criar arquivo"** (o `quick-open.ts` o offerte a cada tecla, quando a query
+   * parece um caminho e não casa nenhum arquivo).
+   *
+   * - `path` — o caminho **absoluto** candidato (é o que o `main` cria);
+   * - `relativePath` — o caminho **relativo** à raiz (é o que a UI mostra).
+   */
+  | { readonly kind: "create"; readonly path: string; readonly relativePath: string };
 
 /** `true` quando o `payload` é um `QuickOpenPayload` válido. */
 function isQuickOpenPayload(value: unknown): value is QuickOpenPayload {
   if (typeof value !== "object" || value === null) return false;
-  const record = value as { kind?: unknown; id?: unknown; path?: unknown };
+  const record = value as {
+    kind?: unknown;
+    id?: unknown;
+    path?: unknown;
+    relativePath?: unknown;
+  };
   if (record.kind === "command") return typeof record.id === "string";
   if (record.kind === "file") return typeof record.path === "string";
+  if (record.kind === "create") {
+    // O "criar" precisa do caminho **absoluto** (o que o `main` cria) e do relativo (a UI).
+    return typeof record.path === "string" && typeof record.relativePath === "string";
+  }
   return false;
 }
 
@@ -3025,6 +3126,61 @@ function workspaceRootsOf(sessions: readonly OpenDocumentInfo[]): readonly strin
   }
   return [...roots];
 }
+
+// ---- workbench de seções (a barra lateral no estilo VS Code) ---------------------------------
+
+/**
+ * As **seções** da barra lateral.
+ *
+ * A barra lateral deixou de ser "a lista de documentos abertos" e virou um *workbench*:
+ * cada botão da rail abre a sua seção, e **uma** seção fica visível por vez.
+ *
+ * - `explorer` — a árvore de arquivos da workspace (+ a lista de "Abertos");
+ * - `outline` — a estrutura (símbolos) do documento ativo;
+ * - `problems` / `source-control` / `diff` — seções da **próxima** rodada (o host já
+ *   existe no markup; a seção nasce vazia);
+ * - `search` — o painel de busca na workspace (o "grep"), que também é uma seção.
+ */
+export type SidebarSection =
+  | "explorer"
+  | "outline"
+  | "problems"
+  | "source-control"
+  | "diff"
+  | "search";
+
+/** O host DOM de cada seção (o renderer mostra **um** por vez). */
+const SIDEBAR_SECTION_HOSTS: Readonly<Record<SidebarSection, string>> = {
+  explorer: "explorer-tree-host",
+  outline: "outline-view",
+  problems: "problems-panel-host",
+  "source-control": "source-control-host",
+  diff: "diff-view-host",
+  search: "search-panel-host",
+};
+
+/**
+ * O botão da rail de cada seção.
+ *
+ * `diff` ainda **não** tem botão (a seção entra na próxima rodada) — por isso o mapa é
+ * parcial: uma seção sem botão simplesmente não é marcada na rail.
+ */
+const SIDEBAR_SECTION_BUTTONS: Readonly<Partial<Record<SidebarSection, string>>> = {
+  explorer: "activity-explorer",
+  outline: "activity-outline",
+  problems: "activity-problems",
+  "source-control": "activity-source-control",
+};
+
+/** O rótulo acessível da sidebar por seção (o `aria-label` do `<aside>`). */
+const SIDEBAR_SECTION_LABELS: Readonly<Record<SidebarSection, string>> = {
+  explorer: "Explorador",
+  outline: "Estrutura do documento",
+  problems: "Problemas",
+  "source-control": "Controle de código-fonte",
+  diff: "Comparação",
+  search: "Buscar em todos os arquivos",
+};
 
 /**
  * As **fontes** dos itens do *Quick Open* (o que a ponte oferece).
@@ -3135,6 +3291,17 @@ interface WorkspaceSearchDeps {
   readonly onOpen: (path: string, line: number, column: number) => void;
   /** Devolve o foco ao canvas do editor. */
   readonly focusEditor: () => void;
+  /**
+   * Chamado quando o painel **abre** (o workbench de seções abre a seção do grep).
+   *
+   * O painel é uma **seção** da barra lateral: quem manda na visibilidade dos outros
+   * hosts é o workbench — por isso o gancho.
+   */
+  readonly onSectionOpen?: (() => void) | undefined;
+  /**
+   * Chamado quando o painel **fecha** (o workbench restaura a seção anterior).
+   */
+  readonly onSectionClose?: (() => void) | undefined;
 }
 
 /** Debounce da busca (300ms): a digitação não dispara uma varredura por tecla. */
@@ -3142,6 +3309,56 @@ export const WORKSPACE_SEARCH_DEBOUNCE_MS = 300;
 
 /** Resultado vazio (o painel reflecting "nada encontrado"). */
 const EMPTY_GREP_RESULT: GrepResult = { matches: [], truncated: false, filesScanned: 0 };
+
+/** As dependências da sincronização do documento aberto no **boot**. */
+export interface BootDocumentSyncDeps<T> {
+  /** A sessão do documento do boot (`undefined` = nenhum documento aberto no boot). */
+  readonly session: T | undefined;
+  /**
+   * O handler do **documento ativo** (o mesmo dos demais documentos).
+   *
+   * É ele que busca os símbolos (o Outline + o sticky scroll) e re-resolve o Problems.
+   */
+  readonly onActiveDocumentChanged: ((session: T) => void) | undefined;
+  /**
+   * Os diagnósticos de um documento (a **busca** — o `push` pode ter-se perdido).
+   *
+   * `undefined` = a ponte não expõe a busca (preload antigo) ⇒ só o handler roda.
+   */
+  readonly diagnostics: ((handle: number) => Promise<readonly LspDiagnostic[]>) | undefined;
+  /** Publica os diagnósticos buscados (o mapa handle → diagnósticos do Problems). */
+  readonly onDiagnostics: (handle: number, diagnostics: readonly LspDiagnostic[]) => void;
+  /** A falha da busca (o console — a UI não quebra). */
+  readonly onError?: (error: unknown) => void;
+}
+
+/**
+ * Sincroniza o documento aberto no **BOOT** (o `?file=`).
+ *
+ * ⚠️ O `open` inicial roda **antes** do `onActiveDocumentChanged` existir ⇒ o handler
+ * **nunca** foi chamado para aquele documento ⇒ o Outline dizia "Nenhum símbolo neste
+ * documento" e o Problems ficava vazio (o `lsp.diagnostics` é *push* e pode ter chegado
+ * **antes** do listener ⇒ o documento do boot ficava sem diagnósticos).
+ *
+ * O documento do boot recebe o **mesmo tratamento** dos demais:
+ * - o handler é chamado (ele busca os símbolos — o `documentSymbols` é caro, mas o cache
+ *   do documento do boot está **vazio** ⇒ uma busca só, sem duplicata);
+ * - os diagnósticos são **buscados** (o `push` pode ter-se perdido) e publicados.
+ */
+export function syncBootDocument<T extends { readonly handle: number }>(
+  deps: BootDocumentSyncDeps<T>,
+): void {
+  const session = deps.session;
+  if (session === undefined) return;
+  // (1) O mesmo tratamento dos demais documentos (Outline, sticky, debug, explorer).
+  deps.onActiveDocumentChanged?.(session);
+  // (2) Os diagnósticos do documento do boot (o *push* pode ter-se perdido).
+  if (deps.diagnostics === undefined) return;
+  void deps.diagnostics(session.handle).then(
+    (diagnostics) => deps.onDiagnostics(session.handle, diagnostics),
+    (error: unknown) => deps.onError?.(error),
+  );
+}
 
 /**
  * Cria o painel de busca na workspace (o "grep" do VS Code).
@@ -3165,11 +3382,38 @@ export function createWorkspaceSearchController(
   let signalId: number | undefined;
   let open = false;
   let editorsHiddenBefore = false;
+  /**
+   * As **flags** da busca (regex / case) — o painel as publica em `onOptionsChange`.
+   *
+   * O default é o do `grep` do core: literal e sem case (`DEFAULT_SEARCH_PANEL_FLAGS`).
+   */
+  let flags: SearchPanelFlags = { ...DEFAULT_SEARCH_PANEL_FLAGS };
+  /** A **query atual** (o painel não a expõe: ela vive no input dele). */
+  let currentQuery = "";
 
   /** Escreve a mensagem do painel (o status é do módulo do painel — aqui é degradação). */
   const setPanelMessage = (text: string): void => {
     const status = host.querySelector(".search-panel-status");
     if (status !== null) status.textContent = text;
+  };
+
+  /**
+   * Mostra os **avisos** da busca (o que foi desligado — **nunca** um crash).
+   *
+   * ⚠️ O painel do search (`./search-panel.ts`) é **autocontido** e não tem área de avisos
+   * ⇒ os avisos entram na **linha de status** do painel (a que o painel escreve) — sem
+   * avisos, o status fica **exatamente** como o painel deixou.
+   *
+   * A linha de status é reescrita pelo painel a cada render (busca → contagem) ⇒ os avisos
+   * são **sempre** repostos depois do `setResults` (nunca se acumulam).
+   */
+  const showSearchWarnings = (warnings: readonly string[] | undefined): void => {
+    if (warnings === undefined || warnings.length === 0) return;
+    const status = host.querySelector(".search-panel-status");
+    if (status === null) return;
+    const head = status.textContent ?? "";
+    const text = warnings.join(" · ");
+    status.textContent = head.length === 0 ? text : `${head} · ${text}`;
   };
 
   /** Cancela a busca em voo (o `signalId` é o do cancelamento dedicado do IPC). */
@@ -3192,21 +3436,44 @@ export function createWorkspaceSearchController(
     // As raízes da workspace (as pastas dos documentos abertos) — a busca é sobre a
     // workspace do usuário, não sobre a raiz do processo.
     const roots = deps.roots?.() ?? [];
-    void bridge.searchFiles(query, { roots }, next).then(
-      (result) => {
-        if (signalId !== next) return; // resposta obsoleta (a busca foi cancelada)
-        signalId = undefined;
-        panel?.setBusy(false);
-        panel?.setResults(result);
-      },
-      (error: unknown) => {
-        if (signalId !== next) return;
-        signalId = undefined;
-        panel?.setBusy(false);
-        panel?.setResults(EMPTY_GREP_RESULT);
-        console.warn("Scribe: falha na busca em todos os arquivos", error);
-      },
-    );
+    // ⚠️ As **flags** (regex / case / binários) vão **com a query**: o `grep` do core aceita
+    // as três (`regex` ⇒ o padrão é uma expressão regular; `caseSensitive` ⇒ o padrão
+    // distingue maiúsculas; `includeBinary` ⇒ os arquivos binários **entram** na varredura
+    // — sem isto, o toggle de binários do painel **não fazia nada**).
+    void bridge
+      .searchFiles(
+        query,
+        {
+          roots,
+          regex: flags.regex,
+          caseSensitive: flags.caseSensitive,
+          includeBinary: flags.includeBinary,
+        },
+        next,
+      )
+      .then(
+        (result) => {
+          if (signalId !== next) return; // resposta obsoleta (a busca foi cancelada)
+          signalId = undefined;
+          panel?.setBusy(false);
+          panel?.setResults(result);
+          // Os **avisos** da busca (o que foi desligado — nunca um crash) — depois do
+          // `setResults` (que reescreve a linha de status do painel).
+          showSearchWarnings(result.warnings);
+        },
+        (error: unknown) => {
+          if (signalId !== next) return;
+          signalId = undefined;
+          panel?.setBusy(false);
+          panel?.setResults(EMPTY_GREP_RESULT);
+          // ⚠️ **A falha chega à UI**: o `setResults` reescreve a linha de status do painel
+          // ("Nenhum resultado") e a mensagem real ficava **só no console** ⇒ o usuário
+          // não sabia por que a busca parou (ex.: o padrão regex catastrófico, que o
+          // `main` recusa). A mensagem vai para a status do painel (1 linha, sem stack).
+          setPanelMessage(describeSearchFailure(error));
+          console.warn("Scribe: falha na busca em todos os arquivos", error);
+        },
+      );
   };
 
   const scheduleSearch = (query: string): void => {
@@ -3235,6 +3502,8 @@ export function createWorkspaceSearchController(
     const header = document.getElementById("sidebar-section-toggle");
     if (list !== null) list.hidden = editorsHiddenBefore;
     if (header !== null) header.hidden = false;
+    // O workbench de seções restaura a seção que estava aberta antes do grep.
+    deps.onSectionClose?.();
     deps.focusEditor();
   }
 
@@ -3245,6 +3514,10 @@ export function createWorkspaceSearchController(
       return;
     }
     open = true;
+    // O grep é uma **seção** da sidebar: as outras saem de cena (o workbench manda).
+    // ⚠️ O gancho vem **antes** de capturar `editorsHiddenBefore` — a lista de "Abertos"
+    // é do *explorer* e o grep não pode sequestrar o estado dela.
+    deps.onSectionOpen?.();
     // O painel ocupa a sidebar inteira ⇒ a lista de "Abertos" sai de cena.
     const list = document.getElementById("sidebar-editors");
     const header = document.getElementById("sidebar-section-toggle");
@@ -3261,7 +3534,22 @@ export function createWorkspaceSearchController(
 
   const panel: SearchPanelBinding = attachSearchPanel(host, {
     onOpen: (path, line, column) => deps.onOpen(path, line, column),
-    onQueryChange: (query) => scheduleSearch(query),
+    onQueryChange: (query) => {
+      currentQuery = query;
+      scheduleSearch(query);
+    },
+    /**
+     * Um **toggle** (regex / case) mudou ⇒ a busca é **re-disparada** com a query atual.
+     *
+     * O debounce e o cancelamento são os mesmos da digitação (`scheduleSearch`): a busca
+     * em voo é cancelada e a nova espera o debounce (o `grep` varre a workspace — um
+     * toggle não pode disparar uma varredura por clique sem controle).
+     */
+    onOptionsChange: (next) => {
+      flags = next;
+      if (currentQuery.trim().length === 0) return;
+      scheduleSearch(currentQuery);
+    },
     onClose: () => closePanel(),
   });
 
@@ -3273,6 +3561,40 @@ export function createWorkspaceSearchController(
 }
 
 // ---- app ------------------------------------------------------------------------------------------
+
+/**
+ * `true` se a linha está **colapsada** (dobra) — logo, ela **não é desenhada** (0 rows).
+ *
+ * ⚠️ É a forma **canônica** de perguntar ("o índice que sabe de folding responde"):
+ * `isCollapsed` é **opcional** na interface do índice (`VisualRowIndexLike`) ⇒ um índice
+ * que não sabe de folding devolve `false` (a degradação: o comportamento antigo).
+ */
+export function isCollapsedLine(
+  index: VisualRowIndexLike | undefined,
+  line: number,
+): boolean {
+  return index?.isCollapsed?.(line) ?? false;
+}
+
+/**
+ * A linha que **ancora** a posição de `line`: a própria linha, ou — se ela está
+ * **colapsada** (dobra) — a **primeira linha visível** do bloco (o cabeçalho da dobra, a
+ * que mostra o `▸`).
+ *
+ * ⚠️ **Por que**: `rowOfLine(linhaColapsada)` devolve a row que a linha **ocuparia** (a da
+ * **próxima** linha visível) ⇒ um popup ancorado nela cairia **embaixo** do bloco, longe
+ * da dobra. A âncora tem de ser a linha **desenhada** do bloco.
+ *
+ * Sem índice (ou sem `isCollapsed`), a própria linha (a degradação: o comportamento
+ * antigo).
+ */
+export function anchorLineOf(index: VisualRowIndexLike | undefined, line: number): number {
+  if (index === undefined || index.isCollapsed === undefined) return line;
+  let anchor = line;
+  // Sobe até a primeira linha **visível** (a colapsada não é desenhada).
+  while (anchor > 0 && index.isCollapsed(anchor)) anchor -= 1;
+  return anchor;
+}
 
 class ScribeRenderer {
   private source: LineSource;
@@ -3328,11 +3650,13 @@ class ScribeRenderer {
   /**
    * Índice de **rows visuais** (soft wrap) do documento ativo.
    *
-   * `undefined` = **sem wrap**: o viewport conta a rolagem em linhas lógicas (o modo
-   * legado) e o total de rows é o próprio número de linhas.
+   * `undefined` = o índice ainda não foi construído (o 1º frame o cria). O índice é a
+   * **fonte única** do total de rows (o `wrapLine` do core) e o **mapper** do viewport
+   * (a rolagem é contada em rows visuais **nos dois modos** — com wrap, N rows por
+   * linha; sem wrap, 1 row por linha, exceto as colapsadas, que ocupam 0).
    *
-   * Com wrap, o índice é a **fonte única** do total de rows (o `wrapLine` do core) — o
-   * cálculo caractere a caractere divergia dele e desalinhavo a rolagem do texto desenhado.
+   * O cálculo caractere a caractere divergia do índice e desalinhavo a rolagem do texto
+   * desenhado.
    */
   private visualRows: VisualRowIndex | undefined;
   /** Largura de wrap (px) com que o índice atual foi construído. */
@@ -3371,6 +3695,33 @@ class ScribeRenderer {
   /** Define os folding ranges para o documento ativo. */
   setFolding(folding: readonly FoldRange[]): void {
     this.currentFolding = folding;
+  }
+
+  /**
+   * Aplica o **folding** (dobrar/desdobrar) e **reancora o scroll**.
+   *
+   * ⚠️ **Ordem**: o folding entra no índice **antes** de a contagem de rows ser publicada
+   * (a regra única: a linha colapsada ocupa **0 rows**) e o scroll é corrigido pela
+   * diferença de rows da **linha-âncora** (a 1ª linha visível) — o texto **não pode
+   * saltar** ao dobrar.
+   *
+   * Sem isto, dobrar um bloco acima da viewport empurra o texto para cima (ou para baixo)
+   * e o usuário perde o lugar.
+   */
+  applyFolding(folding: readonly FoldRange[]): void {
+    // A âncora: a 1ª linha **visível** (a do topo da viewport) — é o que o usuário está
+    // olhando. A row dela é a **mesma** unidade da rolagem (row visual).
+    const anchor = this.firstVisibleLine();
+    const rowBefore = this.visualRows?.rowOfLine(anchor) ?? anchor;
+    this.currentFolding = folding;
+    // O índice tem de conhecer a dobra **antes** de contar as rows.
+    applyCollapsedLines(this.visualRows, folding);
+    const rowAfter = this.visualRows?.rowOfLine(anchor) ?? anchor;
+    const delta = rowAfter - rowBefore;
+    // ⚠️ A rolagem é contada em **rows visuais** nos **dois** modos (o mapper está
+    // sempre instalado) ⇒ a row da âncora e a unidade do scroll são a **mesma** ⇒ a
+    // correção vale sempre (sem ela, dobrar um bloco acima empurra o texto).
+    if (delta !== 0) this.viewport.scrollByRows(delta);
   }
 
   /** Define os inlay hints para o documento ativo. */
@@ -3490,26 +3841,21 @@ class ScribeRenderer {
    * wrap. Devolve o **total de rows visuais** do documento.
    *
    * Regras:
-   * - **Sem wrap** (`wrapWidth <= 0`): o índice é descartado e o viewport volta ao modo
-   *   legado (contagem em linhas lógicas) — o comportamento sem wrap tem que ser
-   *   **idêntico** ao de antes do mapper;
+   * - **Sem wrap** (`wrapWidth <= 0`): o índice é o de "1 row por linha lógica" — a
+   *   rolagem continua 1:1 com as linhas, **exceto** pelas linhas colapsadas (a dobra
+   *   tira rows: linha colapsada = 0 rows). O viewport conta a rolagem em **rows
+   *   visuais** nos **dois** modos (a mesma unidade da cena);
    * - **Com wrap**: o índice é reconstruído quando a **fonte** ou a **largura de wrap**
    *   mudam; uma **edição** apenas o invalida (a partir da primeira linha alterada) — o
    *   índice é incremental, o recálculo é sob demanda.
+   *
+   * ⚠️ **Ordem (o bug de ordem)**: o **folding** é aplicado ao índice **antes** de ler
+   * `rowCount` — a contagem publicada tem de refletir a dobra (a linha colapsada ocupa
+   * **0 rows**). Publicar antes deixa a contagem com N−1 rows a mais (a barra de
+   * rolagem fica longa demais e o texto "salta").
    */
   private ensureVisualRows(wrapWidth: number): number {
     const lineCount = this.source.lineCount();
-    if (wrapWidth <= 0) {
-      if (this.visualRows !== undefined) {
-        this.visualRows = undefined;
-        this.visualRowsSource = undefined;
-        this.visualRowsWidth = 0;
-        this.visualRowsVersion = undefined;
-        // Sem wrap o viewport volta a contar em linhas lógicas (modo legado).
-        this.viewport.setVisualRowMapper(undefined);
-      }
-      return lineCount;
-    }
     const version = isVersionedLineSource(this.source) ? this.source.contentVersion : undefined;
     const index = this.visualRows;
     // Uma fonte **sem versão** (o seam de desenvolvimento) não avisa quando o texto muda:
@@ -3527,7 +3873,18 @@ class ScribeRenderer {
       this.visualRowsWidth = wrapWidth;
       this.visualRowsVersion = version;
       this.visualRowsLineCount = lineCount;
+      // O mapper é instalado **nos dois modos** (com e sem soft wrap): a rolagem é
+      // contada em **rows visuais** — a mesma unidade nos dois modos e a mesma que a
+      // cena desenha.
+      //
+      // ⚠️ **Sem wrap, o mapper também é necessário**: o índice dá 1 row por linha
+      // lógica, mas uma linha **colapsada** (folding) ocupa **0 rows** (a regra única).
+      // Sem o mapper, a viewport rolava em **linhas lógicas** enquanto a contagem
+      // publicada (e a cena) eram em **rows** ⇒ (a) o teto de rolagem encolhia (as
+      // últimas linhas ficavam inalcançáveis) e (b) o texto deslizava N rows.
       this.viewport.setVisualRowMapper(created);
+      // ⚠️ **Ordem**: o folding entra no índice **antes** de ler `rowCount`.
+      applyCollapsedLines(created, this.currentFolding);
       return created.rowCount;
     }
     if (version !== undefined && version !== this.visualRowsVersion) {
@@ -3538,6 +3895,9 @@ class ScribeRenderer {
       this.visualRowsVersion = version;
       this.visualRowsLineCount = lineCount;
     }
+    // ⚠️ **Ordem**: o folding entra no índice **antes** de ler `rowCount` (a linha
+    // colapsada ocupa 0 rows — a contagem publicada tem de saber disso).
+    applyCollapsedLines(index, this.currentFolding);
     return index.rowCount;
   }
 
@@ -3768,9 +4128,9 @@ class ScribeRenderer {
   /**
    * Primeira **linha lógica** visível (a do topo da viewport).
    *
-   * Com soft wrap, o offset da rolagem é contado em **rows visuais** — quem fala em
+   * O offset da rolagem é contado em **rows visuais** (nos dois modos) — quem fala em
    * *linhas* (roda do mouse, PageUp/PageDown, pedido de inlay hints, minimap) precisa
-   * desta conversão. Sem wrap, é exatamente a 1ª linha visível de sempre.
+   * desta conversão. Sem wrap e sem dobra, é exatamente a 1ª linha visível de sempre.
    */
   firstVisibleLine(): number {
     const firstRow = Math.floor(this.viewport.scrollOffsetPx() / this.lineHeight());
@@ -3785,8 +4145,8 @@ class ScribeRenderer {
   /**
    * Linha lógica de um **Y do canvas** (px) — o clique do mouse.
    *
-   * Com soft wrap, o Y do canvas é uma **row visual** ⇒ a linha é a que contém a row
-   * (a conta por `lineHeight` daria a row, não a linha). Sem wrap, é a conta de sempre.
+   * O Y do canvas é uma **row visual** ⇒ a linha é a que contém a row (a conta por
+   * `lineHeight` daria a row, não a linha).
    *
    * ⚠️ **Correção do off-by-one**: a âncora vertical é o **centro do texto**
    * (`paddingTop + lineHeight/2`), não `sizePx * 0.7` — com a âncora antiga, clicar nos
@@ -3808,9 +4168,18 @@ class ScribeRenderer {
    *
    * Com soft wrap, a row de uma linha **não** é o seu índice: as linhas anteriores podem
    * ocupar várias rows. É a âncora vertical dos popups (que nascem na linha do caret).
+   *
+   * ⚠️ **Linha colapsada** (folding): ela **não é desenhada** (0 rows — a regra única) ⇒ o
+   * `rowOfLine` devolveria a row da **próxima** linha visível (a âncora do popup cairia
+   * embaixo do bloco, longe da dobra). A âncora vai para a **primeira linha visível do
+   * bloco** (a do cabeçalho da dobra, que tem o `▸`).
+   *
+   * Sem índice de rows (ou sem `isCollapsed`), o comportamento antigo (a row da própria
+   * linha).
    */
   visualRowOfLine(line: number): number {
-    return this.visualRows?.rowOfLine(line) ?? line;
+    const anchor = anchorLineOf(this.visualRows, line);
+    return this.visualRows?.rowOfLine(anchor) ?? anchor;
   }
 
   /** Conecta o minimap ao renderer. */
@@ -3854,9 +4223,27 @@ class ScribeRenderer {
     const firstLine = this.visualRows?.lineOfRow(firstRow) ?? firstRow;
     const lastLine = this.visualRows?.lineOfRow(lastRow) ?? lastRow;
 
+    // ⚠️ **Linha colapsada** (folding): ela **não tem segmentos** (0 rows — a regra única
+    // de rows) ⇒ o `locate` falha e o fallback antigo (`row = linha lógica`) usava a
+    // **linha lógica como row visual** ⇒ o rabisco saía numa posição arbitrária.
+    // Uma linha colapsada (ou fora do documento) **não é desenhada** ⇒ o diagnóstico
+    // dela é ignorado (a linha não está visível).
+    //
+    // ⚠️ `isCollapsed` é a forma **canônica** de saber se a linha está colapsada (O(1)):
+    // o `segmentsOf` (que embrulha a linha) é o **fallback** para um índice que não sabe
+    // de folding.
+    const isDrawableLine = (line: number): boolean =>
+      line >= 0 &&
+      line < this.source.lineCount() &&
+      !isCollapsedLine(this.visualRows, line) &&
+      (this.visualRows === undefined || this.visualRows.segmentsOf(line).length > 0);
+
     // Filtra diagnósticos visíveis (em **linhas lógicas**)
     const visible = diags.filter(
-      (d) => d.range.startLine <= lastLine && d.range.endLine >= firstLine,
+      (d) =>
+        d.range.startLine <= lastLine &&
+        d.range.endLine >= firstLine &&
+        isDrawableLine(d.range.startLine),
     );
     if (visible.length === 0) return;
 
@@ -3921,6 +4308,10 @@ class ScribeRenderer {
     const iconX = Math.round((gutterWidth - iconSize) / 2);
 
     for (const [line, severity] of lineMaxSeverity) {
+      // ⚠️ **Linha colapsada** (folding): ela **não é desenhada** (0 rows) ⇒ o ícone
+      // **não é desenhado** (o `rowOfLine` devolveria a row da próxima linha visível ⇒ o
+      // ícone cairia na linha errada).
+      if (isCollapsedLine(this.visualRows, line)) continue;
       // O ícone fica na **primeira row** da linha (a row visual, com soft wrap).
       const row = this.visualRows?.rowOfLine(line) ?? line;
       const y = row * lineHeight + Math.round((lineHeight - iconSize) / 2) - scrollPx + paddingTop;
@@ -4027,6 +4418,72 @@ function setDirtyStatus(dirty: boolean): void {
 }
 
 /**
+ * O **badge de problemas** da status bar (`✖ 2  ⚠ 1`).
+ *
+ * Vazio quando não há diagnóstico (o item continua lá — só some o texto). As contagens
+ * vêm do modelo do painel (fonte da verdade), nunca de um contador próprio.
+ */
+function setProblemsBadge(counts: ProblemCounts): void {
+  const el = document.getElementById("status-errors");
+  if (!el) return;
+  const parts: string[] = [];
+  if (counts.error > 0) parts.push(`✖ ${counts.error}`);
+  if (counts.warning > 0) parts.push(`⚠ ${counts.warning}`);
+  if (counts.info > 0) parts.push(`ℹ ${counts.info}`);
+  el.textContent = parts.join("  ");
+  // O `title` é o do markup ("Problemas"); a contagem vai para o nome acessível.
+  el.setAttribute("aria-label", `${counts.total} problema(s)`);
+}
+
+/**
+ * O **badge de git** da status bar (`⎇ main  3`).
+ *
+ * `branch === null` ⇒ não há repositório ⇒ o badge fica vazio (a seção mostra "sem branch").
+ */
+function setGitBadge(branch: string | null, counts: SourceControlCounts): void {
+  const el = document.getElementById("status-git");
+  if (!el) return;
+  if (branch === null) {
+    el.textContent = "";
+    el.setAttribute("aria-label", "Controle de código");
+    return;
+  }
+  const badge = formatSourceControlBadge(counts);
+  el.textContent = badge.length > 0 ? `⎇ ${branch}  ${badge}` : `⎇ ${branch}`;
+  // O `title` é o do markup ("Controle de código"); o detalhe vai para o nome acessível.
+  el.setAttribute("aria-label", `${branch} — ${describeSourceControlCounts(counts)}`);
+}
+
+/**
+ * Uma mensagem **amigável** para a UI: **1 linha**, sem stack e sem o prefixo do IPC.
+ *
+ * O preload rejeita com `Scribe IPC[<código>]: <mensagem>` ⇒ o prefixo é ruído para o
+ * usuário (é removido) e só a primeira linha vai para a tela — o resto fica no console.
+ */
+function friendlyMessage(error: unknown, fallback: string): string {
+  const raw = error instanceof Error ? error.message : typeof error === "string" ? error : "";
+  const clean = raw.replace(/^Scribe IPC\[[^\]]*\]:\s*/, "").trim();
+  const first = clean.split("\n")[0]?.trim() ?? "";
+  if (first.length === 0) return fallback;
+  return first.length > 160 ? `${first.slice(0, 157)}…` : first;
+}
+
+/**
+ * A mensagem de erro da **busca em todos os arquivos** (a que o painel mostra).
+ *
+ * O mesmo padrão amigável de {@link friendlyMessage} (1 linha, sem stack) **mais** a
+ * limpeza do prefixo técnico do core (`SearchInputError[search.pattern]:`) ⇒ o usuário
+ * lê a causa real — "padrão regex potencialmente catastrófico (quantificador aninhado) —
+ * a busca foi cancelada para não travar o editor" — em vez de um "Nenhum resultado"
+ * silencioso.
+ */
+export function describeSearchFailure(error: unknown): string {
+  const message = friendlyMessage(error, "falha na busca em todos os arquivos");
+  const clean = message.replace(/^SearchInputError\[[^\]]*\]:\s*/, "").trim();
+  return clean.length === 0 ? message : clean;
+}
+
+/**
  * Devolve o **foco ao canvas do editor**.
  *
  * O teclado do editor é escutado no `<canvas id="editor-surface">` (`keydown`). Qualquer
@@ -4113,6 +4570,21 @@ export async function bootRenderer(): Promise<boolean> {
   if (typeof document === "undefined" || typeof HTMLCanvasElement === "undefined") return false;
   const surface = document.getElementById("editor-surface");
   if (!(surface instanceof HTMLCanvasElement)) return false;
+
+  // ── A seção **exibida** na barra lateral ─────────────────────────────────────────────────────
+  //
+  // `undefined` = **nenhuma** seção está no host (o painel mostra só a lista de "Abertos") —
+  // é o estado do **boot**.
+  //
+  // ⚠️ **Por que não começa no *explorer***: a seção *ativa* era o *explorer* desde o
+  // boot, mas o host dele nascia `hidden` ⇒ o 1º clique no botão da rail caía no ramo de
+  // *toggle* e **fechava** a sidebar (a árvore do Explorer só aparecia no **2º** clique).
+  // Agora o *toggle* só dispara com a seção **visível** ⇒ o 1º clique **abre** a seção.
+  //
+  // ⚠️ Declarado **aqui** (no topo do boot): o documento abre **antes** do workbench e o
+  // `applyOutlineSymbols` roda nesse meio-tempo ⇒ a variável precisa existir desde já
+  // (senão: *TDZ*).
+  let activeSection: SidebarSection | undefined = undefined;
 
   const requested = resolveBackendKind();
   const { surface: atlasSurface, canvas: atlasCanvas } = createAtlasSurface(1024);
@@ -4298,9 +4770,29 @@ export async function bootRenderer(): Promise<boolean> {
   };
 
   // ── Diagnósticos LSP ──────────────────────────────────────────────────────────────────────────
+  //
+  // O evento `lsp.diagnostics` chega **por handle**; o painel de problemas precisa do
+  // **caminho** ⇒ a tradução handle → caminho usa as sessões abertas (o `DocumentController`).
+  // O diagnóstico de um documento que **ainda não tem sessão** fica pendente no mapa (é
+  // resolvido quando o documento abre — o refresh acontece na troca de documento).
+  const diagnosticsByHandle = new Map<number, readonly LspDiagnostic[]>();
+  /**
+   * Ponte entre a assinatura do `lsp.diagnostics` (no boot) e o painel (montado depois).
+   *
+   * O painel só existe depois do boot ⇒ o guarda-vivo é ligado quando ele é montado.
+   */
+  const problemsBridge: { refresh?: () => void } = {};
+  /** A raiz do repositório (a 1ª raiz do `workspace.files`; sem ela, o `main` resolve). */
+  let gitRepoRoot: string | undefined;
+  /** Notificado quando a seção de *Source Control* abre (recarrega o status do git). */
+  const sourceControlBridge: { refresh?: () => void } = {};
+
   if (bridge?.onDiagnostics !== undefined) {
     void bridge.onDiagnostics((event) => {
       renderer.setDiagnostics(event.handle, event.diagnostics);
+      // Problems: guarda por handle (o painel traduz handle → caminho).
+      diagnosticsByHandle.set(event.handle, event.diagnostics);
+      problemsBridge.refresh?.();
       if (controller?.current?.handle === event.handle) {
         // Atualiza dados do minimap para marcadores de diagnóstico
         renderer.minimapDiagnostics = event.diagnostics.map((d) => ({
@@ -4389,18 +4881,55 @@ export async function bootRenderer(): Promise<boolean> {
         // F5 contextual: parado → continuar; inativo/encerrado → iniciar nova sessão.
         const session = controller?.current;
         if (session === undefined) break;
-        void bridge.dapState?.()
-          .then((state: DapSessionState) => {
-            if (state === "stopped" && debugThreadId !== undefined) {
-              void bridge.dapContinue?.(debugThreadId).catch(() => {});
-              return;
-            }
-            if (state === "inactive" || state === "terminated" || state === "errored") {
-              debugThreadId = undefined;
-              void bridge.dapStart?.(session.handle).catch(() => {});
-            }
-          })
-          .catch(() => {});
+        void (async (): Promise<void> => {
+          let state: DapSessionState | undefined;
+          try {
+            state = await bridge.dapState?.();
+          } catch {
+            return;
+          }
+          if (state === "stopped" && debugThreadId !== undefined) {
+            void bridge.dapContinue?.(debugThreadId).catch(() => {});
+            return;
+          }
+          if (state !== "inactive" && state !== "terminated" && state !== "errored") return;
+          debugThreadId = undefined;
+          // ⚠️ **Salvar antes de depurar**: o debuggee roda o arquivo **do disco** — com o
+          // buffer sujo, o depurador pararia num código diferente do que o editor mostra.
+          //
+          // O **lote pendente** tem de ir ao core **antes** (o core grava o que tem em
+          // mãos: sem o flush, ele salvaria um texto velho) e a falha do save **propaga**
+          // — sem o arquivo salvo, não há depuração (e o erro aparece na status bar).
+          try {
+            await controller?.flushBatch?.();
+            await session.bridge.save(session.handle);
+          } catch (error: unknown) {
+            console.error("Scribe: falha ao salvar antes de depurar", error);
+            setDocStatus(
+              `erro ao salvar: ${error instanceof Error ? error.message : String(error)}`,
+            );
+            return;
+          }
+          // ⚠️ O `dirty` só é limpo se **não** há lote pendente: o usuário pode ter digitado
+          // durante o `await` (esse texto ainda não foi para o core) ⇒ marcar como salvo
+          // perderia a marca de sujo do lote pendente.
+          if (controller?.hasPendingBatch !== true) {
+            session.dirty = false;
+            setDirtyStatus(false);
+            controller?.renderTabBar();
+          }
+          // ⚠️ A falha do DAP **não** é engolida: o usuário via só o estado `errored`, sem
+          // mensagem — e a causa (ex.: `DAP_BEFORE_LAUNCH_FAILED`, "disco cheio") sumia.
+          // A mensagem vai para a status bar (**sem stack**).
+          try {
+            await bridge.dapStart?.(session.handle);
+          } catch (error: unknown) {
+            setDocStatus(
+              `erro ao iniciar a depuração: ${friendlyMessage(error, "falha ao iniciar a depuração")}`,
+            );
+            console.warn("Scribe: falha ao iniciar a depuração", error);
+          }
+        })();
         break;
       }
       case "continue":
@@ -4813,17 +5342,185 @@ export async function bootRenderer(): Promise<boolean> {
     });
   }
 
+  // ── Explorer: a árvore de arquivos da workspace ──────────────────────────────────────────────
+  //
+  // A lista vem do bridge (`workspace.files`) — **opcional**: um preload mais antigo não
+  // expõe o método ⇒ a seção fica **vazia** (sem crash, degradação explícita).
+  //
+  // A indexação é **cara** ⇒ a carga é **preguiçosa** (na 1ª abertura da seção) e só se
+  // repete quando as **raízes** mudam (um documento aberto/fechado muda a pasta).
+
+  const explorerTree: ExplorerTreeHandle = mountExplorerTree(
+    document.getElementById("explorer-tree-host"),
+    {
+      onOpenFile: (absolutePath: string): void => {
+        // O caminho **absoluto** é o que o `controller.open` quer.
+        void controller?.open(absolutePath);
+      },
+    },
+  );
+
+  /** `true` quando a árvore já foi alimentada (evita reindexar a cada clique). */
+  let explorerLoaded = false;
+  /** As raízes do último índice (o que decide se a lista ainda vale). */
+  let explorerRootsKey = "";
+
+  /**
+   * Expande o **1º nível** da árvore (os diretórios de topo).
+   *
+   * Sem isto a árvore aparece toda fechada — e parece quebrada.
+   */
+  const expandFirstLevel = (): void => {
+    for (const node of explorerTree.model.tree()) {
+      if (node.kind !== "dir") continue;
+      explorerTree.model.setExpanded(node.path, true);
+    }
+  };
+
+  /**
+   * Carrega (ou recarrega) o índice de arquivos da workspace.
+   *
+   * Só refaz o trabalho quando as **raízes** mudaram (a chave é a lista de raízes) — a
+   * varredura do disco é cara.
+   */
+  const loadExplorerFiles = async (): Promise<void> => {
+    const bridgeRef = bridge;
+    if (bridgeRef === undefined || bridgeRef.workspaceFiles === undefined) {
+      // Preload antigo: a seção fica vazia (e o filtro não encontra nada).
+      explorerTree.update([]);
+      return;
+    }
+    const roots = workspaceRootsOf(controller?.openSessions ?? []);
+    const key = roots.join("\n");
+    if (explorerLoaded && key === explorerRootsKey) return;
+    explorerRootsKey = key;
+    try {
+      const result = await bridgeRef.workspaceFiles.call(bridgeRef, roots);
+      if (result.truncated) {
+        console.warn("Scribe: índice da workspace truncado", result.warnings);
+      }
+      // As raízes **efetivas** (o `main` expande até a pasta com `.git`) são a raiz do
+      // repositório para as operações de git.
+      const firstRoot = result.roots?.[0];
+      if (firstRoot !== undefined) gitRepoRoot = firstRoot;
+      explorerTree.update(result.files);
+      explorerLoaded = true;
+      expandFirstLevel();
+    } catch (error: unknown) {
+      console.warn("Scribe: falha ao indexar a workspace", error);
+    }
+  };
+
+  /** Abre a seção do Explorer: indexa a workspace na **1ª vez** (lazy). */
+  const ensureExplorerLoaded = (): void => {
+    void loadExplorerFiles();
+  };
+
+  /**
+   * Re-atalhe o índice quando as **raízes** mudam (abrir/fechar documento).
+   *
+   * Antes da 1ª abertura da seção não há índice — e não há por que pagar a varredura.
+   */
+  const refreshExplorerRoots = (): void => {
+    if (!explorerLoaded) return;
+    void loadExplorerFiles();
+  };
+
+  // (`activeSection` — a seção **exibida** — é declarada no **topo** do boot: ver a nota
+  // lá em cima.)
+
+  // ── Outline: a estrutura (símbolos) do documento ativo ──────────────────────────────────────
+  //
+  // Os símbolos vêm do **mesmo** `lsp.documentSymbols` que alimenta o *sticky scroll* (a
+  // chamada é cara: uma por documento/versão do conteúdo, com debounce depois da edição) —
+  // ver `refreshStickySymbols`, que entrega os símbolos crus aqui.
+
+  /**
+   * Move o caret para o símbolo escolhido no Outline e rola até ele.
+   *
+   * O mesmo caminho do popup de símbolos do documento (`Ctrl+Shift+O`).
+   */
+  const revealOutlineSymbol = (target: {
+    readonly line: number;
+    readonly column: number;
+  }): void => {
+    const session = controller?.current;
+    if (session === undefined) return;
+    const line = Math.max(0, Math.min(target.line, session.source.lineCount() - 1));
+    const column = Math.max(0, Math.min(target.column, session.source.line(line).length));
+    const offset = session.source.offsetOf(line, column);
+    session.caret = offset;
+    session.selection = SelectionOps.collapsed(offset);
+    session.selections = SelectionSetOps.singular(offset);
+    renderer.setSelection(session.selection);
+    renderer.setSelections(session.selections);
+    updateCaretStatus(session.source, offset);
+    viewport.scrollTo(line);
+    renderer.start();
+    focusEditorSurface();
+  };
+
+  const outlineView: OutlineViewHandle = mountOutlineView(
+    document.getElementById("outline-view"),
+    {
+      onReveal: (target: OutlineRevealTarget): void => {
+        revealOutlineSymbol(target);
+      },
+    },
+  );
+
+  /**
+   * Os **últimos** símbolos entregues ao Outline.
+   *
+   * Ficam **pendentes** enquanto a seção está fechada (o DOM do painel só é reescrito
+   * com a seção **visível**) e são aplicados quando ela **abre**.
+   */
+  let pendingOutlineSymbols: readonly LspDocumentSymbol[] = [];
+  /** `false` quando o documento ativo **não tem** servidor LSP (o Outline avisa). */
+  let pendingOutlineLspAvailable = true;
+
+  /**
+   * Entrega os símbolos do documento ao Outline.
+   *
+   * `undefined` = **sem servidor LSP** para este documento (a seção mostra a mensagem
+   * clara); uma lista vazia = o documento não tem símbolos.
+   *
+   * ⚠️ O **DOM** do painel só é reescrito com a seção **visível**: a lista chega a cada
+   * evento do LSP e o Outline re-renderiza o DOM inteiro ⇒ com a seção escondida é
+   * trabalho jogado fora. Com a seção escondida, o resultado fica **pendente** e é
+   * aplicado quando ela abre (ver `showSidebarSection`).
+   */
+  const applyOutlineSymbols = (symbols: readonly LspDocumentSymbol[] | undefined): void => {
+    pendingOutlineSymbols = symbols ?? [];
+    pendingOutlineLspAvailable = symbols !== undefined;
+    if (activeSection !== "outline") return;
+    outlineView.setLspAvailable(pendingOutlineLspAvailable);
+    outlineView.update(pendingOutlineSymbols);
+  };
+
   // ── Sticky scroll: símbolos do LSP (cacheados por handle) ───────────────────────────────
   //
   // O `lsp.documentSymbols` é uma chamada **assíncrona** e cara: consultá-la a cada frame
   // inundaria o servidor. O cache é **por documento** (handle) e só éinvalidado quando o
   // **texto** muda (o `contentVersion` da fonte) — o cache do servidor (5s) no `main`
   // cuida do resto.
+  //
+  // ⚠️ A **mesma** resposta alimenta o *Outline* (a estrutura do documento): uma chamada
+  // de IPC por documento/versão, não duas.
   const stickySymbolCache = new Map<
     number,
-    { readonly symbols: readonly StickySymbol[]; readonly contentVersion: number }
+    {
+      readonly symbols: readonly StickySymbol[];
+      /** Os símbolos **crus** (o que o Outline desenha). */
+      readonly raw: readonly LspDocumentSymbol[];
+      readonly contentVersion: number;
+    }
   >();
   let stickyRefreshTimer: ReturnType<typeof setTimeout> | undefined;
+  /** Timer da **re-tentativa** da busca de símbolos (o LSP ainda conectando). */
+  let outlineRetryTimer: ReturnType<typeof setTimeout> | undefined;
+  /** Quantas re-tentativas já foram feitas (o orçamento é por documento). */
+  let outlineRetryAttempt = 0;
 
   /** Aplica os símbolos ao renderer (o desenho do sticky é por frame, os dados são cacheados). */
   const applyStickySymbols = (
@@ -4835,26 +5532,35 @@ export async function bootRenderer(): Promise<boolean> {
   };
 
   /**
-   * Atualiza os símbolos do LSP do documento ativo (usados pelo sticky scroll).
+   * Atualiza os símbolos do LSP do documento ativo (usados pelo sticky scroll **e** pelo
+   * Outline).
    *
    * Com o cache válido, **não** há IPC (o `documentSymbols` só é chamado quando o texto
    * mudou ou quando o documento é aberto).
+   *
+   * @param force Ignora o cache (a **re-tentativa** do Outline — o LSP pode ainda estar
+   *              conectando quando o documento abre).
    */
-  const refreshStickySymbols = (session: TabSession | undefined): void => {
+  const refreshStickySymbols = (session: TabSession | undefined, force = false): void => {
     if (session === undefined) {
       stickySymbolCache.clear();
       applyStickySymbols(undefined, []);
+      // Sem documento ativo: o Outline fica vazio (o LSP existe — só não há o que listar).
+      applyOutlineSymbols([]);
       return;
     }
     if (bridge?.documentSymbols === undefined) {
-      // Sem LSP: o sticky usa o *fallback* por indentação.
+      // Sem LSP: o sticky usa o *fallback* por indentação e o Outline avisa que não há
+      // servidor para este arquivo.
       applyStickySymbols(session.handle, []);
+      applyOutlineSymbols(undefined);
       return;
     }
     const handle = session.handle;
     const cached = stickySymbolCache.get(handle);
-    if (cached !== undefined && cached.contentVersion === session.source.contentVersion) {
+    if (!force && cached !== undefined && cached.contentVersion === session.source.contentVersion) {
       applyStickySymbols(handle, cached.symbols);
+      applyOutlineSymbols(cached.raw);
       return;
     }
     void bridge.documentSymbols(handle).then(
@@ -4868,9 +5574,21 @@ export async function bootRenderer(): Promise<boolean> {
         );
         stickySymbolCache.set(handle, {
           symbols: converted,
+          raw: symbols,
           contentVersion: session.source.contentVersion,
         });
         applyStickySymbols(handle, converted);
+        applyOutlineSymbols(symbols);
+        // ⚠️ **LSP ainda conectando**: o 1º resultado vem **vazio** (o servidor não tinha
+        // ainda os símbolos do documento) ⇒ o Outline nascia vazio e só enche ao trocar
+        // de arquivo. Re-tenta com backoff curto (e **só** com o resultado vazio).
+        if (symbols.length === 0) {
+          scheduleOutlineRetry(session);
+        } else {
+          outlineRetryAttempt = 0;
+          clearTimeout(outlineRetryTimer);
+          outlineRetryTimer = undefined;
+        }
       },
       (error: unknown) => {
         console.warn("Scribe: falha ao buscar símbolos para o sticky scroll", error);
@@ -4878,9 +5596,32 @@ export async function bootRenderer(): Promise<boolean> {
     );
   };
 
+  /**
+   * Re-tenta a busca dos símbolos (o LSP pode ainda estar **conectando**).
+   *
+   * Backoff curto (1 s / 2 s / 4 s — no máximo 3 tentativas) e **só** quando o resultado
+   * veio **vazio** e o documento continua o ativo: sem spam de IPC.
+   */
+  const scheduleOutlineRetry = (session: TabSession): void => {
+    const attempt = outlineRetryAttempt + 1;
+    if (attempt > OUTLINE_RETRY_DELAYS_MS.length) return;
+    outlineRetryAttempt = attempt;
+    const delay = OUTLINE_RETRY_DELAYS_MS[attempt - 1]!;
+    clearTimeout(outlineRetryTimer);
+    outlineRetryTimer = setTimeout(() => {
+      outlineRetryTimer = undefined;
+      // O documento pode ter mudado (ou saído de cena) ⇒ nada a re-tentar.
+      if (controller?.current?.handle !== session.handle) return;
+      refreshStickySymbols(session, true);
+    }, delay);
+  };
+
   /** Rebusca os símbolos (debounced) depois de uma edição. */
   const scheduleStickyRefresh = (): void => {
     clearTimeout(stickyRefreshTimer);
+    // O texto mudou ⇒ o orçamento de re-tentativas recomeça (o LSP pode estar
+    // conectando ainda).
+    outlineRetryAttempt = 0;
     stickyRefreshTimer = setTimeout(() => {
       stickyRefreshTimer = undefined;
       refreshStickySymbols(controller?.current);
@@ -4893,8 +5634,20 @@ export async function bootRenderer(): Promise<boolean> {
   if (controller !== undefined) {
     controller.onActiveDocumentChanged = (session) => {
       resyncDebugPanelToActiveDocument();
+      // Documento novo ⇒ o orçamento de re-tentativas do *Outline* recomeça (a pendência
+      // do documento anterior não vale mais).
+      outlineRetryAttempt = 0;
+      clearTimeout(outlineRetryTimer);
+      outlineRetryTimer = undefined;
       // O sticky scroll troca de documento ⇒ os símbolos cacheados do anterior não valem.
+      // (A **mesma** busca alimenta o Outline — ver `refreshStickySymbols`.)
       refreshStickySymbols(session);
+      // Abrir/fechar documento pode mudar a **raiz** da workspace ⇒ o índice do
+      // Explorer (se ele já foi carregado) é re-atalhado.
+      refreshExplorerRoots();
+      // O documento que acabou de abrir pode ter diagnósticos **pendentes** (o LSP publicou
+      // antes de a sessão existir) ⇒ o painel de problemas é re-resolvido.
+      problemsBridge.refresh?.();
     };
   }
 
@@ -5139,13 +5892,13 @@ export async function bootRenderer(): Promise<boolean> {
   }
 
   // ── Painel de busca na workspace (o "grep", `Ctrl+Shift+F`) ─────────────────────────────
-  /** Abre um arquivo e posiciona o caret (o clique numa ocorrência do grep). */
-  const openFileAt = async (path: string, line: number, column: number): Promise<void> => {
-    if (controller === undefined) return;
-    const opened = await controller.open(path);
-    if (!opened) return;
-    const session = controller.current;
-    if (session === undefined) return;
+  /**
+   * Põe o caret na posição `(line, column)` da sessão e mostra a linha.
+   *
+   * `line`/`column` são **0-based** (a convenção do core) e são **presos** ao documento
+   * (nunca saem da faixa) — é o mesmo caminho do Outline (`onReveal`).
+   */
+  const revealPosition = (session: TabSession, line: number, column: number): void => {
     const targetLine = Math.max(0, Math.min(line, session.source.lineCount() - 1));
     const targetColumn = Math.max(0, Math.min(column, session.source.line(targetLine).length));
     const offset = session.source.offsetOf(targetLine, targetColumn);
@@ -5160,6 +5913,122 @@ export async function bootRenderer(): Promise<boolean> {
     focusEditorSurface();
   };
 
+  /**
+   * **O helper único** de "abrir um arquivo numa posição".
+   *
+   * Usado pelo *grep*, pelo painel de **problemas** e pelo **diff** — não duplica o
+   * caminho de caret/foco. Se o arquivo **já está aberto**, a aba existente é apenas
+   * ativada (abrir de novo criaria uma aba duplicada).
+   */
+  const openFileAt = async (path: string, line: number, column: number): Promise<void> => {
+    if (controller === undefined) return;
+    const existing = controller.openSessions.findIndex((session) => session.path === path);
+    if (existing >= 0) {
+      controller.activate(existing);
+      const session = controller.current;
+      if (session === undefined) return;
+      revealPosition(session, line, column);
+      return;
+    }
+    const opened = await controller.open(path);
+    if (!opened) return;
+    const session = controller.current;
+    if (session === undefined) return;
+    revealPosition(session, line, column);
+  };
+
+  // ── Workbench de seções: a barra lateral deixa de ser só a lista de "Abertos" ────────────────
+  //
+  // Uma **seção por vez**: o host da seção ativa é o único visível e a rail marca a seção
+  // (`aria-pressed`). A lista de "Abertos" acompanha a seção *explorer*; o *grep* (o
+  // painel de busca na workspace) é uma seção como outra.
+
+  const sidebar = document.getElementById("sidebar");
+  const resizeSurface = (): void =>
+    renderer.resize(surface.clientWidth || 1, surface.clientHeight || 1);
+
+  // (`activeSection` — a seção **exibida** — é declarada antes do *Outline*: ver a nota
+  // lá em cima.)
+  /** A seção que estava aberta antes do *grep* (o grep é uma seção como outra). */
+  let sectionBeforeSearch: SidebarSection = "explorer";
+
+  /** O botão da rail de uma seção (`null` = a seção ainda não tem botão). */
+  const sectionButton = (section: SidebarSection): HTMLElement | null => {
+    const id = SIDEBAR_SECTION_BUTTONS[section];
+    if (id === undefined) return null;
+    return document.getElementById(id);
+  };
+
+  /** Espelha a seção ativa na rail (`aria-pressed` + classe `active`). */
+  const syncRail = (): void => {
+    const visible = sidebar?.hidden === false;
+    for (const section of Object.keys(SIDEBAR_SECTION_BUTTONS) as SidebarSection[]) {
+      const button = sectionButton(section);
+      if (button === null) continue;
+      const pressed = visible && activeSection === section;
+      button.setAttribute("aria-pressed", String(pressed));
+      button.classList.toggle("active", pressed);
+    }
+    // O "grep" também é uma seção da sidebar (o botão dele não tem `aria-pressed` no
+    // markup — o estado é espelhado aqui).
+    const grepButton = document.getElementById("activity-grep");
+    if (grepButton !== null) {
+      const pressed = visible && activeSection === "search";
+      grepButton.setAttribute("aria-pressed", String(pressed));
+      grepButton.classList.toggle("active", pressed);
+    }
+  };
+
+  const setSidebarVisible = (visible: boolean): void => {
+    if (sidebar) sidebar.hidden = !visible;
+    resizeSurface();
+    renderer.start();
+    syncRail();
+  };
+
+  /**
+   * Mostra **uma** seção da barra lateral (as outras saem de cena).
+   *
+   * - a lista de "Abertos" (`#sidebar-editors`) acompanha a seção *explorer*;
+   * - o *explorer* indexa a workspace na **1ª** abertura (a varredura é cara);
+   * - a rail é sincronizada (`aria-pressed` + classe `active`).
+   */
+  const showSidebarSection = (section: SidebarSection): void => {
+    if (section === "search" && activeSection !== "search") {
+      sectionBeforeSearch = activeSection ?? "explorer";
+    }
+    // **Um** host por vez.
+    for (const key of Object.keys(SIDEBAR_SECTION_HOSTS) as SidebarSection[]) {
+      const host = document.getElementById(SIDEBAR_SECTION_HOSTS[key]);
+      if (host !== null) host.hidden = key !== section;
+    }
+    // A lista de "Abertos" só acompanha a seção *explorer* (no *grep*, quem manda nela é o
+    // próprio painel de busca — ele a esconde e a restaura).
+    if (section !== "search") {
+      const editors = document.getElementById("sidebar-editors");
+      const header = document.getElementById("sidebar-section-toggle");
+      const showEditors = section === "explorer";
+      if (editors !== null) editors.hidden = !showEditors;
+      if (header !== null) header.hidden = !showEditors;
+    }
+    sidebar?.setAttribute("aria-label", SIDEBAR_SECTION_LABELS[section]);
+    activeSection = section;
+    // O Explorer indexa a workspace **na 1ª abertura** (a varredura é cara).
+    if (section === "explorer") ensureExplorerLoaded();
+    // O *Source Control* recarrega o status do git quando a seção abre (o status é a
+    // fonte da verdade — o painel nunca inventa contagem).
+    if (section === "source-control") sourceControlBridge.refresh?.();
+    // Os painéis de *Outline* e *Problems* só re-renderizam o DOM com a seção
+    // **visível** ⇒ quem está escondido precisa ser atualizado **agora** (o que
+    // chegou enquanto a seção estava fechada).
+    if (section === "outline") {
+      outlineView.setLspAvailable(pendingOutlineLspAvailable);
+      outlineView.update(pendingOutlineSymbols);
+    }
+    if (section === "problems") problemsBridge.refresh?.();
+    setSidebarVisible(true);
+  };
+
   const searchController = createWorkspaceSearchController({
     bridge,
     roots: () => workspaceRootsOf(controller?.openSessions ?? []),
@@ -5167,6 +6036,14 @@ export async function bootRenderer(): Promise<boolean> {
       void openFileAt(path, line, column);
     },
     focusEditor: focusEditorSurface,
+    // O grep é uma **seção** da barra lateral: o workbench manda na visibilidade dos
+    // hosts e devolve a seção anterior quando o painel fecha.
+    onSectionOpen: () => {
+      showSidebarSection("search");
+    },
+    onSectionClose: () => {
+      showSidebarSection(sectionBeforeSearch);
+    },
   });
 
   // Os abridores de overlay (o **mesmo** caminho dos atalhos): a paleta, o *Quick Open* e o
@@ -5289,18 +6166,30 @@ export async function bootRenderer(): Promise<boolean> {
   });
 
   // ── Casca: rail de atividades, painel lateral e atalhos de layout ────────────────────────────
-  const sidebar = document.getElementById("sidebar");
-  const explorerBtn = document.getElementById("activity-explorer");
-  const resizeSurface = (): void =>
-    renderer.resize(surface.clientWidth || 1, surface.clientHeight || 1);
-  const setSidebarVisible = (visible: boolean): void => {
-    if (sidebar) sidebar.hidden = !visible;
-    explorerBtn?.setAttribute("aria-pressed", String(visible));
-    explorerBtn?.classList.toggle("active", visible);
-    resizeSurface();
-    renderer.start();
+  //
+  // O clique na rail: o botão **ativo** alterna o sidebar (abre/fecha, estilo VS Code); um
+  // botão **inativo** abre o sidebar na sua seção.
+  //
+  // ⚠️ O *toggle* só dispara com a seção **visível** (`activeSection`): no boot nenhuma
+  // seção está no host ⇒ o 1º clique no *Explorer* **abre** a seção (a árvore aparece) em
+  // vez de **fechar** a sidebar (o defeito: a árvore só aparecia no 2º clique).
+  const activateSection = (section: SidebarSection): void => {
+    // O *grep* é uma seção da sidebar: trocar de seção fecha o painel de busca.
+    const wasSearching = searchController.isOpen();
+    if (wasSearching) searchController.close();
+    if (!wasSearching && activeSection === section && sidebar?.hidden === false) {
+      setSidebarVisible(false);
+      return;
+    }
+    showSidebarSection(section);
   };
-  explorerBtn?.addEventListener("click", () => setSidebarVisible(sidebar?.hidden ?? true));
+
+  document.getElementById("activity-explorer")?.addEventListener("click", () => {
+    activateSection("explorer");
+  });
+  document.getElementById("activity-outline")?.addEventListener("click", () => {
+    activateSection("outline");
+  });
 
   document.getElementById("activity-search")?.addEventListener("click", () => {
     // ⚠️ A busca precisa **focar o input** (o botão focava o canvas ⇒ digitar inseria no
@@ -5316,8 +6205,368 @@ export async function bootRenderer(): Promise<boolean> {
   });
   document.getElementById("activity-grep")?.addEventListener("click", () => {
     // A busca em **todos os arquivos** (o "grep") — o mesmo caminho do `Ctrl+Shift+F`.
+    // (O grep é uma **seção** da sidebar: o workbench troca a seção visível — ver
+    // `onSectionOpen` em `createWorkspaceSearchController`.)
     openers.openSearchPanel();
   });
+
+  // ── Problems / Source Control / Diff: os três painéis da barra lateral ──────────────────────
+  //
+  // Os **módulos** (`problems-panel.ts`, `source-control.ts`, `diff-view.ts`) são
+  // autocontidos: desenham o estado e emitem **intenções**. Quem **executa** a intenção é o
+  // renderer (IPC → `main` → LSP/`git`) e quem **reflete** o estado é a status bar.
+  //
+  // ⚠️ Todo método novo da ponte é **opcional** (`bridge.gitX?.(...)`): um preload mais antigo
+  // ⇒ a seção fica vazia (sem erro, sem crash).
+
+  // ── Problems: os diagnósticos do LSP (painel + badge da status bar) ─────────────────────────
+  /**
+   * Traduz os diagnósticos por **handle** em entradas por **caminho** (o painel agrupa por
+   * arquivo). Diagnóstico de um documento **sem sessão** fica pendente (é resolvido quando o
+   * documento abre — o refresh acontece na troca de documento).
+   */
+  const buildProblemEntries = (): readonly ProblemEntry[] => {
+    const entries: ProblemEntry[] = [];
+    for (const session of controller?.openSessions ?? []) {
+      const diagnostics = diagnosticsByHandle.get(session.handle);
+      if (diagnostics === undefined || diagnostics.length === 0) continue;
+      entries.push(...problemEntries(session.path, diagnostics));
+    }
+    return entries;
+  };
+
+  const problemsPanel: ProblemsPanelHandle = mountProblemsPanel(
+    document.getElementById("problems-panel-host"),
+    {
+      // `line`/`column` são **0-based** (a convenção do core).
+      onJump: (file: string, line: number, column: number): void => {
+        void openFileAt(file, line, column);
+      },
+      onClose: (): void => {
+        showSidebarSection("explorer");
+      },
+    },
+  );
+
+  /**
+   * Repinta o painel de problemas (e o badge da status bar).
+   *
+   * ⚠️ O **modelo** é sempre atualizado (é ele que alimenta o badge da status bar — que é
+   * visível com o painel fechado). O **DOM** do painel só é reescrito com a seção
+   * **visível**: a lista chega a cada evento de diagnóstico e o painel re-renderiza o
+   * DOM inteiro ⇒ com a seção escondida é trabalho jogado fora. O painel é atualizado
+   * quando ele **abre** (ver `showSidebarSection`).
+   */
+  const refreshProblems = (): void => {
+    const entries = buildProblemEntries();
+    problemsPanel.model.setDiagnostics(entries);
+    setProblemsBadge(problemsPanel.model.counts);
+    if (activeSection !== "problems") return;
+    problemsPanel.update(entries);
+  };
+  problemsBridge.refresh = refreshProblems;
+
+  // ── O documento aberto no BOOT ─────────────────────────────────────────────────────────────
+  //
+  // ⚠️ O `open` inicial (o `?file=` do boot) roda **antes** do `onActiveDocumentChanged`
+  // existir ⇒ o handler **nunca** foi chamado para aquele documento ⇒ o Outline dizia
+  // "Nenhum símbolo neste documento" e o Problems ficava vazio.
+  //
+  // O documento do boot recebe **o mesmo tratamento** dos demais (ver `syncBootDocument`).
+  const diagnosticsOf = bridge?.diagnostics;
+  syncBootDocument<TabSession>({
+    session: controller?.current,
+    onActiveDocumentChanged:
+      controller === undefined
+        ? undefined
+        : (session: TabSession): void => controller.onActiveDocumentChanged?.(session),
+    diagnostics:
+      diagnosticsOf === undefined
+        ? undefined
+        : (handle: number): Promise<readonly LspDiagnostic[]> => diagnosticsOf(handle),
+    onDiagnostics: (handle: number, diagnostics: readonly LspDiagnostic[]): void => {
+      diagnosticsByHandle.set(handle, diagnostics);
+      refreshProblems();
+    },
+    onError: (error: unknown): void => {
+      console.warn("Scribe: falha ao buscar os diagnósticos do documento do boot", error);
+    },
+  });
+  // ── Source Control: o painel de git ─────────────────────────────────────────────────────────
+  //
+  // As ações são **declarações de função** (não arrows): o painel e os helpers se referenciam
+  // mutuamente (o hoisting evita o *TDZ* — nenhum deles roda antes do boot terminar).
+
+  /**
+   * Mostra uma falha de git na UI — **mensagem amigável** (1 linha, sem stack).
+   *
+   * A mensagem também vai para a status bar (o padrão da casca: `setDocStatus`).
+   */
+  function showGitError(error: unknown): void {
+    const message = friendlyMessage(error, "falha na operação de git");
+    sourceControlPanel.setError(message);
+    setDocStatus(message);
+    console.warn("Scribe: falha na operação de git", error);
+  }
+
+  /** Mostra um aviso no painel (ex.: "commit indisponível" — preload antigo). */
+  function showGitMessage(message: string): void {
+    sourceControlPanel.setError(message);
+    setDocStatus(message);
+  }
+
+  /** Aplica o status novo no painel (entradas + branch) e no badge da status bar. */
+  function applyGitStatus(status: GitStatusResult): void {
+    sourceControlPanel.update(status.entries);
+    sourceControlPanel.setBranch(status.branch ?? "");
+    setGitBadge(status.branch, sourceControlPanel.model.counts);
+  }
+
+  /**
+   * Token das **requisições** de status (`git status` a solo) — descarta a resposta que
+   * não for a mais recente.
+   *
+   * ⚠️ O `git status` é um **processo**: dois em voo podem resolver **fora de ordem** (o
+   * mais lento pode ser o mais recente) ⇒ o status velho sobrescrevia o novo. O token é
+   * monotônico: só a última requisição aplica o resultado (o mesmo padrão do `signalId`
+   * do `searchController`).
+   */
+  let gitStatusToken = 0;
+  /**
+   * Token das **ações** de git (`stage`/`unstage`/…).
+   *
+   * A ação devolve o status **novo** ⇒ ela **sempre** vence um `git status` que estava em
+   * voo (aquele `git status` rodou **antes** da mutação) — só outra ação mais recente
+   * pode descartá-la.
+   */
+  let gitActionToken = 0;
+
+  /** Recarrega o status do repositório (a fonte da verdade é o `git status`). */
+  async function refreshGitStatus(): Promise<void> {
+    if (bridge?.gitStatus === undefined) return;
+    const token = ++gitStatusToken;
+    const actionAtIssue = gitActionToken;
+    try {
+      const status = await bridge.gitStatus(gitRepoRoot);
+      // Resposta obsoleta: outra requisição mais recente — ou uma **ação** que começou
+      // depois (o status dela é mais novo).
+      if (token !== gitStatusToken) return;
+      if (actionAtIssue !== gitActionToken) return;
+      applyGitStatus(status);
+    } catch (error: unknown) {
+      if (token !== gitStatusToken) return;
+      if (actionAtIssue !== gitActionToken) return;
+      showGitError(error);
+    }
+  }
+
+  /**
+   * Executa uma ação de git e **re-atalha o status** (o `git status` é a fonte da verdade).
+   *
+   * `undefined` no retorno ⇒ o preload não expõe o método ⇒ degrade sem crash.
+   */
+  async function runGitAction(
+    action: (root: string | undefined) => Promise<GitStatusResult | undefined>,
+    unavailableMessage: string,
+  ): Promise<void> {
+    // A ação devolve o status **novo** ⇒ o `refreshGitStatus` redundante sai (2 processos
+    // git por clique viravam 1). O status da ação **vence** qualquer `git status` em
+    // voo (aquele rodou antes da mutação) — só outra ação mais recente o descarta.
+    const token = ++gitActionToken;
+    let status: GitStatusResult | undefined;
+    try {
+      status = await action(gitRepoRoot);
+    } catch (error: unknown) {
+      showGitError(error);
+      return;
+    }
+    if (status === undefined) {
+      showGitMessage(unavailableMessage);
+      return;
+    }
+    if (token !== gitActionToken) return; // outra ação começou depois
+    applyGitStatus(status);
+  }
+
+  /**
+   * Resolve a raiz do **repositório** (a 1ª raiz efetiva do `workspace.files`).
+   *
+   * O `main` expande as raízes candidatas até a pasta com `.git` ⇒ a 1ª raiz **é** a raiz do
+   * repositório. Sem ela, o `main` resolve a raiz do documento ativo — mas o *renderer* precisa
+   * do caminho **absoluto** do arquivo (para o "pular" do diff abrir o arquivo certo).
+   */
+  async function ensureGitRepoRoot(): Promise<void> {
+    if (gitRepoRoot !== undefined) return;
+    if (bridge?.workspaceFiles === undefined) return;
+    const roots = workspaceRootsOf(controller?.openSessions ?? []);
+    try {
+      const result = await bridge.workspaceFiles(roots);
+      const first = result.roots?.[0];
+      if (first !== undefined) gitRepoRoot = first;
+    } catch (error: unknown) {
+      console.warn("Scribe: falha ao resolver a raiz do repositório", error);
+    }
+  }
+
+  /**
+   * Junta um caminho **relativo ao repositório** com a raiz do repo (vira absoluto).
+   *
+   * ⚠️ `undefined` = **não há raiz absoluta** (a raiz do repositório é desconhecida): o
+   * caminho relativo **não** pode virar o path do diff — o "pular" abriria o arquivo
+   * contra o *cwd* do processo (o arquivo **errado**). Nesse caso o `main` ainda resolve
+   * o relativo (é ele que sabe a raiz do repositório do documento ativo).
+   */
+  function resolveRepoPath(relative: string): string | undefined {
+    if (relative.startsWith("/")) return relative;
+    const root = gitRepoRoot;
+    if (root === undefined) return undefined;
+    const separator = root.endsWith("/") ? "" : "/";
+    return `${root}${separator}${relative}`;
+  }
+
+  // ── Diff: o visualizador de diferenças ─────────────────────────────────────────────────────
+  /** O caminho **absoluto** do arquivo que o diff mostra (o "pular" abre este arquivo). */
+  let diffFilePath: string | undefined;
+
+  /**
+   * Abre o diff de um arquivo (o clique numa linha do *Source Control*).
+   *
+   * Diff vazio ⇒ o painel mostra "Sem alterações" (é o estado do módulo, não um erro).
+   */
+  async function openDiffFor(path: string): Promise<void> {
+    // A raiz do repositório é resolvida **aqui** (e não no `git status`): sem ela, o
+    // caminho do "pular" não seria absoluto e o `main` abriria o arquivo errado.
+    await ensureGitRepoRoot();
+    const absolute = resolveRepoPath(path);
+    // ⚠️ **Só** um caminho **absoluto** vira o path do diff: com a raiz desconhecida, o
+    // "pular" abriria o arquivo contra o *cwd* do processo (o arquivo **errado**). O
+    // diff **abre** (o `main` resolve o relativo), mas o "pular" não tem path.
+    diffFilePath = absolute;
+    if (absolute === undefined) {
+      // Aviso **claro** na status bar (o diff abre; o "pular" não tem path absoluto).
+      setDocStatus("raiz do repositório desconhecida: o diff abre, mas o “pular” não abre o arquivo");
+      console.warn("Scribe: raiz do repositório desconhecida — o diff não tem path absoluto");
+    }
+    if (bridge?.gitDiffText === undefined) {
+      showGitMessage("diff indisponível");
+      diffView.update([]);
+      showSidebarSection("diff");
+      return;
+    }
+    try {
+      // O `main` sabe resolver o caminho **relativo** (a raiz do repositório do documento
+      // ativo) — o absoluto é preferível, mas o relativo também funciona.
+      const text = await bridge.gitDiffText(absolute ?? path);
+      diffView.update(parseUnifiedDiff(text));
+      showSidebarSection("diff");
+    } catch (error: unknown) {
+      showGitError(error);
+    }
+  }
+
+  const diffView: DiffViewHandle = mountDiffView(document.getElementById("diff-view-host"), {
+    // A linha do diff é **1-based** (do arquivo novo) ⇒ o editor é 0-based.
+    onJump: (line: number): void => {
+      const path = diffFilePath;
+      if (path === undefined) return;
+      void openFileAt(path, line - 1, 0);
+    },
+    onClose: (): void => {
+      showSidebarSection("source-control");
+    },
+  });
+
+  const sourceControlPanel: SourceControlPanelHandle = mountSourceControlPanel(
+    document.getElementById("source-control-host"),
+    {
+      onStage: (path: string): void => {
+        void runGitAction(
+          async (root) => bridge?.gitStage?.(path, root),
+          "preparar arquivo indisponível",
+        );
+      },
+      onUnstage: (path: string): void => {
+        void runGitAction(
+          async (root) => bridge?.gitUnstage?.(path, root),
+          "desfazer a preparação indisponível",
+        );
+      },
+      onStageAll: (): void => {
+        void runGitAction(
+          async (root) => bridge?.gitStageAll?.(root),
+          "preparar tudo indisponível",
+        );
+      },
+      onCommit: (message: string): void => {
+        void (async (): Promise<void> => {
+          const result = await bridge?.gitCommit?.(message, gitRepoRoot);
+          if (result === undefined) {
+            showGitMessage("commit indisponível");
+            return;
+          }
+          if (result.ok !== true) {
+            // Falha: a mensagem de commit **fica** (o usuário corrige e tenta de novo).
+            const reason = friendlyMessage(result.error, "falha no commit");
+            sourceControlPanel.setError(reason);
+            setDocStatus(reason);
+            console.warn("Scribe: commit recusado pelo git", reason);
+            return;
+          }
+          sourceControlPanel.setError(null);
+          sourceControlPanel.clearCommitMessage();
+          await refreshGitStatus();
+        })().catch((error: unknown) => {
+          showGitError(error);
+        });
+      },
+      onSelect: (path: string): void => {
+        void openDiffFor(path);
+      },
+      onRefresh: (): void => {
+        void refreshGitStatus();
+      },
+    },
+  );
+  sourceControlBridge.refresh = () => {
+    void refreshGitStatus();
+  };
+
+  // O painel já nasce com o que o LSP publicou durante o boot.
+  refreshProblems();
+
+  // A rail: as seções *problems* e *source-control* (o mesmo contrato do *explorer*/*outline*).
+  document.getElementById("activity-problems")?.addEventListener("click", () => {
+    activateSection("problems");
+  });
+  document.getElementById("activity-source-control")?.addEventListener("click", () => {
+    activateSection("source-control");
+  });
+
+  // O badge da status bar abre a seção correspondente (mesmo padrão do botão da rail).
+  const statusErrors = document.getElementById("status-errors");
+  if (statusErrors !== null) {
+    const openProblems = (): void => {
+      activateSection("problems");
+    };
+    statusErrors.addEventListener("click", openProblems);
+    statusErrors.addEventListener("keydown", (event: KeyboardEvent) => {
+      if (event.key !== "Enter" && event.key !== " ") return;
+      event.preventDefault();
+      openProblems();
+    });
+  }
+  const statusGit = document.getElementById("status-git");
+  if (statusGit !== null) {
+    const openSourceControl = (): void => {
+      activateSection("source-control");
+    };
+    statusGit.addEventListener("click", openSourceControl);
+    statusGit.addEventListener("keydown", (event: KeyboardEvent) => {
+      if (event.key !== "Enter" && event.key !== " ") return;
+      event.preventDefault();
+      openSourceControl();
+    });
+  }
 
   // Seção do painel: colapsa/expande a lista de documentos abertos.
   const sectionToggle = document.getElementById("sidebar-section-toggle");
@@ -5328,7 +6577,7 @@ export async function bootRenderer(): Promise<boolean> {
     if (list) list.hidden = collapsed;
   });
 
-  // Ctrl+B: alterna o painel (convenção de editores).
+  // Ctrl+B: alterna o painel (convenção de editores) — a **seção** não muda.
   document.addEventListener("keydown", (event: KeyboardEvent) => {
     if (
       (event.ctrlKey || event.metaKey) &&
@@ -5349,6 +6598,10 @@ export async function bootRenderer(): Promise<boolean> {
   new ResizeObserver(resizeSurface).observe(surface);
 
   window.addEventListener("resize", resizeSurface);
+  // A rail é sincronizada com o que está **exibido**: no boot nenhuma seção está no host
+  // (o painel mostra só a lista de "Abertos") ⇒ nenhum botão nasce marcado — o 1º clique
+  // no *Explorer* **abre** a seção.
+  syncRail();
   renderer.start();
   return true;
 }
@@ -5710,6 +6963,31 @@ function attachInputListeners(
   };
 
   /**
+   * As **raízes efetivas** da workspace (as que o `main` varreu) — habilitam o item
+   * "criar arquivo" do ⌘P.
+   *
+   * `undefined` = ainda não sabemos (o preload antigo não devolve as raízes) ⇒ o item
+   * "criar" usa as pastas dos documentos abertos (`workspaceRootsOf`).
+   */
+  let quickOpenRoots: readonly string[] | undefined;
+
+  /**
+   * A pasta do **documento ativo** — a base do item "criar arquivo" do ⌘P.
+   *
+   * O VS Code cria o arquivo **ao lado** do arquivo aberto (a base é a pasta do documento
+   * ativo, **não** a raiz da workspace). Sem documento ativo: `undefined` (o chamador usa
+   * a 1ª raiz).
+   */
+  const quickOpenBaseDir = (): string | undefined => {
+    const path = controller?.current?.path;
+    if (path === undefined) return undefined;
+    const cut = Math.max(path.lastIndexOf("/"), path.lastIndexOf("\\"));
+    if (cut < 0) return undefined;
+    if (cut === 0) return path.startsWith("/") ? "/" : undefined;
+    return path.slice(0, cut);
+  };
+
+  /**
    * As fontes dos itens do *Quick Open* (a ponte).
    *
    * O índice de arquivos é **opcional**: um preload mais antigo não o expõe ⇒ o *Quick
@@ -5722,20 +7000,52 @@ function attachInputListeners(
       listCommands: () => bridge.listCommands(),
       ...(workspaceFiles !== undefined
         ? {
-            workspaceFiles: (roots: readonly string[]): Promise<WorkspaceFilesResult> =>
-              workspaceFiles.call(bridge, roots),
+            workspaceFiles: async (roots: readonly string[]): Promise<WorkspaceFilesResult> => {
+              const result = await workspaceFiles.call(bridge, roots);
+              // O `main` devolve as raízes **efetivas** (as que ele varreu) — elas são as
+              // que confinam o "criar arquivo". Sem elas (preload antigo), valem as pastas
+              // dos documentos abertos (o que o renderer pediu).
+              quickOpenRoots = result.roots ?? roots;
+              return result;
+            },
           }
         : {}),
     };
   })();
 
-  /** Executa o item escolhido no *Quick Open* (comando ⇒ executa; arquivo ⇒ abre). */
+  /**
+   * Executa o item escolhido no *Quick Open* (comando ⇒ executa; arquivo ⇒ abre;
+   * "criar" ⇒ **cria** o arquivo e abre).
+   */
   const handleQuickOpenPick = (item: QuickOpenItem): void => {
     if (!isQuickOpenPayload(item.payload)) return;
     if (item.payload.kind === "command") {
       // O popup **já** devolveu o foco ao canvas antes do `onPick` — não refocus aqui
       // (um comando que abre um overlay — o "find.open" — precisa manter o foco dele).
       executeCommand(item.payload.id);
+      return;
+    }
+    if (item.payload.kind === "create") {
+      // "Criar arquivo": o `main` cria o arquivo (confinado à raiz da workspace; nunca
+      // sobrescreve um existente) e o renderer abre o documento novo.
+      if (bridge === undefined || bridge.createFile === undefined) {
+        // Preload antigo: degradação **explícita** (sem crash).
+        setDocStatus("criar arquivo indisponível");
+        return;
+      }
+      const createFile = bridge.createFile;
+      const path = item.payload.path;
+      void createFile
+        .call(bridge, path)
+        .then(() => {
+          void controller?.open(path);
+        })
+        .catch((error: unknown) => {
+          console.error("Scribe: falha ao criar o arquivo", error);
+          setDocStatus(
+            `erro ao criar o arquivo: ${error instanceof Error ? error.message : String(error)}`,
+          );
+        });
       return;
     }
     void controller?.open(item.payload.path);
@@ -5771,14 +7081,31 @@ function attachInputListeners(
     // Os itens chegam por IPC (comandos + índice da workspace): o popup abre assim que
     // chegam (a lista vazia também é uma resposta válida).
     void (async () => {
-      const items = await collectQuickOpenItems(quickOpenSources, controller?.openSessions ?? []);
-      showQuickOpen({
+      const sessions = controller?.openSessions ?? [];
+      // As raízes são revalidadas a cada abertura (o `main` pode ter expandido a pasta).
+      quickOpenRoots = undefined;
+      const items = await collectQuickOpenItems(quickOpenSources, sessions);
+      const roots = quickOpenRoots ?? workspaceRootsOf(sessions);
+      // A base do item "criar arquivo": a **pasta do documento ativo** (o VS Code cria ao
+      // lado do arquivo aberto) — sem documento ativo, a 1ª raiz.
+      const baseDir = quickOpenBaseDir() ?? roots[0];
+      // ⚠️ O objeto é montado **fora** da chamada: o `baseDir` só existe no contrato novo
+      // do `quick-open.ts` (`createFileCandidate(query, { roots, baseDir })`) — com o
+      // módulo antigo a propriedade é simplesmente ignorada (e o TS não reclama do
+      // excessivo, porque o literal não é o argumento direto).
+      const options = {
         items,
+        // As **raízes** habilitam o item "criar arquivo" (é o `quick-open.ts` que o
+        // offerta, a cada tecla). Sem elas (preload antigo), valem as pastas dos
+        // documentos abertos.
+        roots,
         title: "Abrir arquivo, comando ou recente",
-        onPick: (item) => handleQuickOpenPick(item),
+        onPick: (item: QuickOpenItem) => handleQuickOpenPick(item),
         onCancel: () => focusEditorSurface(),
         loadPreview: loadQuickOpenPreview,
-      });
+        ...(baseDir !== undefined ? { baseDir } : {}),
+      };
+      showQuickOpen(options);
     })();
   };
 
@@ -5851,7 +7178,9 @@ function attachInputListeners(
             const mutableFold = { ...fold, isCollapsed: !fold.isCollapsed };
             const newFolds = folds.map((f) => (f === fold ? mutableFold : f));
             foldingStates.set(session.handle, newFolds);
-            renderer.setFolding(newFolds);
+            // ⚠️ `applyFolding` (e não `setFolding`): ele **reancora o scroll** — o texto
+            // não pode saltar ao dobrar/desdobrar.
+            renderer.applyFolding(newFolds);
             renderer.start();
             return; // não processa como clique de texto
           }
@@ -6469,6 +7798,63 @@ function attachInputListeners(
           controller.activate(next);
         }
       }
+      return;
+    }
+
+    // ── Enter: a quebra de linha ──────────────────────────────────────────────────────────────
+    //
+    // ⚠️ **Sem isto, não dá para criar linhas**: o `Enter` não é uma tecla imprimível
+    // (`key.length === 1`) e não havia handler ⇒ o `keydown` morria sem fazer nada.
+    //
+    // O caminho é o **mesmo** da digitação (`controller.insertText`): a seleção é
+    // **substituída**, o multi-cursor insere N quebras (1 lote) e o auto-pair **não** é
+    // quebrado (o par digitado fica em volta da quebra).
+    if (event.key === "Enter" && !event.ctrlKey && !event.metaKey && !event.altKey) {
+      const session = controller?.current;
+      if (session === undefined) return;
+      event.preventDefault();
+      void controller?.insertText("\n");
+      renderer.start();
+      return;
+    }
+
+    // ── Ctrl/Cmd+A: seleciona tudo ───────────────────────────────────────────────────────────
+    //
+    // ⚠️ Não havia handler: o atalho não fazia nada (o navegador não seleciona o canvas).
+    if (primary && !event.shiftKey && !event.altKey && (event.key === "a" || event.key === "A")) {
+      const session = controller?.current;
+      if (session === undefined) return;
+      event.preventDefault();
+      const end = session.source.text.length;
+      session.selection = { anchor: 0, active: end };
+      session.selections = [session.selection] as SelectionSet;
+      session.caret = end;
+      renderer.setSelection(session.selection);
+      renderer.setSelections(session.selections);
+      updateCaretStatus(session.source, end);
+      renderer.start();
+      return;
+    }
+
+    // ── Ctrl/Cmd+Home/End: o **caret** vai junto ──────────────────────────────────────────────
+    //
+    // ⚠️ Antes, `Home`/`End` só **rolavam** a viewport ⇒ o cursor ficava para trás
+    // (o `Ctrl+End` rolava para o fim do documento, mas o caret continuava no meio).
+    if (primary && !event.shiftKey && !event.altKey && (event.key === "Home" || event.key === "End")) {
+      const session = controller?.current;
+      if (session === undefined) return;
+      event.preventDefault();
+      const offset = event.key === "End" ? session.source.text.length : 0;
+      const line = session.source.positionAt(offset).line;
+      session.caret = offset;
+      session.selection = SelectionOps.collapsed(offset);
+      session.selections = SelectionSetOps.singular(offset);
+      renderer.setSelection(session.selection);
+      renderer.setSelections(session.selections);
+      updateCaretStatus(session.source, offset);
+      viewport.scrollTo(line);
+      scheduleInlayHintRefresh();
+      renderer.start();
       return;
     }
 

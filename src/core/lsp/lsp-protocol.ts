@@ -637,6 +637,109 @@ export interface InitializeResult {
   readonly capabilities: ServerCapabilities;
 }
 
+// ── Requests servidor→cliente ─────────────────────────────────────────────────────────────
+
+/**
+ * Identificador de um request JSON-RPC.
+ *
+ * ⚠️ O `id` do **servidor** e o `id` do **cliente** são espaços **independentes**: o
+ * cliente responde com o `id` que o servidor usou, e vice-versa.
+ */
+export type JsonRpcRequestId = number | string;
+
+/**
+ * Handler de um request **servidor→cliente**: recebe os `params` e devolve o `result`
+ * da resposta (ou lança — o erro vira uma resposta JSON-RPC de erro).
+ *
+ * Pode devolver uma promise: a resposta é enviada quando ela resolve.
+ */
+export type ClientRequestHandler = (params: unknown) => unknown;
+
+/** Um item de `workspace/configuration` — a seção pedida para um escopo. */
+export interface ConfigurationItem {
+  readonly scopeUri?: string;
+  readonly section?: string;
+}
+
+/** Parâmetros de `workspace/configuration` (uma entrada por seção pedida). */
+export interface ConfigurationParams {
+  readonly items: readonly ConfigurationItem[];
+}
+
+/**
+ * Resultado de `workspace/applyEdit`.
+ *
+ * O Scribe **não** aplica edits do servidor ⇒ o resultado é sempre `applied: false`.
+ */
+export interface ApplyWorkspaceEditResult {
+  readonly applied: boolean;
+  readonly failureReason?: string;
+}
+
+/** Capability registrada dinamicamente pelo servidor (`client/registerCapability`). */
+export interface Registration {
+  readonly id: string;
+  readonly method: string;
+  readonly registerOptions?: unknown;
+}
+
+/** Parâmetros de `client/registerCapability` / `client/unregisterCapability`. */
+export interface RegistrationParams {
+  readonly registrations: readonly Registration[];
+}
+
+// ── Leitura tolerante de payloads servidor→cliente ───────────────────────────────────────
+
+/**
+ * Extrai os itens de `workspace/configuration` (tolerante a payload malformado).
+ *
+ * O servidor **exige** uma resposta com **uma entrada por item** — por isso o cliente
+ * nunca "adivinha": usa o tamanho real da lista.
+ */
+export function readConfigurationItems(params: unknown): readonly ConfigurationItem[] {
+  if (typeof params !== "object" || params === null) return [];
+  const items = (params as { readonly items?: unknown }).items;
+  if (!Array.isArray(items)) return [];
+
+  const out: ConfigurationItem[] = [];
+  for (const item of items) {
+    if (typeof item !== "object" || item === null) {
+      out.push({});
+      continue;
+    }
+    const rec = item as { readonly scopeUri?: unknown; readonly section?: unknown };
+    out.push({
+      ...(typeof rec.scopeUri === "string" ? { scopeUri: rec.scopeUri } : {}),
+      ...(typeof rec.section === "string" ? { section: rec.section } : {}),
+    });
+  }
+  return out;
+}
+
+/** Extrai os registros de `client/registerCapability` / `client/unregisterCapability`. */
+export function readRegistrations(params: unknown): readonly Registration[] {
+  if (typeof params !== "object" || params === null) return [];
+  const list = (params as { readonly registrations?: unknown }).registrations;
+  if (!Array.isArray(list)) return [];
+
+  const out: Registration[] = [];
+  for (const item of list) {
+    if (typeof item !== "object" || item === null) continue;
+    const rec = item as {
+      readonly id?: unknown;
+      readonly method?: unknown;
+      readonly registerOptions?: unknown;
+    };
+    if (typeof rec.id !== "string" || typeof rec.method !== "string") continue;
+    out.push({
+      id: rec.id,
+      method: rec.method,
+      ...(rec.registerOptions !== undefined ? { registerOptions: rec.registerOptions } : {}),
+    });
+  }
+  return out;
+}
+
 // ── Erro do módulo LSP ──────────────────────────────────────────────────────────────────────
 
 export class LspError extends Error {

@@ -18,6 +18,7 @@ vi.mock("node:child_process", () => ({ spawn: mockSpawn }));
 
 import { DapManager } from "../dap-manager";
 import { MAX_EVALUATIONS_PER_WINDOW } from "../dap-manager";
+import { DapError } from "../dap-protocol";
 import {
   MAX_EVALUATION_VALUE_LENGTH,
   type DapServerConfig,
@@ -747,5 +748,146 @@ describe("DapManager", () => {
       vi.useRealTimers();
       manager.dispose();
     }
+  });
+
+  // ── Pré-launch: salvar o documento antes de depurar ──────────────────────────────────────
+  //
+  // O debuggee roda o **arquivo do disco**: com o buffer não salvo, o depurador para em
+  // um código diferente do que o editor mostra. O gancho `beforeLaunch` (injetado pelo
+  // `main`) faz a gravação **antes** do pedido `launch` — a ordem é o essencial.
+
+  it("o gancho de pré-launch é aguardado ANTES do launch (ordem, não só chamada)", async () => {
+    const order: string[] = [];
+    let releaseHook: (() => void) | undefined;
+    const gate = new Promise<void>((resolve) => {
+      releaseHook = resolve;
+    });
+    const beforeLaunch = vi.fn(async (program: string) => {
+      order.push(`hook:${program}`);
+      await gate; // o gancho só termina quando o teste liberar
+      order.push("hook:done");
+    });
+    const manager = new DapManager([config()], beforeLaunch);
+    // Grava **todos** os pedidos recebidos pelo adaptador, na ordem em que saem.
+    autoRespond(proc, undefined, (command) => {
+      order.push(`req:${command}`);
+      return undefined;
+    });
+
+    const started = manager.start(config(), { program: "/tmp/main.py" });
+
+    // O gancho foi chamado com o caminho do programa e está **pendente**:
+    await vi.waitFor(() => {
+      expect(beforeLaunch).toHaveBeenCalledTimes(1);
+    });
+    expect(beforeLaunch).toHaveBeenCalledWith("/tmp/main.py");
+    // Enquanto o gancho não resolve, **nenhum** pedido saiu para o adaptador.
+    expect(order).toEqual(["hook:/tmp/main.py"]);
+
+    releaseHook?.();
+    await expect(started).resolves.toBe("running");
+
+    // Ordem real: o gancho terminou **antes** do `launch` ser enviado.
+    expect(order).toContain("req:launch");
+    expect(order.indexOf("hook:done")).toBeLessThan(order.indexOf("req:launch"));
+    manager.dispose();
+  });
+
+  it("o gancho que falha impede o launch (nenhum request) e propaga o erro", async () => {
+    const requests: string[] = [];
+    const beforeLaunch = vi.fn(async () => {
+      throw new Error("disco cheio");
+    });
+    const manager = new DapManager([config()], beforeLaunch);
+    const states: string[] = [];
+    manager.onState((state) => states.push(state));
+    autoRespond(proc, undefined, (command) => {
+      requests.push(command);
+      return undefined;
+    });
+
+    const err = await manager.start(config(), { program: "/tmp/main.py" }).catch(
+      (e: unknown) => e,
+    );
+    expect(err).toBeInstanceOf(DapError);
+    expect((err as DapError).code).toBe("DAP_BEFORE_LAUNCH_FAILED");
+    expect((err as DapError).message).toContain("disco cheio");
+    // **Nenhum** pedido foi enviado ao adaptador (nem `initialize`, nem `launch`).
+    expect(requests).toEqual([]);
+    expect(requests).not.toContain("launch");
+    // Sem sessão zumbi: o estado final é `errored` (e a sessão pode ser parada).
+    expect(states).toEqual(["starting", "errored"]);
+    expect(manager.state).toBe("errored");
+    await expect(manager.stop()).resolves.toBeUndefined();
+    expect(manager.state).toBe("inactive");
+    manager.dispose();
+  });
+
+  it("o gancho que falha com DapError preserva o código original", async () => {
+    const beforeLaunch = vi.fn(async () => {
+      throw new DapError("DAP_SAVE_FAILED", "não foi possível salvar o arquivo");
+    });
+    const manager = new DapManager([config()], beforeLaunch);
+    await expect(manager.start(config(), { program: "/tmp/main.py" })).rejects.toMatchObject({
+      code: "DAP_SAVE_FAILED",
+    });
+    expect(manager.state).toBe("errored");
+    manager.dispose();
+  });
+
+  it("start sem gancho funciona igual (compatibilidade)", async () => {
+    const requests: string[] = [];
+    const manager = new DapManager([config()]);
+    autoRespond(proc, undefined, (command) => {
+      requests.push(command);
+      return undefined;
+    });
+    await expect(manager.start(config(), { program: "/tmp/main.py" })).resolves.toBe("running");
+    expect(requests).toContain("launch");
+    expect(manager.state).toBe("running");
+    manager.dispose();
+  });
+
+  it("o gancho não é chamado quando já existe sessão ativa", async () => {
+    const beforeLaunch = vi.fn(async () => undefined);
+    const manager = new DapManager([config()], beforeLaunch);
+    autoRespond(proc);
+    await expect(manager.start(config(), { program: "/tmp/main.py" })).resolves.toBe("running");
+    expect(beforeLaunch).toHaveBeenCalledTimes(1);
+
+    // A segunda tentativa é recusada **antes** do gancho (nenhuma sessão nova).
+    await expect(manager.start(config(), { program: "/tmp/main.py" })).rejects.toMatchObject({
+      code: "DAP_SESSION_ACTIVE",
+    });
+    expect(beforeLaunch).toHaveBeenCalledTimes(1);
+    manager.dispose();
+  });
+
+  it("o gancho não é chamado quando o alvo não tem programa", async () => {
+    const beforeLaunch = vi.fn(async () => undefined);
+    const manager = new DapManager([config()], beforeLaunch);
+    autoRespond(proc);
+    await expect(manager.start(config(), { program: "" })).resolves.toBe("running");
+    expect(beforeLaunch).not.toHaveBeenCalled();
+    manager.dispose();
+  });
+
+  it("setBeforeLaunch define e remove o gancho", async () => {
+    const manager = new DapManager([config()]);
+    const beforeLaunch = vi.fn(async () => undefined);
+    manager.setBeforeLaunch(beforeLaunch);
+    autoRespond(proc);
+    await expect(manager.start(config(), { program: "/tmp/main.py" })).resolves.toBe("running");
+    expect(beforeLaunch).toHaveBeenCalledTimes(1);
+
+    // Gancho removido ⇒ a próxima sessão não o executa.
+    manager.setBeforeLaunch(null);
+    await manager.stop();
+    const proc2 = createMockProcess();
+    mockSpawn.mockReturnValue(proc2);
+    autoRespond(proc2);
+    await expect(manager.start(config(), { program: "/tmp/main.py" })).resolves.toBe("running");
+    expect(beforeLaunch).toHaveBeenCalledTimes(1);
+    manager.dispose();
   });
 });

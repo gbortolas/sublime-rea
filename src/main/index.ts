@@ -13,15 +13,17 @@
  */
 import { execFile, execFileSync } from "node:child_process";
 import { existsSync, readdirSync, statSync } from "node:fs";
-import { readdir, readFile, stat } from "node:fs/promises";
+import type { Stats } from "node:fs";
+import { lstat, mkdir, readdir, readFile, realpath, stat, writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
-import { dirname, join, resolve } from "node:path";
+import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 import type { BrowserWindow as ElectronBrowserWindow } from "electron";
 
 import { createNodeFileSystem } from "../core/buffer";
 import { createEditorCore as composeEditorCore } from "../core/editor";
 import type { EditorCore, EditorCoreOptions } from "../core/editor";
+import { parseGitStatusBranch, parseGitStatusPorcelain } from "../core/git/git-status";
 import { indexFiles } from "../core/workspace/file-index";
 import type { DirectoryReader, FileIndexResult } from "../core/workspace/file-index";
 import { grepWorkspace } from "../core/workspace/grep";
@@ -32,11 +34,14 @@ import {
   isAbortError,
   parseIpcCancel,
   parseIpcRequest,
+  SearchInputError,
   toDisposable,
 } from "../shared";
 import type {
   Disposable,
   DocumentHandle,
+  GitCommitResult,
+  GitStatusResult,
   IpcEventEnvelope,
   IpcRequest,
   IpcResponse,
@@ -48,6 +53,7 @@ import type {
   SearchQuery,
   Selection,
   SelectionSet,
+  WorkspaceCreateFileResult,
 } from "../shared";
 import type { Event } from "../shared/events";
 import { LspManager } from "../core/lsp/lsp-manager";
@@ -591,11 +597,28 @@ const NULL_DEVICE: string = process.platform === "win32" ? "NUL" : "/dev/null";
 /** Timeout dos comandos `git` (o app não pode ficar pendurado por um repo lento). */
 const GIT_TIMEOUT_MS = 5_000;
 
+/**
+ * Timeout **exclusivo do `git commit`** (60 s).
+ *
+ * O commit é o comando mais lento (index grande, hooks, assinatura) e o SIGTERM do timeout
+ * genérico (5 s) matava o `git` **no meio da escrita do índice** ⇒ `.git/index.lock`
+ * órfão ⇒ **todo** `git` seguinte falha ("Unable to create index.lock: File exists").
+ * O app **não** apaga o lock (é estado do repo do usuário) — ele só dá mais tempo e
+ * **reporta** o erro (achado BAIXO).
+ */
+const GIT_COMMIT_TIMEOUT_MS = 60_000;
+
+/** Teto da mensagem de commit (64 KiB) — mensagem gigante é denial-of-service no IPC. */
+const GIT_COMMIT_MESSAGE_MAX = 64 * 1024;
+
 /** Teto de saída do `git blame --porcelain` (1 KB era apertado ⇒ `null` silencioso). */
 const GIT_BLAME_MAX_BUFFER = 64 * 1024;
 
 /** Teto de saída do `git diff` (64 KB cortava diffs médios ⇒ gutter sem faixas). */
 const GIT_DIFF_MAX_BUFFER = 1024 * 1024;
+
+/** Teto de saída do `git status --porcelain` (1 MiB — a lista de arquivos do repo). */
+const GIT_STATUS_MAX_BUFFER = 1024 * 1024;
 
 /**
  * Ambiente **mínimo** para o `git`.
@@ -607,7 +630,10 @@ const GIT_DIFF_MAX_BUFFER = 1024 * 1024;
  * - `GIT_CONFIG_NOSYSTEM=1` ⇒ ignora `/etc/gitconfig`;
  * - `GIT_CONFIG_GLOBAL=/dev/null` ⇒ ignora `~/.gitconfig` **e** o `XDG_CONFIG_HOME`;
  * - `GIT_CONFIG_COUNT=0` ⇒ descarta configs vindos de `GIT_CONFIG_KEY_*` do ambiente;
- * - `GIT_TERMINAL_PROMPT=0` ⇒ nunca pede credencial (nada de prompt travar o app).
+ * - `GIT_TERMINAL_PROMPT=0` ⇒ nunca pede credencial (nada de prompt travar o app);
+ * - `GIT_LITERAL_PATHSPECS=1` ⇒ **sem magic de pathspec** (achado MÉDIO): sem ela,
+ *   `git add -- ':/'` (ou `':!x.ts'`) stageia **o repositório inteiro** — o `--` só
+ *   bloqueia *opções*, não a *magic*.
  *
  * Toda outra variável `GIT_*` herdada (incluindo `GIT_EXTERNAL_DIFF` e `GIT_DIR`) é
  * **descartada**: o `git` só enxerga o que o app decide.
@@ -623,19 +649,35 @@ function sanitizedGitEnv(): NodeJS.ProcessEnv {
   env["GIT_CONFIG_GLOBAL"] = NULL_DEVICE;
   env["GIT_CONFIG_COUNT"] = "0";
   env["GIT_TERMINAL_PROMPT"] = "0";
+  env["GIT_LITERAL_PATHSPECS"] = "1";
   return env;
 }
 
 /**
  * Config que o `git` **não** pode deixar de obedecer (vai **antes** do subcomando):
  * - `core.pager=cat` ⇒ a saída vem inteira, sem pager;
- * - `core.hooksPath=<nulo>` ⇒ nenhum hook do repo é executado.
+ * - `core.hooksPath=<nulo>` ⇒ nenhum hook do repo é executado;
+ * - `core.fsmonitor=false` ⇒ o `core.fsmonitor=<script>` do `.git/config` **não** roda
+ *   (achado MÉDIO — RCE: o `git status` executava o script do repo);
+ * - `core.untrackedCache=false` ⇒ o cache de untracked (mesma família de config local)
+ *   fica desligado;
+ * - `commit.gpgsign=false` ⇒ o `commit.gpgsign=true` + `gpg.program=<script>` do
+ *   `.git/config` **não** assina (o `git commit` executava o script).
+ *
+ * O `-c` (escopo de comando) tem **precedência** sobre o `.git/config` do repo —
+ * verificado empiricamente (o marcador do `fsmonitor`/`gpg` não é criado).
  */
 const GIT_HARDENED_CONFIG: readonly string[] = [
   "-c",
   "core.pager=cat",
   "-c",
   `core.hooksPath=${NULL_DEVICE}`,
+  "-c",
+  "core.fsmonitor=false",
+  "-c",
+  "core.untrackedCache=false",
+  "-c",
+  "commit.gpgsign=false",
 ];
 
 /**
@@ -647,7 +689,7 @@ const GIT_HARDENED_CONFIG: readonly string[] = [
  */
 function runGit(
   args: readonly string[],
-  options: { readonly cwd?: string; readonly maxBuffer: number },
+  options: { readonly cwd?: string; readonly maxBuffer: number; readonly timeout?: number },
 ): Promise<string> {
   return new Promise<string>((resolvePromise, rejectPromise) => {
     execFile(
@@ -656,14 +698,20 @@ function runGit(
       {
         ...(options.cwd !== undefined ? { cwd: options.cwd } : {}),
         env: sanitizedGitEnv(),
-        timeout: GIT_TIMEOUT_MS,
+        timeout: options.timeout ?? GIT_TIMEOUT_MS,
         encoding: "utf-8",
         maxBuffer: options.maxBuffer,
         windowsHide: true,
       },
-      (error, stdout) => {
-        if (error !== null) rejectPromise(error);
-        else resolvePromise(stdout);
+      (error, stdout, stderr) => {
+        if (error !== null) {
+          // O `execFile` **não** põe o `stderr` no erro (só na mensagem) ⇒ ele é anexado
+          // aqui: é a mensagem do `git` que o painel de commit mostra ao usuário.
+          if (typeof stderr === "string" && stderr.length > 0) {
+            (error as { stderr?: string }).stderr = stderr;
+          }
+          rejectPromise(error);
+        } else resolvePromise(stdout);
       },
     );
   });
@@ -689,8 +737,29 @@ export const nodeDirectoryReader: DirectoryReader = {
   readFile: (path: string): Promise<string> => readFile(path, "utf8"),
 };
 
-/** Lê um arquivo de texto (o port do `grepWorkspace`). */
-async function readTextFile(path: string): Promise<string> {
+/**
+ * Lê um arquivo de texto (o port do `grepWorkspace`).
+ *
+ * ⚠️ **O teto é respeitado aqui** (o port recebe o `maxLength` — o `grep` do core):
+ * o `stat` vem **antes** da leitura ⇒ um arquivo grande demais é **recusado** (erro com o
+ * código `search.tooLarge`) **sem nunca ser materializado**. Sem isto, o `main` lia o
+ * arquivo **inteiro** (2 GB ⇒ OOM no processo principal) e só depois o core o descartava.
+ *
+ * O core trata o erro como "arquivo grande demais" (pula o arquivo e continua) e o
+ * `onError` traduz para a mensagem de aviso.
+ *
+ * ⚠️ O `size` do `stat` é em **bytes** e o teto é em **code units** do texto decodificado:
+ * um arquivo multibyte (acentos) pode ser recusado antes de o texto decodificado caber no
+ * teto — é o lado **conservador** (nunca lemos mais do que o teto).
+ */
+async function readTextFile(path: string, maxLength: number): Promise<string> {
+  const stats = await stat(path);
+  if (stats.size > maxLength) {
+    throw new SearchInputError(
+      "search.tooLarge",
+      `o arquivo "${path}" excede o teto de ${maxLength} code units por arquivo`,
+    );
+  }
   return readFile(path, "utf8");
 }
 
@@ -735,8 +804,19 @@ async function resolveWorkspaceRoots(roots: readonly string[]): Promise<string[]
 /** TTL do cache do índice (5s): o *Quick Open* e o *grep* reusam a mesma varredura. */
 export const WORKSPACE_INDEX_TTL_MS = 5_000;
 
+/**
+ * Uma varredura da workspace: o índice **e** as raízes **efetivas** que o `main` varreu
+ * (absolutas — o `path` de cada arquivo do índice é relativo a elas).
+ */
+export interface WorkspaceIndexSnapshot {
+  /** O índice (relativo + absoluto) dos arquivos. */
+  readonly index: FileIndexResult;
+  /** As raízes absolutas que o `main` expandiu e varreu (pode ser vazia). */
+  readonly roots: readonly string[];
+}
+
 /** Cache do índice por conjunto de raízes (o *grep* varre a árvore a cada tecla sem reindexar). */
-const workspaceIndexCache = new Map<string, { at: number; result: FileIndexResult }>();
+const workspaceIndexCache = new Map<string, { at: number; result: WorkspaceIndexSnapshot }>();
 
 /** Limpa o cache do índice da workspace (teste). */
 export function clearWorkspaceIndexCache(): void {
@@ -750,12 +830,25 @@ export function clearWorkspaceIndexCache(): void {
  * (que respeita o `.gitignore`, pula diretórios ruidosos e tem tetos).
  */
 export async function workspaceIndex(roots: readonly string[]): Promise<FileIndexResult> {
+  return (await workspaceIndexSnapshot(roots)).index;
+}
+
+/**
+ * O mesmo índice, mas **com as raízes efetivas** (as que o `main` expandiu e varreu).
+ *
+ * O renderer precisa delas para resolver um caminho absoluto (ex.: o "criar arquivo" do ⌘P
+ * precisa saber a raiz para confinear o path).
+ */
+export async function workspaceIndexSnapshot(
+  roots: readonly string[],
+): Promise<WorkspaceIndexSnapshot> {
   const resolved = await resolveWorkspaceRoots(roots);
   const key = resolved.join("\u0000");
   const cached = workspaceIndexCache.get(key);
   const now = Date.now();
   if (cached !== undefined && now - cached.at < WORKSPACE_INDEX_TTL_MS) return cached.result;
-  const result = await indexFiles(resolved, nodeDirectoryReader);
+  const index = await indexFiles(resolved, nodeDirectoryReader);
+  const result: WorkspaceIndexSnapshot = { index, roots: resolved };
   workspaceIndexCache.set(key, { at: now, result });
   // Cache pequeno: só as últimas raízes importam.
   if (workspaceIndexCache.size > 8) {
@@ -781,6 +874,312 @@ function optionalStringArray(value: unknown, method: string): readonly string[] 
   return out;
 }
 
+// ── Documentos abertos: as raízes candidatas (o "criar arquivo" e as operações de `git`) ────
+
+/**
+ * Documentos abertos por `core` (`handle → path absoluto`).
+ *
+ * O `EditorCore` **não** expõe a lista de documentos abertos (o `registry` não enumera) ⇒ o
+ * `main` mantém o próprio registro a partir do `document.open`/`document.close` do IPC.
+ */
+const openDocuments = new WeakMap<EditorCore, Map<DocumentHandle, string>>();
+
+/** Registra um documento aberto (raiz do `git` e confinamento do `createFile`). */
+function trackOpenDocument(core: EditorCore, handle: DocumentHandle, path: string): void {
+  let docs = openDocuments.get(core);
+  if (docs === undefined) {
+    docs = new Map<DocumentHandle, string>();
+    openDocuments.set(core, docs);
+  }
+  docs.set(handle, path);
+}
+
+/** Esquece um documento fechado (o `WeakMap` some com o `core`). */
+function untrackOpenDocument(core: EditorCore, handle: DocumentHandle): void {
+  openDocuments.get(core)?.delete(handle);
+}
+
+/**
+ * Caminho do documento **mais recentemente aberto** (o "ativo", na aproximação do `main`).
+ *
+ * O `EditorCore` guarda o documento ativo **internamente** (não expõe o handle) ⇒ o `main`
+ * usa o último aberto como aproximação (é o que o `git`/o *create file* precisam).
+ */
+function activeDocumentPath(core: EditorCore): string | undefined {
+  const docs = openDocuments.get(core);
+  if (docs === undefined || docs.size === 0) return undefined;
+  let last: string | undefined;
+  for (const path of docs.values()) last = path;
+  return last;
+}
+
+/**
+ * Raízes **conhecidas** da workspace — a **fonte de verdade** do confinamento.
+ *
+ * São as raízes que o **`main`** calcula:
+ * - a raiz de cada **documento aberto** ({@link findWorkspaceRoot} — a pasta que tem `.git`,
+ *   a mesma que o `workspace.files` expande);
+ * - **só quando não há documento aberto**, o `cwd` do processo (o *fallback*).
+ *
+ * ⚠️ O `root` que vem do **renderer** **não** entra aqui: ele é apenas **conferido**
+ * contra esta lista (e recusado se estiver fora) — é o que impede um renderer
+ * comprometido de ler/commitar em um repositório qualquer do disco (achado ALTO).
+ *
+ * ⚠️ O `cwd` é **fallback**, não constante: o app aberto pelo `.desktop` tem `cwd = $HOME`
+ * ⇒ incluí-lo sempre transformava o confinamento do `createFile` em "qualquer lugar sob
+ * `$HOME`" (achado MÉDIO).
+ */
+async function knownWorkspaceRoots(core: EditorCore): Promise<string[]> {
+  const roots: string[] = [];
+  const docs = openDocuments.get(core);
+  if (docs !== undefined) {
+    for (const path of docs.values()) {
+      const root = await findWorkspaceRoot(dirname(path));
+      if (!roots.includes(root)) roots.push(root);
+    }
+  }
+  if (roots.length === 0) {
+    const cwdRoot = await findWorkspaceRoot(resolve(process.cwd()));
+    if (!roots.includes(cwdRoot)) roots.push(cwdRoot);
+  }
+  return roots;
+}
+
+/** O caminho absoluto está **dentro** da raiz (ou é a própria raiz)? */
+function isInsideRoot(root: string, absolute: string): boolean {
+  if (absolute === root) return true;
+  const prefix = root.endsWith(sep) ? root : `${root}${sep}`;
+  return absolute.startsWith(prefix);
+}
+
+/** O path tem algum segmento `..`? (o `resolve` normalizaria e escaparia da raiz) */
+function hasParentSegment(path: string): boolean {
+  return path.split(/[\\/]+/).some((segment) => segment === "..");
+}
+
+/**
+ * O `realpath` do **ancestral existente mais próximo** do path pedido.
+ *
+ * O path pedido pode não existir ainda (é o `createFile`) ⇒ sobe até o primeiro ancestral
+ * que existe e devolve o `realpath` dele (a resolve de symlinks).
+ */
+async function realpathOfNearestExisting(absolute: string): Promise<string> {
+  let current = absolute;
+  for (;;) {
+    try {
+      return await realpath(current);
+    } catch (error) {
+      const code = errorCode(error, "");
+      if (code !== "ENOENT" && code !== "ENOTDIR") throw error;
+      const parent = dirname(current);
+      if (parent === current) return current;
+      current = parent;
+    }
+  }
+}
+
+/**
+ * Confina um path a uma das raízes conhecidas — **sem symlink** no caminho.
+ *
+ * A checagem **lexical** ({@link isInsideRoot}) não basta: um symlink dentro da raiz
+ * (`ws/link → /tmp/out`) leva a escrita para fora (achado ALTO — o `createFile` criava
+ * `/tmp/out/evil.sh`). Então:
+ * 1. o path tem de estar **dentro** de uma raiz conhecida (lexical);
+ * 2. **nenhum segmento** entre a raiz e o alvo pode ser symlink (`lstat`);
+ * 3. o `realpath` do ancestral existente mais próximo tem de estar dentro da raiz
+ *    (realpath) — o `..` já foi barrado antes do `resolve`.
+ *
+ * Devolve a raiz que hosts o path (o `relativePath` do resultado).
+ */
+async function assertPathInsideWorkspace(
+  absolute: string,
+  roots: readonly string[],
+): Promise<string> {
+  const host = roots.find((candidate) => isInsideRoot(candidate, absolute));
+  if (host === undefined) {
+    throw new IpcProtocolError("invalid-args", "path-outside-workspace");
+  }
+  // (2) nenhum segmento do caminho (entre a raiz e o alvo) pode ser symlink.
+  let current = host;
+  for (const segment of relative(host, absolute).split(sep)) {
+    if (segment.length === 0) continue;
+    current = join(current, segment);
+    let info: Stats;
+    try {
+      info = await lstat(current);
+    } catch (error) {
+      // Não existe (ou o pai não é diretório) ⇒ o resto do caminho também não existe.
+      const code = errorCode(error, "");
+      if (code === "ENOENT" || code === "ENOTDIR") break;
+      throw error;
+    }
+    if (info.isSymbolicLink()) {
+      throw new IpcProtocolError("invalid-args", "path-outside-workspace");
+    }
+  }
+  // (3) o `realpath` do ancestral existente tem de continuar dentro da raiz.
+  const realHost = await realpathOfNearestExisting(host);
+  const real = await realpathOfNearestExisting(absolute);
+  if (!isInsideRoot(realHost, real)) {
+    throw new IpcProtocolError("invalid-args", "path-outside-workspace");
+  }
+  return host;
+}
+
+// ── `git`: raiz do repositório, status e as operações de stage/commit/diff ─────────────────
+
+/** O `root` opcional do wire (`string` não vazia ⇒ `undefined`). */
+function optionalRoot(value: unknown, method: string): string | undefined {
+  if (value === undefined || value === null) return undefined;
+  if (typeof value !== "string" || value.length === 0) {
+    throw new IpcProtocolError("invalid-args", `${method}: 'root' deve ser string não vazia`);
+  }
+  return value;
+}
+
+/**
+ * A raiz **canônica** de uma das raízes conhecidas: a do documento ativo (ou a 1ª).
+ */
+async function primaryKnownRoot(core: EditorCore, known: readonly string[]): Promise<string> {
+  const active = activeDocumentPath(core);
+  if (active !== undefined) {
+    const activeRoot = await findWorkspaceRoot(dirname(active));
+    if (known.includes(activeRoot)) return activeRoot;
+  }
+  const first = known[0];
+  if (first === undefined) {
+    throw new IpcProtocolError("invalid-args", "root-outside-workspace");
+  }
+  return first;
+}
+
+/**
+ * A raiz conhecida que **hosts** um path (a mais específica — o match exato vence).
+ *
+ * Repo aninhado (`/repo` e `/repo/sub` com `.git` nos dois) ⇒ a raiz **mais longa** que
+ * contém o path é a do repo de verdade.
+ */
+function hostRoot(known: readonly string[], absolute: string): string | undefined {
+  let best: string | undefined;
+  for (const candidate of known) {
+    if (!isInsideRoot(candidate, absolute)) continue;
+    if (candidate === absolute) return candidate;
+    if (best === undefined || candidate.length > best.length) best = candidate;
+  }
+  return best;
+}
+
+/**
+ * A raiz do repositório das operações de `git` — **sempre derivada no `main`**.
+ *
+ * - Com `root` do renderer: ele **não** é fonte de verdade — só é aceito se estiver
+ *   **dentro** de uma raiz conhecida ({@link knownWorkspaceRoots}); fora ⇒
+ *   `invalid-args` ("root-outside-workspace"). É isso que impede um renderer
+ *   comprometido de commitar/enumerar um repositório qualquer do disco (achado ALTO).
+ * - Sem `root`: a raiz do documento ativo (ou a 1ª raiz conhecida).
+ *
+ * A política é **uniforme**: `git.status`/`git.stage`/`git.unstage`/`git.stageAll`/
+ * `git.commit`/`git.diffText` passam todos por aqui.
+ */
+async function gitRootFor(core: EditorCore, root: string | undefined): Promise<string> {
+  const known = await knownWorkspaceRoots(core);
+  if (root === undefined) return primaryKnownRoot(core, known);
+  const absolute = resolve(root);
+  const host = hostRoot(known, absolute);
+  if (host === undefined) {
+    throw new IpcProtocolError("invalid-args", "root-outside-workspace");
+  }
+  // O `git` roda **na raiz conhecida** (nunca no path do renderer): os paths do status
+  // são relativos à raiz do repositório ⇒ o `cwd` tem de ser a raiz canônica.
+  return host;
+}
+
+/**
+ * `git status --porcelain=v1 -z --branch` na raiz → o resultado tipado do contrato.
+ *
+ * **Sem repositório** ⇒ lista vazia e `branch: null` (o painel mostra "sem repositório") —
+ * nunca derruba a promise. **Qualquer outra falha** (inclusive "a saída do `git` estourou o
+ * `maxBuffer`" — repo enorme) vira **erro**: antes, um repo grande devolvia "sem
+ * repositório" (mentira) e o painel jurava que o repo não era um repo (achado BAIXO).
+ */
+async function gitStatusAt(root: string): Promise<GitStatusResult> {
+  try {
+    const output = await runGit(
+      [
+        ...GIT_HARDENED_CONFIG,
+        "status",
+        "--porcelain=v1",
+        "-z",
+        "--branch",
+        "--untracked-files=all",
+      ],
+      { cwd: root, maxBuffer: GIT_STATUS_MAX_BUFFER },
+    );
+    return { branch: parseGitStatusBranch(output), entries: parseGitStatusPorcelain(output) };
+  } catch (error) {
+    if (isNotARepositoryError(error)) {
+      console.warn(`Scribe: "${root}" não é um repositório git`);
+      return { branch: null, entries: [] };
+    }
+    if (isGitOutputTooLarge(error)) {
+      throw new IpcProtocolError(
+        "git-failed",
+        "status do repositório grande demais (limite de saída excedido)",
+      );
+    }
+    throw new IpcProtocolError("git-failed", gitErrorMessage(error));
+  }
+}
+
+/** O `git` falhou porque o diretório **não é** um repositório (`exit 128`). */
+function isNotARepositoryError(error: unknown): boolean {
+  const stderr = (error as { stderr?: unknown }).stderr;
+  const text = typeof stderr === "string" && stderr.length > 0 ? stderr : messageOf(error);
+  return /not a git repository/i.test(text);
+}
+
+/** A saída do `git` estourou o `maxBuffer` (repo grande) — **não** é "sem repositório". */
+function isGitOutputTooLarge(error: unknown): boolean {
+  const code = errorCode(error, "");
+  return code === "ERR_CHILD_PROCESS_STDIO_MAXBUFFER" || code === "ENOBUFS";
+}
+
+/** O `git` foi interrompido pelo timeout (o commit pode ter deixado `index.lock`). */
+function isGitTimeout(error: unknown): boolean {
+  return (error as { killed?: unknown }).killed === true;
+}
+
+/** A mensagem do `git` (o `stderr` do `execFile`; sem ele, a mensagem do erro). */
+function gitErrorMessage(error: unknown): string {
+  const stderr = (error as { stderr?: unknown }).stderr;
+  if (typeof stderr === "string" && stderr.trim().length > 0) return stderr.trim();
+  const message = messageOf(error);
+  // Sem `stderr` anexado, o `execFile` monta "Command failed: <cmd>\n<stderr>" ⇒ o que o
+  // renderer precisa (a mensagem do `git`) é a parte de baixo.
+  if (message.startsWith("Command failed:")) {
+    const cut = message.indexOf("\n");
+    if (cut >= 0) {
+      const tail = message.slice(cut + 1).trim();
+      if (tail.length > 0) return tail;
+    }
+  }
+  return message;
+}
+
+/**
+ * Roda um `git` que **precisa** dar certo (stage/unstage/stageAll).
+ *
+ * A falha vira um `IpcProtocolError("git-failed", <mensagem do git>)` — o renderer mostra o
+ * motivo (sem repositório, path inválido, …) em vez de um erro genérico.
+ */
+async function runGitOrFail(args: readonly string[], root: string): Promise<void> {
+  try {
+    await runGit(args, { cwd: root, maxBuffer: GIT_STATUS_MAX_BUFFER });
+  } catch (error) {
+    throw new IpcProtocolError("git-failed", gitErrorMessage(error));
+  }
+}
+
 async function dispatchIpc(
   core: EditorCore,
   request: IpcRequest,
@@ -788,8 +1187,14 @@ async function dispatchIpc(
   signal: AbortSignal | undefined,
 ): Promise<unknown> {
   switch (request.method) {
-    case "document.open":
-      return core.openDocument(requireString(request.args[0], "document.open", "path"), signal);
+    case "document.open": {
+      const path = requireString(request.args[0], "document.open", "path");
+      const handle = await core.openDocument(path, signal);
+      // O `main` registra o documento aberto: é a **fonte das raízes** candidatas
+      // (o `createFile` e o `git` workam na raiz do documento ativo).
+      trackOpenDocument(core, handle, resolve(path));
+      return handle;
+    }
     case "document.openDialog": {
       if (deps.dialog === undefined) {
         throw new IpcProtocolError(
@@ -801,10 +1206,13 @@ async function dispatchIpc(
     }
     case "document.text":
       return core.documentText(requireHandle(request.args[0], "document.text"));
-    case "document.close":
+    case "document.close": {
       // Fecha o documento no core: o `didClose` do LSP sai por aqui (sem ele, o servidor
       // LSP **acumula** os documentos abertos).
-      return core.closeDocument(requireHandle(request.args[0], "document.close"));
+      const handle = requireHandle(request.args[0], "document.close");
+      untrackOpenDocument(core, handle);
+      return core.closeDocument(handle);
+    }
     case "document.revision":
       return core.revisionOf(requireHandle(request.args[0], "document.revision"));
     case "document.save": {
@@ -865,15 +1273,60 @@ async function dispatchIpc(
     }
     case "workspace.files": {
       const roots = optionalStringArray(request.args[0], "workspace.files") ?? [];
-      const index = await workspaceIndex(roots);
+      const snapshot = await workspaceIndexSnapshot(roots);
       return {
-        files: index.entries.map((entry) => ({
+        files: snapshot.index.entries.map((entry) => ({
           path: entry.path,
           absolutePath: entry.absolutePath,
         })),
-        truncated: index.truncated,
-        warnings: index.warnings,
+        truncated: snapshot.index.truncated,
+        warnings: snapshot.index.warnings,
+        // As raízes **efetivas** que o `main` varreu (absolutas): o renderer precisa delas
+        // para resolver um path absoluto (ex.: o "criar arquivo" do ⌘P).
+        roots: snapshot.roots,
       };
+    }
+    case "workspace.createFile": {
+      const raw = requireString(request.args[0], "workspace.createFile", "path");
+      if (raw.length === 0 || raw.includes("\0")) {
+        throw new IpcProtocolError(
+          "invalid-args",
+          "workspace.createFile: 'path' deve ser um caminho não vazio",
+        );
+      }
+      // **`..` é rejeitado antes do `resolve`**: o `resolve` normaliza o path e o escape da
+      // raiz viraria invisível (a checagem abaixo já é feita sobre o path resolvido).
+      if (hasParentSegment(raw)) {
+        throw new IpcProtocolError("invalid-args", "path-outside-workspace");
+      }
+      const absolute = resolve(raw);
+      // **Confinamento**: o path tem de estar dentro de uma das raízes **conhecidas**
+      // (a raiz dos documentos abertos; o `cwd` só como fallback) **e** nenhum segmento
+      // do caminho pode ser symlink (a checagem lexical sozinha deixa o symlink
+      // `ws/link → /tmp/out` escrever fora — achado ALTO).
+      const roots = await knownWorkspaceRoots(core);
+      const root = await assertPathInsideWorkspace(absolute, roots);
+      // O diretório é criado **depois** da validação (e reconferido depois do `mkdir`:
+      // o `mkdir` recursivo é o instante em que um symlink trocado no caminho escaparia).
+      await mkdir(dirname(absolute), { recursive: true });
+      await assertPathInsideWorkspace(dirname(absolute), roots);
+      let created = true;
+      try {
+        // `flag: "wx"` ⇒ falha se o arquivo **já existe** (nunca sobrescreve).
+        await writeFile(absolute, "", { encoding: "utf8", flag: "wx" });
+      } catch (error) {
+        if (errorCode(error, "") === "EEXIST") {
+          created = false;
+        } else {
+          throw error;
+        }
+      }
+      const result: WorkspaceCreateFileResult = {
+        path: absolute,
+        created,
+        relativePath: relative(root, absolute),
+      };
+      return result;
     }
     case "search.files": {
       const query = requireString(request.args[0], "search.files", "query");
@@ -889,6 +1342,10 @@ async function dispatchIpc(
         ...(options.maxMatches !== undefined ? { maxMatches: options.maxMatches } : {}),
         ...(options.maxFiles !== undefined ? { maxFiles: options.maxFiles } : {}),
         ...(options.ignoreAccents !== undefined ? { ignoreAccents: options.ignoreAccents } : {}),
+        // Regex (padrão cru) / case / binários — o mesmo contrato do find bar.
+        ...(options.regex !== undefined ? { regex: options.regex } : {}),
+        ...(options.caseSensitive !== undefined ? { caseSensitive: options.caseSensitive } : {}),
+        ...(options.includeBinary !== undefined ? { includeBinary: options.includeBinary } : {}),
         // Arquivo ilegível/diretório: pula e continua (o `grepWorkspace` já faz isso) — o
         // aviso vai para o log do main (o resultado não carrega ruído).
         onError: (path, error) => {
@@ -912,7 +1369,8 @@ async function dispatchIpc(
         }
         const path = await deps.dialog.showOpenDialog();
         if (path !== null) {
-          await core.openDocument(path, signal);
+          const handle = await core.openDocument(path, signal);
+          trackOpenDocument(core, handle, resolve(path));
         }
         return;
       }
@@ -1070,6 +1528,121 @@ async function dispatchIpc(
       } catch {
         // Sem repo/commit (ou `git` falhou) ⇒ **nenhum** range (o contrato manda lista vazia).
         return [];
+      }
+    }
+    // ── `git`: o painel de *Source Control* (status/stage/commit) ───────────────────────────
+    // **Sem shell, sempre**: o path e a mensagem de commit são **argumentos** (`argv`), nunca
+    // string de comando (é o precedente obrigatório depois do RCE via `git diff`).
+    case "git.status": {
+      const root = await gitRootFor(core, optionalRoot(request.args[0], "git.status"));
+      return gitStatusAt(root);
+    }
+    case "git.stage": {
+      const path = requireString(request.args[0], "git.stage", "path");
+      const root = await gitRootFor(core, optionalRoot(request.args[1], "git.stage"));
+      await runGitOrFail([...GIT_HARDENED_CONFIG, "add", "--", path], root);
+      return gitStatusAt(root);
+    }
+    case "git.unstage": {
+      const path = requireString(request.args[0], "git.unstage", "path");
+      const root = await gitRootFor(core, optionalRoot(request.args[1], "git.unstage"));
+      try {
+        // `git restore` é do git ≥ 2.23.
+        await runGit([...GIT_HARDENED_CONFIG, "restore", "--staged", "--", path], {
+          cwd: root,
+          maxBuffer: GIT_STATUS_MAX_BUFFER,
+        });
+      } catch (error) {
+        // Git antigo ⇒ o fallback é o `git reset` (se ele também falhar, o erro **original**
+        // do `restore` é o que sobe — o `reset` é só uma tentativa).
+        try {
+          await runGit([...GIT_HARDENED_CONFIG, "reset", "-q", "HEAD", "--", path], {
+            cwd: root,
+            maxBuffer: GIT_STATUS_MAX_BUFFER,
+          });
+        } catch {
+          throw new IpcProtocolError("git-failed", gitErrorMessage(error));
+        }
+      }
+      return gitStatusAt(root);
+    }
+    case "git.stageAll": {
+      const root = await gitRootFor(core, optionalRoot(request.args[0], "git.stageAll"));
+      await runGitOrFail([...GIT_HARDENED_CONFIG, "add", "-A", "--", "."], root);
+      return gitStatusAt(root);
+    }
+    case "git.commit": {
+      const message = requireString(request.args[0], "git.commit", "message");
+      // Teto + NUL: mensagem gigante é denial-of-service e o NUL quebra o `execFile`
+      // (o `spawn` recusa arg com NUL) — o erro sai **antes** do `git` (achado BAIXO).
+      if (message.length > GIT_COMMIT_MESSAGE_MAX) {
+        throw new IpcProtocolError(
+          "invalid-args",
+          `git.commit: mensagem acima de ${GIT_COMMIT_MESSAGE_MAX} caracteres`,
+        );
+      }
+      if (message.includes("\0")) {
+        throw new IpcProtocolError("invalid-args", "git.commit: mensagem inválida (contém NUL)");
+      }
+      const root = await gitRootFor(core, optionalRoot(request.args[1], "git.commit"));
+      try {
+        // A mensagem vai como **argumento** (`-m <mensagem>`) — nunca interpolada ⇒ uma
+        // mensagem que começa por `-` é **literal** (o `-m` consome o argumento seguinte).
+        await runGit([...GIT_HARDENED_CONFIG, "commit", "-m", message], {
+          cwd: root,
+          maxBuffer: GIT_STATUS_MAX_BUFFER,
+          // Timeout **maior e exclusivo** do commit: o SIGTERM do timeout genérico matava o
+          // `git` no meio da escrita do índice ⇒ `.git/index.lock` órfão (achado BAIXO).
+          timeout: GIT_COMMIT_TIMEOUT_MS,
+        });
+        const ok: GitCommitResult = { ok: true };
+        return ok;
+      } catch (error) {
+        // ⚠️ O ambiente é sanitizado (`GIT_CONFIG_GLOBAL=/dev/null`) ⇒ sem `user.name`/
+        // `user.email` globais o commit falha por **falta de identidade**. A mensagem do `git`
+        // é propagada (o `main` **não** inventa identidade).
+        const failed: GitCommitResult = {
+          ok: false,
+          error: isGitTimeout(error)
+            ? `tempo esgotado (${GIT_COMMIT_TIMEOUT_MS / 1000}s) — o commit foi interrompido; se o repositório ficou com .git/index.lock, remova-o`
+            : gitErrorMessage(error),
+        };
+        return failed;
+      }
+    }
+    case "git.diffText": {
+      const path = requireString(request.args[0], "git.diffText", "path");
+      const known = await knownWorkspaceRoots(core);
+      // Path **relativo** ⇒ relativo à raiz conhecida (é assim que o `git status` devolve
+      // os paths e o painel os repassa); path absoluto ⇒ é ele mesmo (normalizado).
+      const base = await primaryKnownRoot(core, known);
+      const absolute = isAbsolute(path) ? resolve(path) : resolve(base, path);
+      // **Confinamento**: o path tem de estar dentro de uma raiz **conhecida**. A raiz
+      // **nunca** é derivada do path do renderer (fazer isso deixava o `cwd` ser a raiz do
+      // repo **alheio** ⇒ o painel lia o conteúdo não commitado de qualquer repo do disco
+      // — achado ALTO).
+      const root = hostRoot(known, absolute);
+      if (root === undefined) {
+        throw new IpcProtocolError("invalid-args", "path-outside-workspace");
+      }
+      try {
+        // **Sem** `--unified=0`: o painel precisa do **contexto** das linhas.
+        // `--no-ext-diff --no-textconv` + config endurecido (o RCE do `diff.external`).
+        return await runGit(
+          [
+            ...GIT_HARDENED_CONFIG,
+            "diff",
+            "HEAD",
+            "--no-ext-diff",
+            "--no-textconv",
+            "--",
+            absolute,
+          ],
+          { cwd: root, maxBuffer: GIT_DIFF_MAX_BUFFER },
+        );
+      } catch {
+        // Sem repo/HEAD (ou `git` falhou) ⇒ diff vazio (o painel mostra "sem diff").
+        return "";
       }
     }
     case "dap.start": {
@@ -1443,6 +2016,9 @@ function optionalSearchFilesOptions(value: unknown): {
   readonly maxMatches?: number;
   readonly maxFiles?: number;
   readonly ignoreAccents?: boolean;
+  readonly regex?: boolean;
+  readonly caseSensitive?: boolean;
+  readonly includeBinary?: boolean;
 } {
   if (value === undefined || value === null) return {};
   if (typeof value !== "object") {
@@ -1454,6 +2030,9 @@ function optionalSearchFilesOptions(value: unknown): {
     maxMatches?: number;
     maxFiles?: number;
     ignoreAccents?: boolean;
+    regex?: boolean;
+    caseSensitive?: boolean;
+    includeBinary?: boolean;
   } = {};
   const roots = record["roots"];
   if (roots !== undefined) {
@@ -1468,12 +2047,14 @@ function optionalSearchFilesOptions(value: unknown): {
     }
     options[key] = field;
   }
-  const ignoreAccents = record["ignoreAccents"];
-  if (ignoreAccents !== undefined) {
-    if (typeof ignoreAccents !== "boolean") {
-      throw new IpcProtocolError("invalid-args", "search.files: 'ignoreAccents' deve ser booleano");
+  // Os booleanos seguem o mesmo padrão do `requireSearchQuery`: tipo errado ⇒ `invalid-args`.
+  for (const key of ["ignoreAccents", "regex", "caseSensitive", "includeBinary"] as const) {
+    const field = record[key];
+    if (field === undefined) continue;
+    if (typeof field !== "boolean") {
+      throw new IpcProtocolError("invalid-args", `search.files: '${key}' deve ser booleano`);
     }
-    options.ignoreAccents = ignoreAccents;
+    options[key] = field;
   }
   return options;
 }
@@ -1729,6 +2310,19 @@ export async function startMainProcess(): Promise<void> {
   core = await createEditorCore({
     packageRoots: packageRoots(app.getAppPath(), app.getPath("userData")),
   });
+
+  // ── DAP: salvar o documento **antes** de depurar ──────────────────────────────────────────
+  // O debuggee roda o arquivo **do disco**: com o buffer sujo, o depurador pararia num código
+  // diferente do que o editor mostra. O gancho roda **antes** do adaptador subir (o
+  // `DapManager` cuida do resto) e é um no-op quando o documento não está aberto.
+  dapManager.setBeforeLaunch(async (program: string) => {
+    const current = core;
+    if (current === null) return;
+    const handle = current.findHandleByUri(program);
+    if (handle === undefined) return;
+    await current.saveDocument(handle);
+  });
+
   ipcRegistration = registerIpcHandlers(core, ipcMain, events, {
     signals,
     dialog: fileDialog,

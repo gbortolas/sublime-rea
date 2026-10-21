@@ -4,6 +4,12 @@
  * A função é pura (só a ponte entra como parâmetro) ⇒ o teste não precisa de DOM nem de
  * Electron: o que se prova é a **composição** da lista (recentes → comandos → arquivos) e a
  * **degradação** quando o preload é antigo (sem `workspace.files`).
+ *
+ * ⚠️ **Contrato com a pontuação pelo caminho**: o item de arquivo carrega o **caminho
+ * completo** na `description` (relativo à raiz, com o prefixo da raiz no modo multi-root) e
+ * o *basename* no `label` — é assim que o *matching* (que mora em `quick-open.ts`) consegue
+ * pontuar pelo caminho. O item "criar arquivo" **não** vem daqui: ele é offercido pelo
+ * popup, a cada tecla (é o que depende da query).
  */
 import { describe, expect, it } from "vitest";
 
@@ -51,6 +57,39 @@ describe("Quick Open — a montagem dos itens", () => {
       [],
     );
     expect(items[0]?.payload).toEqual({ kind: "file", path: "/w/src/a.ts" });
+  });
+
+  it("a descrição do arquivo é o caminho COMPLETO (é o que a pontuação usa)", async () => {
+    const items = await collectQuickOpenItems(
+      {
+        listCommands: async () => ({ commands: [] }),
+        workspaceFiles: async () => ({
+          // No multi-root, o caminho vem prefixado com o nome da raiz.
+          files: [{ path: "proj/src/a.ts", absolutePath: "/w/proj/src/a.ts" }],
+          truncated: false,
+          warnings: [],
+        }),
+      },
+      [],
+    );
+    // O `label` é o basename (só o desempate); a `description` é o caminho (o protagonista).
+    expect(items[0]?.label).toBe("a.ts");
+    expect(items[0]?.description).toBe("proj/src/a.ts");
+  });
+
+  it("a montagem nunca gera o item 'criar' (é o popup que o offerta, a cada tecla)", async () => {
+    const items = await collectQuickOpenItems(
+      {
+        listCommands: async () => ({ commands: [] }),
+        workspaceFiles: async () => ({
+          files: [{ path: "src/a.ts", absolutePath: "/w/src/a.ts" }],
+          truncated: false,
+          warnings: [],
+        }),
+      },
+      [],
+    );
+    expect(items.some((item) => item.kind === "create")).toBe(false);
   });
 
   it("preload antigo (sem `workspace.files`) ⇒ só comandos e recentes", async () => {

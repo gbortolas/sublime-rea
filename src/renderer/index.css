@@ -494,6 +494,35 @@ textarea {
   outline-offset: 1px;
 }
 
+/*
+ * Toggles da busca (regex / case).
+ *
+ * ⚠️ O painel (`search-panel.ts`) escreve as cores **inline** (fundo, borda, cor do texto)
+ * — o CSS do renderer não vence o `style` do elemento. Aqui só entra o que ele **não**
+ * escreve: o anel do estado "ligado" (o `aria-pressed` liga a classe `is-active`) e o
+ * foco visível do teclado.
+ */
+.search-panel-toggles {
+  display: flex;
+  align-items: center;
+  flex: 0 0 auto;
+  gap: 2px;
+}
+
+.search-panel-toggle {
+  line-height: 1.4;
+  text-align: center;
+}
+
+.search-panel-toggle.is-active {
+  box-shadow: inset 0 0 0 1px var(--s-accent);
+}
+
+.search-panel-toggle:focus-visible {
+  outline: 2px solid var(--s-ring);
+  outline-offset: 1px;
+}
+
 .search-panel-close {
   flex: 0 0 auto;
   background: transparent;
@@ -559,6 +588,700 @@ textarea {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: pre;
+}
+
+/* ══ Painéis da workspace (explorador, outline, problemas, código, diff) ═══ */
+
+/*
+ * **Os 5 painéis novos** (explorador, outline, problemas, controle de código e diff) são
+ * montados em RUNTIME: cada módulo escreve o estilo **inline** (`style.cssText`) para montar
+ * a estrutura. O `style` inline vence qualquer regra de autor — então o CSS aqui entra em
+ * três papéis:
+ *
+ *   1. **Preencher as lacunas** que o inline não cobre (altura mínima de 24px, `position`,
+ *      `border-radius`, `overflow`, foco visível, scrollbar).
+ *   2. **Dar os estados** (hover / foco / seleção). Onde o inline bloquearia o estado é
+ *      preciso `!important` — é a única forma de sobrepor `style` inline (o mesmo truque
+ *      já usado nos overlays de runtime, mais abaixo neste arquivo).
+ *   3. **Fixar a linguagem visual**: mesmos tokens, mesma densidade, mesmos raios e a mesma
+ *      escala de z-index do painel de busca (`#search-panel-host`).
+ *
+ * **Cor:** nenhuma literal — só tokens `--s-*` e derivados em `color-mix(in srgb, …)`.
+ */
+
+/*
+ * **Cor de texto por severidade.** O token puro não serve para texto pequeno (11–12px) no
+ * tema claro: o `--s-warn` do tema claro fica em ≈4,2:1 sobre a superfície clara — abaixo de AA.
+ * Por isso o **texto** de severidade é um derivado — `color-mix(in srgb, <token semântico> 60%,
+ * var(--s-fg))`: o mix puxa a cor semântica na direção
+ * do texto do tema, o que **aumenta** o contraste nos DOIS temas (no claro o `fg` é escuro,
+ * no escuro é claro) — o pior caso (aviso no claro) fica em ≈7:1.
+ * O **ícone** (elemento gráfico, mínimo 3:1) usa o token puro.
+ */
+
+/* ── Explorer (árvore de arquivos) ─────────────────────────────────────────── */
+
+.explorer-tree {
+  /* O inline já põe `display:flex; flex-direction:column; min-height:0; height:100%` —
+     falta o corte do `overflow`: quem rola é a lista, não a sidebar. */
+  overflow: hidden;
+}
+
+.explorer-tree-head {
+  flex: none;
+  background: var(--s-sidebar);
+}
+
+.explorer-tree-filter {
+  /* Alvo de clique ≥ 24px (WCAG 2.5.8). */
+  min-height: 24px;
+}
+
+.explorer-tree-filter::placeholder {
+  color: var(--s-subtle);
+}
+
+.explorer-tree-filter:focus-visible {
+  outline: 2px solid var(--s-ring);
+  outline-offset: 1px;
+}
+
+.explorer-tree-list {
+  padding: var(--s-space-1) 0;
+}
+
+.explorer-tree-empty {
+  padding: var(--s-space-2);
+  color: var(--s-muted);
+  font-size: var(--s-fs-xs);
+}
+
+.explorer-tree-item {
+  position: relative;
+  min-height: 24px;
+  color: var(--s-muted);
+  font-size: var(--s-fs-md);
+}
+
+.explorer-tree-item:hover {
+  background: var(--s-hover) !important;
+  color: var(--s-fg) !important;
+}
+
+.explorer-tree-item:focus-visible {
+  outline: 2px solid var(--s-ring);
+  outline-offset: -2px;
+}
+
+.explorer-tree-selected {
+  background: var(--s-selected) !important;
+  color: var(--s-fg) !important;
+}
+
+/* Barra de acento do item selecionado (2px) — o marcador da casca. */
+.explorer-tree-selected::before {
+  content: "";
+  position: absolute;
+  left: 0;
+  top: 0;
+  bottom: 0;
+  width: 2px;
+  background: var(--s-accent);
+}
+
+.explorer-tree-dir .explorer-tree-label {
+  font-weight: 600;
+}
+
+/* ── Outline (estrutura do documento) ──────────────────────────────────────── */
+
+.outline-view {
+  overflow: hidden;
+}
+
+.outline-head {
+  flex: none;
+  background: var(--s-sidebar);
+}
+
+.outline-filter {
+  min-height: 24px;
+}
+
+.outline-filter::placeholder {
+  color: var(--s-subtle);
+}
+
+.outline-filter:focus-visible {
+  outline: 2px solid var(--s-ring);
+  outline-offset: 1px;
+}
+
+.outline-count {
+  color: var(--s-muted);
+  font-size: var(--s-fs-xs);
+  font-variant-numeric: tabular-nums;
+}
+
+.outline-list {
+  padding: var(--s-space-1) 0;
+}
+
+.outline-empty {
+  padding: var(--s-space-2);
+  color: var(--s-muted);
+  font-size: var(--s-fs-xs);
+}
+
+.outline-item {
+  position: relative;
+  min-height: 24px;
+  border-radius: var(--s-radius-sm);
+}
+
+.outline-item:hover {
+  background: var(--s-hover) !important;
+  color: var(--s-fg) !important;
+}
+
+.outline-item.selected {
+  background: var(--s-selected) !important;
+  color: var(--s-fg) !important;
+}
+
+/* Barra de acento do item selecionado (2px) — o marcador da casca. */
+.outline-item.selected::before {
+  content: "";
+  position: absolute;
+  left: 0;
+  top: 0;
+  bottom: 0;
+  width: 2px;
+  background: var(--s-accent);
+}
+
+.outline-item:focus-visible {
+  outline: 2px solid var(--s-ring);
+  outline-offset: -2px;
+}
+
+.outline-icon {
+  color: var(--s-subtle);
+}
+
+.outline-name {
+  color: var(--s-fg);
+}
+
+.outline-detail {
+  color: var(--s-subtle);
+  font-size: var(--s-fs-xs);
+}
+
+/* ── Problems (diagnósticos) ──────────────────────────────────────────────── */
+
+.problems-panel {
+  overflow: hidden;
+}
+
+.problems-panel-head {
+  flex: none;
+  background: var(--s-sidebar);
+}
+
+.problems-panel-title {
+  color: var(--s-fg);
+  font-weight: 600;
+}
+
+.problems-panel-counts {
+  gap: var(--s-space-1);
+}
+
+.problems-panel-close {
+  display: grid;
+  place-items: center;
+  min-width: 24px;
+  min-height: 24px;
+  padding: 0;
+  border-radius: var(--s-radius-sm);
+  color: var(--s-muted);
+}
+
+.problems-panel-close:hover {
+  background: var(--s-hover) !important;
+  color: var(--s-fg) !important;
+}
+
+.problems-panel-filter {
+  min-height: 24px;
+}
+
+.problems-panel-filter::placeholder {
+  color: var(--s-subtle);
+}
+
+.problems-panel-filter:focus-visible {
+  outline: 2px solid var(--s-ring);
+  outline-offset: 1px;
+}
+
+.problems-panel-list {
+  padding: var(--s-space-1) 0;
+}
+
+.problems-panel-empty {
+  padding: var(--s-space-2);
+  color: var(--s-muted);
+  font-size: var(--s-fs-xs);
+}
+
+/* Chip de contagem por severidade (o "12" ao lado do título). */
+.problems-count {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 18px;
+  font-variant-numeric: tabular-nums;
+}
+
+.problems-count--error {
+  color: color-mix(in srgb, var(--s-error) 60%, var(--s-fg));
+  background: color-mix(in srgb, var(--s-error) 12%, transparent);
+}
+
+.problems-count--warning {
+  color: color-mix(in srgb, var(--s-warn) 60%, var(--s-fg));
+  background: color-mix(in srgb, var(--s-warn) 12%, transparent);
+}
+
+.problems-count--info {
+  color: color-mix(in srgb, var(--s-info) 60%, var(--s-fg));
+  background: color-mix(in srgb, var(--s-info) 12%, transparent);
+}
+
+/* "Dica": não existe `--s-hint` — uma dica é neutra, então ela fica no degrau `--s-muted`. */
+.problems-count--hint {
+  color: var(--s-muted);
+  background: var(--s-hover);
+}
+
+.problems-count--total {
+  color: var(--s-muted);
+}
+
+.problems-group,
+.problems-group-items {
+  list-style: none;
+}
+
+.problems-group-head {
+  min-height: 24px;
+  border-radius: var(--s-radius-sm);
+}
+
+.problems-group-head:hover {
+  background: var(--s-hover) !important;
+}
+
+.problems-group-head:focus-visible {
+  outline: 2px solid var(--s-ring);
+  outline-offset: -2px;
+}
+
+/* Marcador do grupo (aberto/fechado) — o triângulo antes do nome do arquivo. */
+.problems-group-head::before {
+  content: "▾";
+  flex: none;
+  width: 1em;
+  color: var(--s-muted);
+  font-size: var(--s-fs-xs);
+}
+
+.problems-group--collapsed .problems-group-head::before {
+  content: "▸";
+}
+
+.problems-group-name {
+  color: var(--s-fg);
+}
+
+.problems-group--collapsed .problems-group-name {
+  color: var(--s-muted);
+}
+
+.problems-group-count {
+  color: var(--s-muted);
+  font-variant-numeric: tabular-nums;
+}
+
+.problems-item-button {
+  min-height: 24px;
+  border-radius: var(--s-radius-sm);
+  color: var(--s-fg-muted);
+}
+
+.problems-item-button:hover {
+  background: var(--s-hover) !important;
+  color: var(--s-fg) !important;
+}
+
+.problems-item-button:focus-visible {
+  outline: 2px solid var(--s-ring);
+  outline-offset: -2px;
+}
+
+.problems-item-icon {
+  color: var(--s-muted);
+}
+
+.problems-item-icon--error {
+  color: var(--s-error);
+}
+
+.problems-item-icon--warning {
+  color: var(--s-warn);
+}
+
+.problems-item-icon--info {
+  color: var(--s-info);
+}
+
+.problems-item-icon--hint {
+  color: var(--s-muted);
+}
+
+.problems-item-severity--error {
+  color: color-mix(in srgb, var(--s-error) 60%, var(--s-fg));
+}
+
+.problems-item-severity--warning {
+  color: color-mix(in srgb, var(--s-warn) 60%, var(--s-fg));
+}
+
+.problems-item-severity--info {
+  color: color-mix(in srgb, var(--s-info) 60%, var(--s-fg));
+}
+
+.problems-item-severity--hint {
+  color: var(--s-muted);
+}
+
+.problems-item-location {
+  color: var(--s-subtle);
+  font-family: var(--s-font-mono);
+  font-size: var(--s-fs-xs);
+}
+
+.problems-item-message {
+  color: var(--s-fg);
+}
+
+.problems-item-source {
+  color: var(--s-subtle);
+  font-size: var(--s-fs-xs);
+}
+
+/* ── Source control (controle de código) ──────────────────────────────────── */
+
+.source-control {
+  overflow: hidden;
+}
+
+.source-control-head {
+  flex: none;
+  background: var(--s-sidebar);
+}
+
+.source-control-branch {
+  color: var(--s-fg);
+}
+
+.source-control-count {
+  color: var(--s-muted);
+  font-size: var(--s-fs-xs);
+  font-variant-numeric: tabular-nums;
+}
+
+.source-control-stage-all {
+  min-height: 24px;
+  border-radius: var(--s-radius-sm);
+}
+
+.source-control-stage-all:hover {
+  background: var(--s-hover) !important;
+  color: var(--s-fg) !important;
+}
+
+.source-control-commit {
+  flex: none;
+}
+
+.source-control-message {
+  min-height: 24px;
+}
+
+.source-control-message::placeholder {
+  color: var(--s-subtle);
+}
+
+.source-control-message:focus-visible {
+  outline: 2px solid var(--s-ring);
+  outline-offset: 1px;
+}
+
+.source-control-commit-button {
+  min-height: 24px;
+}
+
+.source-control-commit-button:hover:not(:disabled) {
+  background: color-mix(in srgb, var(--s-accent) 85%, var(--s-fg)) !important;
+}
+
+/* Estado desabilitado (sem mensagem de commit): legível, mas inerte. */
+.source-control-commit-button:disabled {
+  background: var(--s-pressed) !important;
+  color: var(--s-disabled) !important;
+  cursor: default;
+}
+
+.source-control-filter {
+  flex: none;
+}
+
+.source-control-filter-input {
+  min-height: 24px;
+}
+
+.source-control-filter-input::placeholder {
+  color: var(--s-subtle);
+}
+
+.source-control-filter-input:focus-visible {
+  outline: 2px solid var(--s-ring);
+  outline-offset: 1px;
+}
+
+.source-control-list {
+  padding: var(--s-space-1) 0;
+}
+
+.source-control-empty {
+  padding: var(--s-space-2);
+  color: var(--s-muted);
+  font-size: var(--s-fs-xs);
+}
+
+.source-control-group-title {
+  color: var(--s-muted);
+  font-size: var(--s-fs-xs);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.source-control-row {
+  position: relative;
+  min-height: 24px;
+  border-radius: var(--s-radius-sm);
+}
+
+.source-control-row:hover {
+  background: var(--s-hover);
+  color: var(--s-fg);
+}
+
+.source-control-row[aria-selected="true"] {
+  background: var(--s-selected);
+  color: var(--s-fg);
+}
+
+/* Barra de acento do arquivo selecionado (2px) — o marcador da casca. */
+.source-control-row[aria-selected="true"]::before {
+  content: "";
+  position: absolute;
+  left: 0;
+  top: 0;
+  bottom: 0;
+  width: 2px;
+  background: var(--s-accent);
+}
+
+.source-control-path {
+  color: var(--s-fg);
+  font-family: var(--s-font-mono);
+  font-size: var(--s-fs-xs);
+}
+
+.source-control-status {
+  font-family: var(--s-font-mono);
+  font-size: var(--s-fs-xs);
+  font-weight: 600;
+}
+
+.source-control-action {
+  /* O inline fixa 20×20 — o `min-*` leva o alvo a 24px (WCAG 2.5.8). */
+  min-width: 24px;
+  min-height: 24px;
+  border-radius: var(--s-radius-sm);
+}
+
+.source-control-action:hover {
+  background: var(--s-hover) !important;
+  color: var(--s-fg) !important;
+}
+
+/*
+ * O erro do git (ex.: "Author identity unknown") — o mesmo tratamento dos chips de
+ * severidade do painel de problemas: fundo e texto no tom `--s-error`, nunca uma cor
+ * literal (o tema acompanha).
+ */
+.source-control-error {
+  margin: var(--s-space-1) var(--s-space-2);
+  padding: var(--s-space-1) var(--s-space-2);
+  border: 1px solid var(--s-error);
+  border-radius: var(--s-radius-sm);
+  background: color-mix(in srgb, var(--s-error) 12%, transparent);
+  color: var(--s-error);
+  font-size: var(--s-fs-xs);
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+/* ── Diff ──────────────────────────────────────────────────────────────────── */
+
+.diff-view {
+  overflow: hidden;
+}
+
+.diff-view-head {
+  flex: none;
+  background: var(--s-sidebar);
+}
+
+.diff-view-title {
+  color: var(--s-fg);
+  font-weight: 600;
+}
+
+.diff-view-stats {
+  color: var(--s-muted);
+  font-family: var(--s-font-mono);
+  font-size: var(--s-fs-xs);
+  font-variant-numeric: tabular-nums;
+}
+
+.diff-view-prev,
+.diff-view-next {
+  display: grid;
+  place-items: center;
+  min-width: 24px;
+  min-height: 24px;
+  padding: 0;
+  border-radius: var(--s-radius-sm);
+  color: var(--s-muted);
+}
+
+.diff-view-prev:hover,
+.diff-view-next:hover {
+  background: var(--s-hover) !important;
+  color: var(--s-fg) !important;
+}
+
+.diff-view-only-changes {
+  min-height: 24px;
+  color: var(--s-muted);
+  font-size: var(--s-fs-xs);
+}
+
+.diff-view-only-changes-input {
+  width: 14px;
+  height: 14px;
+  margin: 0;
+  accent-color: var(--s-accent);
+}
+
+.diff-view-close {
+  display: grid;
+  place-items: center;
+  min-width: 24px;
+  min-height: 24px;
+  padding: 0;
+  border-radius: var(--s-radius-sm);
+  color: var(--s-muted);
+}
+
+.diff-view-close:hover {
+  background: var(--s-hover) !important;
+  color: var(--s-fg) !important;
+}
+
+.diff-view-body {
+  background: var(--s-bg);
+}
+
+.diff-view-empty {
+  padding: var(--s-space-3);
+  color: var(--s-muted);
+  font-size: var(--s-fs-xs);
+}
+
+.diff-view-hunk {
+  margin: 0 0 var(--s-space-2) 0;
+}
+
+.diff-view-hunk-header {
+  min-height: 24px;
+  color: var(--s-muted);
+  font-family: var(--s-font-mono);
+  font-size: var(--s-fs-xs);
+}
+
+.diff-view-hunk-header:hover {
+  background: var(--s-hover) !important;
+  color: var(--s-fg) !important;
+}
+
+.diff-view-hunk-header:focus-visible {
+  outline: 2px solid var(--s-ring);
+  outline-offset: -2px;
+}
+
+.diff-view-line {
+  font-family: var(--s-font-mono);
+  font-size: var(--s-fs-xs);
+}
+
+/*
+ * **Linhas do diff:** `+` (verde) / `-` (vermelho) / contexto (neutro). O módulo já pinta o
+ * fundo e a cor da linha com tokens; aqui só se garante o **contraste AA do texto** — o token
+ * puro (`--s-success`/`--s-error`) fica em ≈4,2:1 sobre a **linha tingida** (o fundo da linha
+ * é o token misturado a 14% sobre a superfície), abaixo de AA para texto pequeno. O derivado
+ * (50% do token + 50% do `fg` do tema) fica entre ≈6,2:1 e ≈9,6:1 nos dois temas — o pior
+ * caso é a linha `-` no tema escuro.
+ */
+.diff-view-line-add {
+  color: color-mix(in srgb, var(--s-success) 50%, var(--s-fg)) !important;
+}
+
+.diff-view-line-del {
+  color: color-mix(in srgb, var(--s-error) 50%, var(--s-fg)) !important;
+}
+
+/* Hover da linha: uma camada translúcida por cima — o fundo tingido continua visível. */
+.diff-view-line:hover {
+  background-image: linear-gradient(var(--s-hover), var(--s-hover)) !important;
+}
+
+.diff-view-lineno {
+  color: var(--s-subtle);
+  font-family: var(--s-font-mono);
+  font-size: var(--s-fs-xs);
+  font-variant-numeric: tabular-nums;
+  user-select: none;
+}
+
+.diff-view-line-text {
+  font-family: var(--s-font-mono);
 }
 
 /* ══ Abas ══════════════════════════════════════════════════════════════════ */
@@ -1646,12 +2369,22 @@ textarea {
 /* ══ Scrollbars ═══════════════════════════════════════════════════════════ */
 
 #palette-results::-webkit-scrollbar,
-.sidebar-list::-webkit-scrollbar {
+.sidebar-list::-webkit-scrollbar,
+.explorer-tree-list::-webkit-scrollbar,
+.outline-list::-webkit-scrollbar,
+.problems-panel-list::-webkit-scrollbar,
+.source-control-list::-webkit-scrollbar,
+.diff-view-body::-webkit-scrollbar {
   width: 10px;
 }
 
 #palette-results::-webkit-scrollbar-thumb,
-.sidebar-list::-webkit-scrollbar-thumb {
+.sidebar-list::-webkit-scrollbar-thumb,
+.explorer-tree-list::-webkit-scrollbar-thumb,
+.outline-list::-webkit-scrollbar-thumb,
+.problems-panel-list::-webkit-scrollbar-thumb,
+.source-control-list::-webkit-scrollbar-thumb,
+.diff-view-body::-webkit-scrollbar-thumb {
   border: 3px solid transparent;
   border-radius: 6px;
   background-clip: padding-box;
@@ -1659,7 +2392,12 @@ textarea {
 }
 
 #palette-results::-webkit-scrollbar-thumb:hover,
-.sidebar-list::-webkit-scrollbar-thumb:hover {
+.sidebar-list::-webkit-scrollbar-thumb:hover,
+.explorer-tree-list::-webkit-scrollbar-thumb:hover,
+.outline-list::-webkit-scrollbar-thumb:hover,
+.problems-panel-list::-webkit-scrollbar-thumb:hover,
+.source-control-list::-webkit-scrollbar-thumb:hover,
+.diff-view-body::-webkit-scrollbar-thumb:hover {
   background-color: color-mix(in srgb, var(--s-fg) 36%, transparent);
 }
 

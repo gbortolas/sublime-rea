@@ -86,12 +86,48 @@ export interface CollapsibleRange {
   readonly isCollapsed: boolean;
 }
 
+/* ─────────────────────── regra única de rows (folding × soft wrap) ─────────────────────── */
+
+/**
+ * **REGRA ÚNICA DE ROWS** (vale para a cena `scene.ts` **e** para o índice `VisualRowIndex`):
+ *
+ * - uma linha **colapsada** (dentro de um bloco dobrado) **não é desenhada** e **não ocupa
+ *   row** — **0 rows**;
+ * - uma linha **visível** ocupa `N` rows (`N` = nº de segmentos de wrap; `1` sem soft wrap);
+ * - a **1ª** linha do bloco dobrado (a que fica visível, com o indicador `▸`) é uma linha
+ *   visível ⇒ conta normalmente.
+ *
+ * Consequências (as que o bug de "folding × soft wrap" viola):
+ * - `rowCount` = soma das rows das linhas **não** colapsadas;
+ * - as linhas **abaixo** da dobra **sobem** `N−1` rows (N = rows que a linha dobrada ocuparia);
+ * - `lineOfRow(row)` **nunca** devolve uma linha colapsada (ela não tem row).
+ *
+ * ⚠️ A regra tem de ser **a mesma** nos dois lados: se a cena desenhar N rows e o índice
+ * contar N+1, a contagem publicada (scroll/"line count") não bate com o texto desenhado.
+ *
+ * ── Como saber se uma linha está colapsada (a forma **canônica**) ──────────────────────────
+ *
+ * `isCollapsed(line)` é a **única** forma de perguntar "esta linha está colapsada?" — é
+ * barata (O(1)), idempotente e não depende do escopo (documento × faixa).
+ *
+ * ⚠️ **Por que importa**: `rowOfLine(linhaColapsada)` devolve a row que a linha **ocuparia**
+ * (a row da **próxima** linha visível — a colapsada ocupa 0 rows, mas a API de rows é
+ * numérica e não tem como devolver "nenhuma"). Um consumidor que chame `rowOfLine` sem
+ * perguntar antes `isCollapsed` **cai na linha seguinte** (é o que acontecia com a âncora
+ * de popup e com o ícone de diagnóstico).
+ *
+ * Os dois `rowOfLine` do módulo têm **escopos diferentes** (e estão documentados):
+ * - o do **índice** (`VisualRowIndex.rowOfLine`) — escopo **documento**: devolve a row
+ *   **absoluta**; para uma linha colapsada, a row que ela ocuparia;
+ * - o da **malha da faixa** (`VisualRowMap.rowOfLine`) — escopo **faixa**: devolve
+ *   `undefined` para uma linha colapsada (nela não há nada a desenhar).
+ */
+
 /**
  * Linhas **colapsadas** (folding) a partir dos ranges dobráveis.
  *
- * Uma linha colapsada **não é desenhada**, mas **reserva 1 row** — a mesma regra vale para
- * a cena (`scene.ts`) e para o índice (`VisualRowIndex`). Sem essa regra única, a contagem
- * de rows diverge entre os dois e o texto abaixo da dobra "salta" rows.
+ * Uma linha colapsada **não é desenhada** e **não ocupa row** (0 rows — a regra única acima).
+ * A 1ª linha do bloco dobrado **permanece visível** (é ela que recebe o indicador `▸`).
  */
 export function collapsedLinesOf(folding: readonly CollapsibleRange[] | undefined): ReadonlySet<number> {
   const collapsed = new Set<number>();
@@ -104,6 +140,30 @@ export function collapsedLinesOf(folding: readonly CollapsibleRange[] | undefine
   return collapsed;
 }
 
+/**
+ * Aplica o **folding** a um índice de rows e devolve o conjunto de linhas colapsadas.
+ *
+ * É o ponto de entrada do renderer: a contagem de rows (`rowCount`) só é correta **depois**
+ * que o folding chegou ao índice — por isso o renderer chama isto **antes** de publicar a
+ * contagem de rows (e antes de montar a cena).
+ *
+ * ⚠️ **Ordem**: publicar `rowCount` antes desta chamada ⇒ a contagem sai com as rows da
+ * linha dobrada ainda reservadas (a divergência de N−1 rows do bug "folding × soft wrap").
+ *
+ * - **idempotente**: chamar com o mesmo folding não invalida nada (`setCollapsedLines`
+ *   compara o conteúdo dos conjuntos);
+ * - **barata**: O(nº de linhas colapsadas) — nada é re-quebrado, nada é re-medido;
+ * - o único efeito observável é o estado do índice (que é justamente o objetivo).
+ */
+export function applyCollapsedLines(
+  index: VisualRowIndexLike | undefined,
+  folding: readonly CollapsibleRange[] | undefined,
+): ReadonlySet<number> {
+  const collapsed = collapsedLinesOf(folding);
+  index?.setCollapsedLines?.(collapsed);
+  return collapsed;
+}
+
 /** Opções de `buildVisualRowMap`. */
 export interface VisualRowMapOptions {
   /**
@@ -113,8 +173,9 @@ export interface VisualRowMapOptions {
    */
   readonly firstRow?: number;
   /**
-   * Linhas **colapsadas** (folding): não são desenhadas, mas reservam 1 row (compatível com o
-   * caminho sem wrap, onde a row de uma linha é o seu índice lógico).
+   * Linhas **colapsadas** (folding): não são desenhadas e **não ocupam row** (0 rows — a
+   * regra única de rows do render). As linhas seguintes da faixa **sobem** na mesma quantidade
+   * de rows que a linha colapsada ocuparia.
    */
   readonly collapsedLines?: ReadonlySet<number>;
 }
@@ -131,16 +192,20 @@ export interface VisualRowMap {
   readonly firstLine: number;
   /** Row visual da primeira linha lógica da faixa. */
   readonly firstRow: number;
-  /** Segmentos **desenháveis** de uma linha da faixa (vazio se a linha está colapsada/fora). */
+  /**
+   * Segmentos **desenháveis** de uma linha da faixa.
+   *
+   * Vazio se a linha está **colapsada** (folding: 0 rows — a regra única) ou fora da faixa.
+   */
   segmentsOf(line: number): readonly VisualRowSegment[];
   /**
-   * Segmentos de uma linha para o desenho de **ranges** (caret, seleção, busca).
+   * Row (primeira) de uma linha da faixa — `undefined` se a linha está **colapsada**
+   * (ela não tem row **na faixa** — não há nada a desenhar nela) ou fora da faixa.
    *
-   * Para uma linha **colapsada** (folding) devolve um segmento único cobrindo a linha inteira,
-   * na row reservada — assim caret/seleção/busca continuam visíveis como no modo sem wrap.
+   * ⚠️ Escopo **faixa**: o `rowOfLine` do **índice** (`VisualRowIndex`) tem escopo
+   * **documento** e devolve a row que a linha ocuparia (a da próxima visível) para uma
+   * colapsada. A forma **canônica** de saber se a linha está colapsada é `isCollapsed`.
    */
-  paintSegmentsOf(line: number): readonly VisualRowSegment[];
-  /** Row (primeira) de uma linha da faixa — a row reservada, se a linha está colapsada. */
   rowOfLine(line: number): number | undefined;
   /** Localiza um offset (coluna) dentro de uma linha da faixa. */
   locate(line: number, column: number): VisualRowInfo | undefined;
@@ -189,17 +254,12 @@ export function buildVisualRowMap(
   const meas: (text: string) => number = measure ?? ((): number => 0);
 
   const byLine = new Map<number, VisualRowSegment[]>();
-  const collapsedSegments = new Map<number, VisualRowSegment[]>();
   let row = firstRow;
 
   for (let line = first; line < last; line++) {
+    // Linha **colapsada** (folding): não é desenhada e **não ocupa row** (0 rows).
+    if (collapsed !== undefined && collapsed.has(line)) continue;
     const text = source.line(line);
-    if (collapsed !== undefined && collapsed.has(line)) {
-      // Linha colapsada: não é desenhada, mas reserva 1 row.
-      collapsedSegments.set(line, [{ row, segmentIndex: 0, start: 0, end: text.length, text }]);
-      row += 1;
-      continue;
-    }
     if (!wrap) {
       byLine.set(line, [{ row, segmentIndex: 0, start: 0, end: text.length, text }]);
       row += 1;
@@ -219,13 +279,7 @@ export function buildVisualRowMap(
     firstLine: first,
     firstRow,
     segmentsOf: (line: number): readonly VisualRowSegment[] => byLine.get(line) ?? EMPTY_SEGMENTS,
-    paintSegmentsOf: (line: number): readonly VisualRowSegment[] =>
-      byLine.get(line) ?? collapsedSegments.get(line) ?? EMPTY_SEGMENTS,
-    rowOfLine: (line: number): number | undefined => {
-      const segs = byLine.get(line);
-      if (segs !== undefined) return segs[0]?.row;
-      return collapsedSegments.get(line)?.[0]?.row;
-    },
+    rowOfLine: (line: number): number | undefined => byLine.get(line)?.[0]?.row,
     locate: (line: number, column: number): VisualRowInfo | undefined => {
       const segs = byLine.get(line);
       if (segs === undefined || segs.length === 0) return undefined;
@@ -246,11 +300,25 @@ export interface VisualRowIndexLike {
   /** Segmentos de uma linha (1 por row; a row de cada um é relativa à linha). */
   segmentsOf(line: number): readonly VisualRowSegment[];
   /**
-   * Declara as linhas colapsadas (folding) — o índice passa a reservar **1 row** para cada
-   * uma (a mesma regra da cena). Opcional: um índice que não sabe de folding funciona
-   * (a cena usa a contagem dele mesmo assim).
+   * Declara as linhas colapsadas (folding) — o índice passa a **não contar row** para cada
+   * uma delas (a regra única: linha colapsada = 0 rows). Opcional: um índice que não sabe
+   * de folding funciona (a cena usa a contagem dele mesmo assim).
    */
   setCollapsedLines?(lines: ReadonlySet<number> | undefined): void;
+  /**
+   * `true` se a linha está **colapsada** (folding) — logo, ela **não ocupa row** (0 rows).
+   *
+   * É a forma **canônica** de saber se uma linha está colapsada: barata (O(1)),
+   * idempotente e independente do escopo (documento × faixa).
+   *
+   * ⚠️ **Por que existe**: `rowOfLine(linhaColapsada)` devolve a row que a linha
+   * **ocuparia** (a da próxima visível) — quem só chama `rowOfLine` **cai na linha
+   * seguinte**. Quem precisa saber "esta linha está colapsada?" pergunta aqui.
+   *
+   * Opcional na interface (como `setCollapsedLines`): um índice que não sabe de folding
+   * funciona — a cena usa o próprio conjunto de colapsadas nesse caso.
+   */
+  isCollapsed?(line: number): boolean;
 }
 
 /**
@@ -267,7 +335,7 @@ export interface VisualRowIndexLike {
  * @param index Índice de rows (a fonte da contagem).
  * @param firstLine Primeira linha lógica da faixa.
  * @param count Nº de linhas da faixa.
- * @param collapsedLines Linhas colapsadas (folding) — reservam 1 row e não são desenhadas.
+ * @param collapsedLines Linhas colapsadas (folding) — **0 rows**, não são desenhadas.
  */
 export function buildVisualRowMapFromIndex(
   index: VisualRowIndexLike,
@@ -278,17 +346,13 @@ export function buildVisualRowMapFromIndex(
   const first = Math.max(0, firstLine);
   const last = first + Math.max(0, count);
   const byLine = new Map<number, VisualRowSegment[]>();
-  const collapsedSegments = new Map<number, VisualRowSegment[]>();
 
   for (let line = first; line < last; line++) {
+    // Linha **colapsada** (folding): 0 rows, não é desenhada. O conjunto de colapsadas é a
+    // **autoridade** aqui (o índice pode nem saber de folding).
+    if (collapsedLines !== undefined && collapsedLines.has(line)) continue;
     const base = index.rowOfLine(line);
     const segs = index.segmentsOf(line);
-    if (collapsedLines !== undefined && collapsedLines.has(line)) {
-      // Linha colapsada: não é desenhada, mas reserva a row do índice.
-      const text = segs[0]?.text ?? "";
-      collapsedSegments.set(line, [{ row: base, segmentIndex: 0, start: 0, end: text.length, text }]);
-      continue;
-    }
     const mapped: VisualRowSegment[] = [];
     for (const seg of segs) {
       mapped.push({
@@ -306,10 +370,7 @@ export function buildVisualRowMapFromIndex(
     firstLine: first,
     firstRow: index.rowOfLine(first),
     segmentsOf: (line: number): readonly VisualRowSegment[] => byLine.get(line) ?? EMPTY_SEGMENTS,
-    paintSegmentsOf: (line: number): readonly VisualRowSegment[] =>
-      byLine.get(line) ?? collapsedSegments.get(line) ?? EMPTY_SEGMENTS,
-    rowOfLine: (line: number): number | undefined =>
-      byLine.get(line)?.[0]?.row ?? collapsedSegments.get(line)?.[0]?.row,
+    rowOfLine: (line: number): number | undefined => byLine.get(line)?.[0]?.row,
     locate: (line: number, column: number): VisualRowInfo | undefined => {
       const segs = byLine.get(line);
       if (segs === undefined || segs.length === 0) return undefined;
@@ -397,7 +458,7 @@ export class VisualRowIndex {
   private readonly rowStarts: number[] = [0];
   /** Segmentos por linha (cacheados; no máximo `segmentCacheLimit` linhas). */
   private readonly segmentCache = new Map<number, readonly VisualRowSegment[]>();
-  /** Linhas colapsadas (folding) — reservam **1 row** (a mesma regra da cena). */
+  /** Linhas colapsadas (folding) — **0 rows** (a regra única de rows). */
   private collapsedLines: ReadonlySet<number> | undefined;
 
   /** Nº máximo de linhas com segmentos em cache (memória × simplicity). */
@@ -414,14 +475,14 @@ export class VisualRowIndex {
   }
 
   /**
-   * Declara as linhas **colapsadas** (folding) — cada uma delas passa a reservar **1 row**
-   * (a mesma regra do `scene.ts`).
+   * Declara as linhas **colapsadas** (folding) — cada uma delas passa a ocupar **0 rows**
+   * (a regra única: uma linha colapsada não é desenhada e não conta).
    *
    * Sem isso, a contagem de rows do índice diverge da cena quando há dobra: o texto abaixo
    * da dobra "sobe" (ou desce) rows e a barra de rolagem deixa de bater com o texto.
    *
    * Trocar o conjunto invalida o cache a partir da **primeira linha afetada** (as rows
-   * antes dela continuam válidas).
+   * antes dela continuam válidas). Chamar com o **mesmo** conjunto é um no-op (idempotente).
    */
   setCollapsedLines(lines: ReadonlySet<number> | undefined): void {
     const next = lines ?? EMPTY_COLLAPSED;
@@ -434,7 +495,16 @@ export class VisualRowIndex {
     if (Number.isFinite(first)) this.invalidate(first);
   }
 
-  /** Row visual da **primeira** row da linha lógica `line` (absolute no documento). */
+  /**
+   * Row visual da **primeira** row da linha lógica `line` (absolute no documento).
+   *
+   * ⚠️ Uma linha **colapsada** não tem row (0 rows): o valor devolvido é a row da **próxima**
+   * linha visível (a colapsada ocupa a mesma row que ela) — isto é, a row que a linha
+   * **ocuparia** se estivesse visível.
+   *
+   * Para saber se a linha está colapsada, use `isCollapsed(line)` (a forma **canônica**):
+   * só `rowOfLine` não diz nada — o número devolvido é o da linha seguinte.
+   */
   rowOfLine(line: number): number {
     const total = this.source.lineCount();
     const target = Math.max(0, Math.min(line, total));
@@ -442,12 +512,22 @@ export class VisualRowIndex {
     return this.rowStarts[target] ?? 0;
   }
 
-  /** Total de rows visuais do documento. */
+  /**
+   * Total de rows visuais do documento = soma das rows das linhas **não** colapsadas
+   * (as colapsadas ocupam 0 rows — a regra única).
+   */
   get rowCount(): number {
     return this.rowOfLine(this.source.lineCount());
   }
 
-  /** Linha lógica que contém a row visual `row`. */
+  /**
+   * Linha lógica que contém a row visual `row`.
+   *
+   * ⚠️ Uma linha **colapsada** não tem row ⇒ ela **nunca** é devolvida: quando a busca cai
+   * numa linha colapsada, ela avança até a próxima linha **visível** (que começa na mesma
+   * row — a colapsada ocupa 0 rows). Com isso, `lineOfRow(rowOfLine(L)) === L` para toda
+   * linha **visível** `L`.
+   */
   lineOfRow(row: number): number {
     const total = this.source.lineCount();
     this.ensureRows(total);
@@ -459,19 +539,34 @@ export class VisualRowIndex {
       if ((this.rowStarts[mid] ?? 0) <= row) lo = mid;
       else hi = mid - 1;
     }
-    return Math.min(lo, Math.max(0, total - 1));
+    // As linhas colapsadas (0 rows) compartilham a row com a linha visível seguinte ⇒ a
+    // busca avança até ela (a colapsada nunca "possui" uma row).
+    let line = lo;
+    while (line < total && this.isCollapsed(line)) line += 1;
+    if (line >= total) {
+      // Row fora do documento (ou documento terminando em colapsadas): a última linha
+      // **visível**.
+      line = total - 1;
+      while (line >= 0 && this.isCollapsed(line)) line -= 1;
+      if (line < 0) line = 0;
+    }
+    return line;
   }
 
-  /** Segmentos (com row) de uma linha. */
+  /**
+   * Segmentos (com row) de uma linha.
+   *
+   * Uma linha **colapsada** (folding) **não tem segmentos** (`[]`): ela não é desenhada e
+   * não ocupa row — a mesma regra da cena (`scene.ts`).
+   */
   segmentsOf(line: number): readonly VisualRowSegment[] {
     const cached = this.segmentCache.get(line);
     if (cached !== undefined) return cached;
     const text = this.source.line(line);
-    // Linha **colapsada** (folding): não é desenhada, mas reserva **1 row** — a mesma
-    // regra do `scene.ts` (é o que mantém a contagem de rows em acordo entre os dois).
-    const collapsed = this.collapsedLines !== undefined && this.collapsedLines.has(line);
-    const segs: VisualRowSegment[] =
-      this.wrapWidth > 0 && !collapsed
+    // Linha **colapsada** (folding): 0 segmentos ⇒ 0 rows (a regra única de rows).
+    const segs: VisualRowSegment[] = this.isCollapsed(line)
+      ? []
+      : this.wrapWidth > 0
         ? wrapLine(text, this.wrapWidth, this.measure).map((seg, i) => ({
             row: 0,
             segmentIndex: i,
@@ -480,8 +575,7 @@ export class VisualRowIndex {
             text: seg.text,
           }))
         : [{ row: 0, segmentIndex: 0, start: 0, end: text.length, text }];
-    if (this.segmentCache.size >= VisualRowIndex.segmentCacheLimit) this.segmentCache.clear();
-    this.segmentCache.set(line, segs);
+    this.cacheSegments(line, segs);
     return segs;
   }
 
@@ -519,6 +613,27 @@ export class VisualRowIndex {
       const next = (this.rowStarts[line] ?? 0) + segs.length;
       this.rowStarts.push(next);
     }
+  }
+
+  /**
+   * `true` se a linha está **colapsada** (folding) — logo, **não ocupa row** (0 rows).
+   *
+   * É a forma **canônica** de saber se uma linha está colapsada: **barata** (O(1) — o
+   * conjunto de colapsadas já está em cache), **idempotente** e sem efeito colateral
+   * (não invalida nada, não re-quebra nada).
+   *
+   * ⚠️ Use-a **antes** de `rowOfLine`: o `rowOfLine` de uma linha colapsada devolve a row
+   * que ela ocuparia (a da próxima visível) ⇒ quem só chama `rowOfLine` cai na linha
+   * seguinte.
+   */
+  isCollapsed(line: number): boolean {
+    return this.collapsedLines !== undefined && this.collapsedLines.has(line);
+  }
+
+  /** Cacheia os segmentos de uma linha (respeitando o limite de memória). */
+  private cacheSegments(line: number, segs: readonly VisualRowSegment[]): void {
+    if (this.segmentCache.size >= VisualRowIndex.segmentCacheLimit) this.segmentCache.clear();
+    this.segmentCache.set(line, segs);
   }
 }
 

@@ -4,6 +4,72 @@ Todas as mudanças notáveis neste projeto.
 
 ---
 
+## [0.7.0] — 2026-10-21
+
+### ✨ 5 features novas (o editor virou um IDE de verdade)
+
+- **🐛 Problems** — painel de **diagnósticos do LSP** agrupados por arquivo, com filtro, contagem
+  por severidade e "pular para o erro"; badge na status bar (`✖ 2 ⚠ 1`).
+- **📋 Outline** — **estrutura do documento** (símbolos do LSP) na lateral, com filtro, hierarquia
+  por profundidade e clique que move o caret; estado "sem servidor LSP" explícito.
+- **📁 Explorer** — **árvore de arquivos** da workspace, expansível, com filtro incremental e
+  clique que abre o arquivo.
+- **⑂ Source Control** — painel **Git** completo: status por arquivo (staged/unstaged/untracked/
+  conflito), **stage/unstage/stageAll**, **commit** com mensagem, branch atual e badge na status bar.
+- **🔀 Diff** — visualizador do **diff unificado** (working tree vs HEAD) com hunks navegáveis,
+  linhas `+`/`-` coloridas e "pular" que abre o arquivo na linha do diff.
+  A barra lateral virou um **workbench de seções** (estilo VS Code): Explorer · Outline ·
+  Source Control · Problems · Diff, uma por vez, com `aria-pressed` coerente.
+
+### 🧩 4 itens da fila do handoff
+
+- **🧩 DAP — salvar antes de depurar** — o debuggee roda o arquivo **do disco**: com buffer sujo
+  o depurador parava em código diferente do editor. Agora o `DapManager` tem um gancho
+  `beforeLaunch` (aguardado **antes** do `launch`; se falhar, **nenhum** processo sobe) e o
+  renderer faz **flush do lote → save → start**.
+- **🔍 Grep — regex, case, binários e acentos** — o padrão agora pode ser **regex** (com detecção
+  de padrões catastróficos que são **recusados** em vez de travar o app), case-sensitive, com
+  opção de binários; a dobra de acentos cobre **NFD** e bases não-ASCII (`ø`, `ł`, `ß`…) mantendo
+  a **invariante 1:1** (linha/coluna dos achados continuam válidas).
+- **⌘P — caminho completo + criar arquivo** — a pontuação passou a ser pelo **caminho** (dois
+  `main.ts` em pastas diferentes não empatam mais) e a query aceita **`/`** (`src/main` acha
+  `src/main.ts`); o item **"criar"** (`NOV`) nasce o arquivo **ao lado do documento ativo**.
+- **🖥️ Folding × soft wrap** — a linha colapsada agora ocupa **0 rows** (antes reservava rows e
+  desalinhava a contagem em N−1); o folding é aplicado **antes** de a contagem ser publicada e o
+  scroll é **reancorado** ao dobrar (o texto não salta mais).
+
+### 🔒 Segurança (superfícies novas fechadas)
+
+- **RCE via config local do repo** — `core.fsmonitor` (executado pelo `git status`) e
+  `commit.gpgsign`/`gpg.program` (executados pelo `git commit`) neutralizados; `GIT_LITERAL_PATHSPECS`
+  impede stage em massa (`:/`, `:!x`).
+- **Confinamento do Git** — o `root` do renderer **não** é mais fonte de verdade: o `main` deriva a
+  raiz e **rejeita** qualquer repo fora da workspace; `git.diffText` deixou de ler o conteúdo não
+  commitado de repositórios alheios.
+- **Symlink na criação de arquivo** — o confinamento passou a ser **realpath-based** (segmento por
+  segmento): um symlink dentro da raiz não escapa mais.
+- 10 testes de regressão novos (`test/git-security-regression.test.ts`).
+
+### 🐛 Correções que o E2E revelou
+
+- **O `pyright` travava** — o cliente LSP **ignorava requests servidor→cliente**: o pyright pedia
+  `workspace/configuration` e ficava bloqueado ⇒ em `.py` não havia símbolo, diagnóstico nem
+  hover. Agora todo request server→cliente é respondido (e método desconhecido ⇒ erro `-32601`,
+  **nunca** silêncio).
+- **Enter não inseria quebra de linha** — não dava para criar linhas; `Ctrl+A` não selecionava
+  tudo e `Ctrl+End` não movia o caret.
+- **Outline/Problems vazios no documento do boot** · **erro do grep não chegava à UI** ·
+  **1º clique no Explorer fechava a sidebar** · **race no status do Git** · squiggly de
+  diagnóstico desenhado na row errada dentro de uma dobra · "criar arquivo" com path absoluto
+  fora criava um espelho dentro da raiz.
+
+### 📈 Números
+
+- **1566 testes / 105 arquivos** (era 1176 / 94) · `typecheck` e `lint` limpos ·
+  E2E por CDP: 9/9 reverificado no app real.
+
+---
+
 ## [0.6.0] — 2026-10-21
 
 ### 🎨 Design system (a casca ficou elegante)

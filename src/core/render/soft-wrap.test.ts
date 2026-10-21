@@ -3,6 +3,7 @@
  */
 import { describe, expect, it } from "vitest";
 import {
+  applyCollapsedLines,
   buildVisualRowMap,
   buildVisualRowMapFromIndex,
   collapsedLinesOf,
@@ -186,17 +187,17 @@ describe("buildVisualRowMap", () => {
     expect(map.locate(1, 0)?.column).toBe(0);
   });
 
-  it("linha colapsada: reserva 1 row, não é desenhada, mas ainda recebe destaque", () => {
+  it("linha colapsada: 0 rows, não é desenhada e não tem nada a pintar", () => {
     const collapsed = new Set([1]);
     const map = buildVisualRowMap(sourceOf(lines), 0, lines.length, 100, measure, { collapsedLines: collapsed });
+    // A linha colapsada não é desenhada…
     expect(map.segmentsOf(1)).toHaveLength(0);
-    // A row reservada da linha colapsada é a mesma que ela ocuparia (1 row).
-    expect(map.rowOfLine(1)).toBe(1);
-    // A linha seguinte pula a row reservada.
-    expect(map.segmentsOf(2)[0]?.row).toBe(2);
-    // Mas o "paint" (caret/seleção/busca) ainda tem onde desenhar.
-    expect(map.paintSegmentsOf(1)).toHaveLength(1);
-    expect(map.paintSegmentsOf(1)[0]?.row).toBe(1);
+    // … e não tem row (a regra única: linha colapsada = 0 rows).
+    expect(map.rowOfLine(1)).toBeUndefined();
+    // A linha seguinte **sobe** (a colapsada ocuparia 3 rows).
+    expect(map.segmentsOf(2)[0]?.row).toBe(1);
+    // Caret/seleção/busca também não têm onde desenhar na linha colapsada.
+    expect(map.segmentsOf(1)).toHaveLength(0);
   });
 
   it("linha fora da faixa não tem segmentos", () => {
@@ -298,14 +299,13 @@ describe("VisualRowIndex — linhas colapsadas (folding)", () => {
   /** A linha 1 quebra em 3 rows (26 chars × 10px = 260px). */
   const lines = ["a", "b".repeat(26), "c"];
 
-  it("a linha colapsada reserva 1 row (igual à cena)", () => {
+  it("a linha colapsada ocupa 0 rows (a regra única)", () => {
     const index = new VisualRowIndex(sourceOf(lines), 100, measure);
     index.setCollapsedLines(new Set([1]));
-    // Linha 0 → row 0 · linha 1 (colapsada) → row 1 (1 row) · linha 2 → row 2.
-    expect(index.rowOfLine(1)).toBe(1);
-    expect(index.rowOfLine(2)).toBe(2);
-    expect(index.segmentsOf(1)).toHaveLength(1);
-    expect(index.rowCount).toBe(3);
+    // Linha 0 → row 0 · linha 1 (colapsada) → **0 rows** · linha 2 → row 1.
+    expect(index.rowOfLine(2)).toBe(1);
+    expect(index.segmentsOf(1)).toHaveLength(0);
+    expect(index.rowCount).toBe(2);
   });
 
   it("sem as colapsadas, a linha quebrada ocupa N rows", () => {
@@ -319,13 +319,224 @@ describe("VisualRowIndex — linhas colapsadas (folding)", () => {
     const index = new VisualRowIndex(sourceOf(lines), 100, measure);
     expect(index.rowOfLine(2)).toBe(4);
     index.setCollapsedLines(new Set([1]));
-    expect(index.rowOfLine(2)).toBe(2);
+    expect(index.rowOfLine(2)).toBe(1);
     // Idempotente: o mesmo conjunto não invalida nada.
     index.setCollapsedLines(new Set([1]));
-    expect(index.rowOfLine(2)).toBe(2);
+    expect(index.rowOfLine(2)).toBe(1);
     // Voltar a colapsar nada devolve a contagem original.
     index.setCollapsedLines(undefined);
     expect(index.rowOfLine(2)).toBe(4);
+  });
+
+  it("lineOfRow nunca devolve uma linha colapsada", () => {
+    const index = new VisualRowIndex(sourceOf(lines), 100, measure);
+    index.setCollapsedLines(new Set([1]));
+    // As rows do documento: linha 0 → row 0, linha 2 → row 1.
+    expect(index.rowCount).toBe(2);
+    expect(index.lineOfRow(0)).toBe(0);
+    expect(index.lineOfRow(1)).toBe(2); // a row 1 é a da linha 2 (a colapsada não tem row)
+  });
+
+  it("round-trip: lineOfRow(rowOfLine(L)) === L para as linhas visíveis", () => {
+    const index = new VisualRowIndex(sourceOf(lines), 100, measure);
+    index.setCollapsedLines(new Set([1]));
+    expect(index.lineOfRow(index.rowOfLine(0))).toBe(0);
+    expect(index.lineOfRow(index.rowOfLine(2))).toBe(2);
+  });
+
+  it("regressão: sem folding, tudo como antes", () => {
+    const index = new VisualRowIndex(sourceOf(lines), 100, measure);
+    expect(index.rowOfLine(0)).toBe(0);
+    expect(index.rowOfLine(1)).toBe(1);
+    expect(index.rowOfLine(2)).toBe(4);
+    expect(index.rowCount).toBe(5);
+    expect(index.lineOfRow(4)).toBe(2);
+  });
+});
+
+describe("VisualRowIndex — isCollapsed (a forma canônica de saber se a linha colapsou)", () => {
+  const lines = ["a", "b".repeat(26), "c"];
+
+  it("diz se a linha está colapsada (e só ela)", () => {
+    const index = new VisualRowIndex(sourceOf(lines), 100, measure);
+    expect(index.isCollapsed(0)).toBe(false);
+    expect(index.isCollapsed(1)).toBe(false);
+    index.setCollapsedLines(new Set([1]));
+    expect(index.isCollapsed(1)).toBe(true);
+    expect(index.isCollapsed(0)).toBe(false);
+    expect(index.isCollapsed(2)).toBe(false);
+  });
+
+  it("sem folding: nenhuma linha está colapsada", () => {
+    const index = new VisualRowIndex(sourceOf(lines), 100, measure);
+    expect(index.isCollapsed(0)).toBe(false);
+    expect(index.isCollapsed(1)).toBe(false);
+    // Nem depois de um `setCollapsedLines(undefined)`.
+    index.setCollapsedLines(new Set([1]));
+    index.setCollapsedLines(undefined);
+    expect(index.isCollapsed(1)).toBe(false);
+  });
+
+  it("é idempotente e barato (não invalida nem re-quebra nada)", () => {
+    const index = new VisualRowIndex(sourceOf(lines), 100, measure);
+    index.setCollapsedLines(new Set([1]));
+    const before = index.rowCount;
+    const segs = index.segmentsOf(2);
+    expect(index.isCollapsed(1)).toBe(true);
+    expect(index.isCollapsed(1)).toBe(true);
+    expect(index.rowCount).toBe(before);
+    expect(index.segmentsOf(2)).toBe(segs);
+  });
+
+  it("a regra unificada: rowOfLine(colapsada) = a row que ela ocuparia (a próxima visível)", () => {
+    const index = new VisualRowIndex(sourceOf(lines), 100, measure);
+    index.setCollapsedLines(new Set([1]));
+    // A linha 1 está colapsada ⇒ `rowOfLine` devolve a row que ela ocuparia — a da
+    // próxima linha visível (a 2, que está na row 1). Quem não perguntar `isCollapsed`
+    // **cai na linha seguinte**.
+    expect(index.isCollapsed(1)).toBe(true);
+    expect(index.rowOfLine(1)).toBe(index.rowOfLine(2));
+    expect(index.rowOfLine(1)).toBe(1);
+  });
+});
+
+describe("VisualRowIndex — dobra no fim do documento", () => {
+  /** A dobra pega as duas últimas linhas (3 e 4): a 2 é a última **visível**. */
+  const lines = ["a", "b", "c", "d", "e"];
+  const collapsed = new Set([3, 4]);
+
+  it("as linhas colapsadas do fim não contam row", () => {
+    const index = new VisualRowIndex(sourceOf(lines), 0, measure);
+    index.setCollapsedLines(collapsed);
+    // As linhas 0, 1 e 2 são visíveis ⇒ 3 rows.
+    expect(index.rowCount).toBe(3);
+    expect(index.rowOfLine(2)).toBe(2);
+  });
+
+  it("rowOfLine de uma colapsada do fim = a row que ela ocuparia (a última row)", () => {
+    const index = new VisualRowIndex(sourceOf(lines), 0, measure);
+    index.setCollapsedLines(collapsed);
+    // A linha 3 ocuparia a row 3 e a 4 também (0 rows cada uma) — a row 3 é a **última**
+    // row do documento colapsado (rowCount = 3 ⇒ as rows válidas são 0..2).
+    expect(index.rowOfLine(3)).toBe(3);
+    expect(index.rowOfLine(4)).toBe(3);
+    expect(index.isCollapsed(3)).toBe(true);
+    expect(index.isCollapsed(4)).toBe(true);
+  });
+
+  it("lineOfRow devolve a última linha visível (nunca uma colapsada)", () => {
+    const index = new VisualRowIndex(sourceOf(lines), 0, measure);
+    index.setCollapsedLines(collapsed);
+    expect(index.lineOfRow(0)).toBe(0);
+    expect(index.lineOfRow(1)).toBe(1);
+    expect(index.lineOfRow(2)).toBe(2);
+    // Row além do documento (ou a row que as colapsadas ocupariam): a última visível.
+    expect(index.lineOfRow(3)).toBe(2);
+    expect(index.lineOfRow(99)).toBe(2);
+    expect(index.isCollapsed(index.lineOfRow(3))).toBe(false);
+  });
+
+  it("round-trip: lineOfRow(rowOfLine(L)) === L para as linhas visíveis", () => {
+    const index = new VisualRowIndex(sourceOf(lines), 0, measure);
+    index.setCollapsedLines(collapsed);
+    for (const line of [0, 1, 2]) {
+      expect(index.lineOfRow(index.rowOfLine(line))).toBe(line);
+    }
+  });
+});
+
+describe("VisualRowIndex — várias dobras", () => {
+  /**
+   * 6 linhas: a 1 e a 4 quebram em 3 rows (26 chars × 10px) e estão **colapsadas**
+   * (as dobras 0..1 e 3..4) ⇒ sobram 4 rows visíveis (as linhas 0, 2, 3 e 5).
+   */
+  const lines = ["a", "b".repeat(26), "c", "d", "e".repeat(26), "f"];
+
+  it("a contagem soma só as linhas visíveis", () => {
+    const index = new VisualRowIndex(sourceOf(lines), 100, measure);
+    index.setCollapsedLines(new Set([1, 4]));
+    expect(index.rowCount).toBe(4);
+  });
+
+  it("rowOfLine: as colapsadas devolvem a row que ocupariam", () => {
+    const index = new VisualRowIndex(sourceOf(lines), 100, measure);
+    index.setCollapsedLines(new Set([1, 4]));
+    // Linhas visíveis: 0 → row 0 · 2 → row 1 · 3 → row 2 · 5 → row 3.
+    expect(index.rowOfLine(0)).toBe(0);
+    expect(index.rowOfLine(2)).toBe(1);
+    expect(index.rowOfLine(3)).toBe(2);
+    expect(index.rowOfLine(5)).toBe(3);
+    // As colapsadas (1 e 4) devolvem a row da próxima visível.
+    expect(index.rowOfLine(1)).toBe(index.rowOfLine(2));
+    expect(index.rowOfLine(4)).toBe(index.rowOfLine(5));
+    expect(index.isCollapsed(1)).toBe(true);
+    expect(index.isCollapsed(4)).toBe(true);
+  });
+
+  it("lineOfRow: cada row pertence a uma linha visível (nunca a uma colapsada)", () => {
+    const index = new VisualRowIndex(sourceOf(lines), 100, measure);
+    index.setCollapsedLines(new Set([1, 4]));
+    expect(index.lineOfRow(0)).toBe(0);
+    expect(index.lineOfRow(1)).toBe(2);
+    expect(index.lineOfRow(2)).toBe(3);
+    expect(index.lineOfRow(3)).toBe(5);
+    // Nenhuma delas é colapsada.
+    for (const row of [0, 1, 2, 3]) {
+      expect(index.isCollapsed(index.lineOfRow(row))).toBe(false);
+    }
+  });
+
+  it("round-trip nas linhas visíveis (com várias dobras)", () => {
+    const index = new VisualRowIndex(sourceOf(lines), 100, measure);
+    index.setCollapsedLines(new Set([1, 4]));
+    for (const line of [0, 2, 3, 5]) {
+      expect(index.lineOfRow(index.rowOfLine(line))).toBe(line);
+    }
+  });
+});
+
+describe("applyCollapsedLines (a ordem: folding **antes** de publicar a contagem)", () => {
+  /** A linha 1 quebra em 3 rows (26 chars × 10px = 260px) e está dentro da dobra. */
+  const lines = ["a", "b".repeat(26), "c"];
+  const folding = [{ startLine: 0, endLine: 1, isCollapsed: true }];
+
+  it("aplica o folding ao índice e devolve as linhas colapsadas", () => {
+    const index = new VisualRowIndex(sourceOf(lines), 100, measure);
+    const collapsed = applyCollapsedLines(index, folding);
+    expect([...collapsed]).toEqual([1]);
+    expect(index.rowCount).toBe(2);
+  });
+
+  it("a contagem publicada só bate com o desenhado **depois** do helper", () => {
+    const index = new VisualRowIndex(sourceOf(lines), 100, measure);
+    // ⚠️ Sem o helper, a contagem ainda não conhece a dobra (o bug de ordem: a linha dobrada
+    // de 3 rows ainda reservaria 3 rows ⇒ a contagem bate em N, mas o desenho ocupa N−1).
+    expect(index.rowCount).toBe(5);
+    // O helper (o que o renderer chama **antes** de publicar) alinha os dois.
+    applyCollapsedLines(index, folding);
+    expect(index.rowCount).toBe(2);
+  });
+
+  it("é idempotente (o mesmo folding não invalida nada)", () => {
+    const index = new VisualRowIndex(sourceOf(lines), 100, measure);
+    applyCollapsedLines(index, folding);
+    const before = index.rowOfLine(2);
+    applyCollapsedLines(index, folding);
+    applyCollapsedLines(index, folding);
+    expect(index.rowOfLine(2)).toBe(before);
+    expect(index.rowCount).toBe(2);
+  });
+
+  it("sem folding: o helper não muda nada", () => {
+    const index = new VisualRowIndex(sourceOf(lines), 100, measure);
+    const collapsed = applyCollapsedLines(index, undefined);
+    expect(collapsed.size).toBe(0);
+    expect(index.rowCount).toBe(5);
+  });
+
+  it("funciona sem índice (devolve só o conjunto de colapsadas)", () => {
+    const collapsed = applyCollapsedLines(undefined, folding);
+    expect([...collapsed]).toEqual([1]);
   });
 });
 
@@ -341,16 +552,22 @@ describe("buildVisualRowMapFromIndex", () => {
     expect(map.locate(1, 15)?.column).toBe(5);
   });
 
-  it("a linha colapsada não é desenhada, mas reserva a row do índice", () => {
+  it("a linha colapsada não é desenhada e não ocupa row", () => {
     const index = new VisualRowIndex(sourceOf(lines), 100, measure);
     index.setCollapsedLines(new Set([1]));
     const map = buildVisualRowMapFromIndex(index, 0, lines.length, new Set([1]));
     expect(map.segmentsOf(1)).toHaveLength(0);
-    expect(map.rowOfLine(1)).toBe(1);
-    // A linha seguinte pula a row reservada (a colapsada ocuparia 3 rows).
-    expect(map.segmentsOf(2)[0]?.row).toBe(2);
-    // O "paint" (caret/seleção/busca) ainda tem onde desenhar.
-    expect(map.paintSegmentsOf(1)).toHaveLength(1);
-    expect(map.paintSegmentsOf(1)[0]?.row).toBe(1);
+    // A linha colapsada não tem row (a regra única).
+    expect(map.rowOfLine(1)).toBeUndefined();
+    // A linha seguinte **sobe** (a colapsada ocuparia 3 rows).
+    expect(map.segmentsOf(2)[0]?.row).toBe(1);
+  });
+
+  it("o conjunto de colapsadas é a autoridade (mesmo sem o índice sabê-las)", () => {
+    // Um índice que **não** sabe de folding (sem `setCollapsedLines`) ainda não desenha a
+    // linha colapsada: a cena decide com o próprio conjunto.
+    const index = new VisualRowIndex(sourceOf(lines), 100, measure);
+    const map = buildVisualRowMapFromIndex(index, 0, lines.length, new Set([1]));
+    expect(map.segmentsOf(1)).toHaveLength(0);
   });
 });

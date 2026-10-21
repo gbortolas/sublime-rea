@@ -18,6 +18,7 @@ import {
   MAX_EVALUATIONS_PER_WINDOW,
   MAX_EVALUATION_LENGTH,
   truncateEvaluation,
+  type DapBeforeLaunch,
   type DapBreakpoint,
   type DapBreakpointSpec,
   type DapEvaluation,
@@ -40,6 +41,8 @@ export {
   MAX_CONCURRENT_EVALUATIONS,
   MAX_EVALUATIONS_PER_WINDOW,
 } from "../../shared/dap-contract";
+/** O gancho de pré-launch (contrato compartilhado) — re-exportado para quem implementa. */
+export type { DapBeforeLaunch } from "../../shared/dap-contract";
 import { DapClient } from "./dap-client";
 import { DapStdioTransport } from "./dap-transport";
 import { DapError } from "./dap-protocol";
@@ -71,6 +74,12 @@ const LAUNCH_RESPONSE_GRACE_MS = 2000;
 
 export class DapManager implements Disposable {
   private readonly configs = new Map<string, DapServerConfig>();
+
+  /**
+   * Gancho de pré-launch (opcional) — executado **antes** de qualquer pedido ao
+   * adaptador. Ver {@link DapBeforeLaunch}.
+   */
+  private beforeLaunch: DapBeforeLaunch | null;
 
   private client: DapClient | null = null;
   private transport: DapStdioTransport | null = null;
@@ -113,10 +122,27 @@ export class DapManager implements Disposable {
     readonly breakpoints: readonly DapBreakpoint[];
   }> = this.onBreakpointsEmitter.event;
 
-  constructor(configs: readonly DapServerConfig[]) {
+  /**
+   * @param configs Adaptadores conhecidos (roteados por extensão).
+   * @param beforeLaunch Gancho de pré-launch **opcional** — ver {@link DapBeforeLaunch}.
+   *   Também pode ser definido depois com {@link DapManager.setBeforeLaunch} (necessário
+   *   quando o `EditorCore` só existe **depois** do manager — a ordem do `main`).
+   */
+  constructor(configs: readonly DapServerConfig[], beforeLaunch?: DapBeforeLaunch) {
     for (const config of configs) {
       this.configs.set(config.name, config);
     }
+    this.beforeLaunch = beforeLaunch ?? null;
+  }
+
+  /**
+   * Define (ou remove, com `null`) o gancho de pré-launch.
+   *
+   * O gancho é **idempotente por responsabilidade de quem o implementa**: o
+   * `saveDocument` do `EditorCore` já é no-op quando o documento não está sujo.
+   */
+  setBeforeLaunch(hook: DapBeforeLaunch | null): void {
+    this.beforeLaunch = hook;
   }
 
   /** Estado atual da sessão. */
@@ -150,9 +176,13 @@ export class DapManager implements Disposable {
   }
 
   /**
-   * Inicia uma sessão de depuração: dispara o adaptador, faz o `initialize`, envia o pedido
-   * inicial (`launch`/`attach`), aguarda o evento `initialized`, envia os breakpoints
-   * desejados e finaliza com `configurationDone`.
+   * Inicia uma sessão de depuração: **executa o gancho de pré-launch** (salvar o
+   * documento — ver {@link DapBeforeLaunch}), dispara o adaptador, faz o `initialize`,
+   * envia o pedido inicial (`launch`/`attach`), aguarda o evento `initialized`, envia os
+   * breakpoints desejados e finaliza com `configurationDone`.
+   *
+   * O gancho roda **antes** de qualquer pedido ao adaptador: se ele falhar, **nenhum**
+   * `launch` é enviado, a sessão vai a `errored` e o erro é propagado.
    */
   async start(config: DapServerConfig, target: DapLaunchTarget): Promise<DapSessionState> {
     if (this.client !== null) {
@@ -162,6 +192,29 @@ export class DapManager implements Disposable {
     this.setState("starting");
     this.activeConfig = config;
     this.activeProgram = target.program;
+
+    // ── Pré-launch: o documento é salvo ANTES de o debuggee subir ──────────────────────────
+    // O debuggee roda o **arquivo do disco**: com o buffer não salvo, o depurador pararia
+    // em um código diferente do que o editor mostra. O gancho (injetado pelo `main`) faz
+    // essa gravação.
+    //
+    // A falha aqui é **limpa**: o gancho roda *antes* de qualquer coisa ser spawnada, então
+    // não há adaptador vivo, não há pedido `launch` enviado e não há sessão zumbi — o
+    // `start` apenas propaga o erro e a sessão vai a `errored`.
+    //
+    // ⚠️ **Sem** gancho não há `await` algum aqui: o fluxo de `start` fica **idêntico** ao
+    // de sempre (nenhum microtask extra) — quem já usa o manager não sente nada.
+    if (this.beforeLaunch !== null) {
+      try {
+        await this.runBeforeLaunch(target);
+      } catch (err) {
+        this.setState("errored");
+        this.teardownTransport();
+        throw err instanceof DapError
+          ? err
+          : new DapError("DAP_BEFORE_LAUNCH_FAILED", messageOf(err));
+      }
+    }
 
     const transport = new DapStdioTransport(
       config.spawn.command,
@@ -452,6 +505,19 @@ export class DapManager implements Disposable {
   }
 
   // ── Internos ──────────────────────────────────────────────────────────────────────────────
+
+  /**
+   * Executa o gancho de pré-launch (se houver) — **antes** de qualquer pedido ao adaptador.
+   *
+   * Só roda quando o alvo tem `program` (alvo sem programa não tem arquivo a salvar).
+   * O caminho é repassado **verbatim** (um caminho pode ter espaços nas pontas).
+   */
+  private async runBeforeLaunch(target: DapLaunchTarget): Promise<void> {
+    const hook = this.beforeLaunch;
+    if (hook === null) return;
+    if (target.program.trim().length === 0) return;
+    await hook(target.program);
+  }
 
   private requireClient(): DapClient {
     if (this.client === null) {

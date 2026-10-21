@@ -63,6 +63,32 @@ export interface DapLaunchTarget {
   readonly stopOnEntry?: boolean;
 }
 
+// ── Gancho de pré-launch (injeção no core) ─────────────────────────────────────────────────
+
+/**
+ * Gancho de **pré-launch** — executado pelo `DapManager` **antes** de enviar o pedido
+ * inicial (`launch`/`attach`) ao adaptador.
+ *
+ * **Por que existe:** o debuggee roda o **arquivo do disco**. Se o buffer do editor tem
+ * edições não salvas, o depurador para em um código **diferente** do que o editor
+ * mostra (e os breakpoints caem na linha errada). O gancho dá ao processo principal a
+ * chance de **salvar o documento** antes de o debuggee subir.
+ *
+ * **Contrato:**
+ * - recebe o caminho **absoluto** do programa a depurar (o `program` do alvo);
+ * - resolve ⇒ o pedido `launch`/`attach` pode ser enviado;
+ * - rejeita/lança ⇒ **nenhum** pedido `launch` é enviado, a sessão vai a `errored` e o
+ *   erro é propagado ao chamador.
+ *
+ * **Quem decide se há o que salvar:** o gancho. A implementação do Scribe usa o
+ * `saveDocument` do `EditorCore`, que já é **no-op** quando o documento não está sujo
+ * (o gancho é barato e idempotente).
+ *
+ * ⚠️ Isto é **injeção de dependência do core** — não é payload de IPC: o `main` injeta
+ * a implementação (o `EditorCore` do processo principal).
+ */
+export type DapBeforeLaunch = (program: string) => Promise<void>;
+
 // ── Adaptadores embutidos ─────────────────────────────────────────────────────────────────
 
 /**

@@ -1,10 +1,10 @@
 # HANDOFF — sublime-rea
 
 > **Documento de handoff entre sessões** (leia antes de retomar). Atualizado em **2026-10-21**.
-> Status: **🐛 varredura ✅ · ✨ 3+5 features ✅ · 🎨 design system ✅ · ✨ 3 features de última geração ✅ · 🐛 LSP de verdade ✅**<br>
-> Versão: **0.6.0** (AppImage gerado e verificado) · **1176 testes / 94 arquivos**<br>
-> Próximo: **fila aberta no BACKLOG** (DAP salvar-antes-de-depurar · snippets LSP · regex no grep ·
-> split editor · test explorer)
+> Status: **🐛 varredura ✅ · ✨ 3+5+5 features ✅ · 🎨 design system ✅ · ✨ 3 features de última geração ✅ · 🐛 LSP de verdade ✅**<br>
+> Versão: **0.7.0** (AppImage gerado e verificado) · **1585 testes / 108 arquivos**<br>
+> Próximo: **fila aberta no BACKLOG** (grep no worker · multi-root de verdade · split editor ·
+> test explorer · snippets LSP)
 
 ---
 
@@ -16,8 +16,8 @@
 > [`BACKLOG.md`](BACKLOG.md). Não peça contexto: ele está todo em `docs/`.
 
 **Estado em uma linha:** ambiente ✅ · binário-alvo **100% analisável** ✅ · Track A (API Python +
-IPC) ✅ · **FASE 1 FECHADA** · **FASE 2 FECHADA** · **FASE 3 FECHADA** · **App 0.6.0 pronto pra uso**
-(varredura de usabilidade · design system · 11 features · LSP/DAP/plugins sadios) · P2.4/Slices A-D ✅ ·
+IPC) ✅ · **FASE 1 FECHADA** · **FASE 2 FECHADA** · **FASE 3 FECHADA** · **App 0.7.0 pronto pra uso**
+(varredura de usabilidade · design system · **20 features** · LSP/DAP/plugins sadios) · P2.4/Slices A-D ✅ ·
 P2.4b/c ✅ · P2.5 (salvar) ✅ · P3.10/11/12 (dívidas) ✅ · P1#1 (seleção) ✅ · P1#2 (gutter) ✅ ·
 **P1#3 (scrollbar) ✅ · P1#4 (find bar toggles) ✅ · P2#5 (múltiplos cursores) ✅** ·
 **P2#7 (drag & drop) ✅ · Infra (GitHub repo + CI/Release) ✅ · P2#6 (abas) ✅ · P2#8 (temas) ✅** ·
@@ -42,6 +42,12 @@ no minimap — "lupa" estilo VS Code ✅** ·
 **📝 Snippets avançados (P4#18b) — placeholders aninhados, ciclagem de tab stops (Tab/Shift+Tab), espelhos ao vivo e transformações `${N/re/fm/fl}` ✅** ·
 **🧩 DAP — expansões (P4#27): breakpoint condicional (`condition`), watch expressions, hover de valor na parada e caret seguindo a parada ✅** ·
 **🐛 3 bugs de contrato (paleta de comandos vazia, deadlock do `launch` no DAP, LSP quebrando a abertura de arquivos) ✅**<br>
+**✨ 0.7.0 — 5 features novas (🐛 Problems · 📋 Outline · 📁 Explorer · ⑂ Source Control · 🔀 Diff) +
+workbench de seções na lateral + 4 itens da fila (🧩 DAP salvar-antes-de-depurar · 🔍 Grep
+regex/case/binários/acento · ⌘P caminho completo + criar arquivo · 🖥️ Folding × soft wrap) +
+🔒 4 correções de segurança (RCE via `core.fsmonitor`/`gpgsign`, confinamento do Git, symlink na
+criação de arquivo) + 🐛 o `pyright` travava (o cliente LSP ignorava requests servidor→cliente) +
+🐛 Enter não inseria quebra de linha**<br>
 
 **✅ Passo operacional resolvido (2026-10-16).** O `setup.py` foi rodado e o MCP `rea` foi relançado
 **já com `REA_GHIDRA_STARTUP_TIMEOUT_MS=900000`** (confirmado em `/proc/*/environ`) — **não** é mais
@@ -57,31 +63,32 @@ Sem o deadline maior, `open_binary`/`analyze` **via MCP** volta a estourar os 33
 
 **Próximas tarefas:**
 
-> A sessão de 2026-10-21 (dia + noite) fechou: **varredura de usabilidade** (7 bugs + o crash que
-> matava o app), **3 features** (lupa colorida, multi-cursor com undo por cursor, snippets com
-> escolhas + variáveis TM), **5 features** (undo por documento, logpoints/hitCondition, soft wrap em
-> rows visuais, Ctrl+D, snippets de pacote), uma **auditoria com 5 agentes** (16 bugs corrigidos,
-> incluindo um **RCE** via `git diff`), o **design system** da casca (contraste AA, tema claro com
-> degraus) e **3 features de última geração** (⌘P/Quick Open, sticky scroll, grep na workspace) —
-> e, no caminho, o **LSP de verdade** (o TypeScript estava **sem diagnóstico nenhum**).
-> Detalhes: [§🐛 Varredura](#-varredura-de-usabilidade-2026-10-21), [§✨ 5 features](#-5-features-2026-10-21-madrugada),
-> [§🎨 Design system](#-design-system--3-features-de-última-geração-2026-10-21-noite).
+> A sessão de 2026-10-21 (noite, **0.7.0**) fechou: **5 features novas** (🐛 Problems · 📋 Outline ·
+> 📁 Explorer · ⑂ Source Control · 🔀 Diff) + o **workbench de seções** da lateral, **4 itens da fila**
+> (🧩 DAP salvar-antes-de-depurar · 🔍 Grep regex/case/binários/acento · ⌘P caminho completo + criar
+> arquivo · 🖥️ Folding × soft wrap), **4 correções de segurança** (RCE via `core.fsmonitor` e
+> `commit.gpgsign`, confinamento do `root`/path do Git, symlink na criação de arquivo) e **3 bugs
+> que só o E2E revelou** (o `pyright` travava — o cliente LSP ignorava requests servidor→cliente ·
+> Enter não inseria quebra de linha · Outline/Problems vazios no documento do boot).
+> Foi uma rodada com **9 implementadores em paralelo** (partições de arquivo disjuntas), **3
+> revisores + 1 security + 2 testers** em paralelo e **7 fixers**.
+> Detalhes: [§✨ 0.7.0](#-070--5-features--4-itens-da-fila--segurança-2026-10-21-noite).
 
-1. **🧩 DAP — salvar antes de depurar** — o debuggee roda o arquivo **do disco**: com buffer não
-   salvo, o depurador para em código diferente do que o editor mostra (sem aviso).
-   `src/core/dap/dap-manager.ts` (`buildLaunchArgs`).
-2. **🧩 DAP — adaptador Node** (`vscode-js-debug`) — exige download/empacotamento; **decidir antes**.
-3. **📝 Snippets** — expansão de snippets **LSP** (`insertTextFormat: 2`) no popup de completação;
+1. **🔍 Grep — mover o scan para o worker** — o `scanText` é **síncrono no main**: um padrão regex
+   que escape do detector de padrões catastróficos ainda trava o app. A lane `index` do `TaskPool`
+   já existe (o find bar usa) ⇒ `TaskKind: "grep"`.
+2. **🌐 Multi-root de verdade** — as raízes ainda são achatadas em 1 (`resolveWorkspaceRoots`
+   expande até o `.git` e dedup); falta a pasta do **projeto aberto** como workspace.
+3. **🪟 Split editor** (⌘\) — dois grupos de abas lado a lado (ainda não existe).
+4. **🧪 Test explorer** — rodar testes via LSP (`workspace/executeCommand` + `testing/*`).
+5. **📝 Snippets** — expansão de snippets **LSP** (`insertTextFormat: 2`) no popup de completação;
    ler `scope` do formato Sublime; `.sublime-completions` (hoje só `.sublime-snippet`).
-4. **🔍 Grep** — hoje é **literal** e insensível a acento só na forma pré-composta; falta **regex**
-   (o contrato `SearchQuery` já tem), a opção de ignorar binários por padrão e a busca em
-   arquivos **não versionados**.
-5. **⌘P** — a "workspace" é a pasta dos documentos abertos até a raiz `.git`; falta usar a pasta
-   do **projeto aberto** (multi-root) e o fuzzy com **path completo** na pontuação.
-6. **🖥️ Folding × soft wrap** — o `VisualRowIndex` não conhece linhas colapsadas ⇒ uma linha
-   dobrada que quebra desalinha a contagem de rows (limitação declarada).
-7. **🪟 Split editor** (⌘\) — dois grupos de abas lado a lado (ainda não existe).
-8. **🧪 Test explorer** — rodar testes via LSP (`workspace/executeCommand` + `testing/*`).
+6. **🧩 DAP — adaptador Node** (`vscode-js-debug`) — exige download/empacotamento; **decidir antes**.
+7. **📐 Escopo do DAP** — `hitCondition`/`logMessage` chegam ao adaptador, mas **só `condition` tem
+   UI**; falta o badge de logpoint na lista de breakpoints.
+8. **🔧 `executeCommand` do core** — 11 dos 15 comandos anunciados pela paleta não rodam pelo IPC
+   (a UI funciona por um switch próprio).
+9. **🧹 Roda de limpeza** — o HANDOFF tem ~1250 linhas: consolidar as seções antigas num histórico.
 
 > ✅ **Pegadinha resolvida (2026-10-16, P3.9):** o `setup.py` agora **detecta** um JDK ≥ 21
 > compatível (`JAVA_HOME`, PATH, sdkman, `/usr/lib/jvm`) e escreve um **`export JAVA_HOME=…` ativo**
@@ -1185,6 +1192,85 @@ E2E de usabilidade **TUDO OK** · E2E das features **21/21**.
 
 ---
 
+## ✨ 0.7.0 — 5 features + 4 itens da fila + segurança (2026-10-21, noite)
+
+Rodada grande, feita com **fan-out de subagentes**: **9 implementadores em paralelo** (partições
+de arquivo **disjuntas**), **2 integradores** (lado main ‖ lado renderer), **3 revisores + 1
+security + 1 tester** em paralelo, **7 fixers** e **1 tester de reverificação**.
+
+### As 5 features novas (estilo VS Code)
+
+| # | Feature | Módulos | Como se usa |
+|---|---|---|---|
+| 1 | **🐛 Problems** | `src/renderer/problems-panel.ts` (novo) | rail → seção "Problemas"; lista por arquivo, filtro, "pular para o erro"; badge `✖ 2 ⚠ 1` na status bar |
+| 2 | **📋 Outline** | `src/renderer/outline-view.ts` (novo) | rail → seção "Outline"; símbolos do LSP, hierarquia, filtro, clique move o caret |
+| 3 | **📁 Explorer** | `src/core/workspace/file-tree.ts` + `src/renderer/explorer-tree.ts` (novos) | rail → seção "Explorador"; árvore expansível, filtro incremental, clique abre |
+| 4 | **⑂ Source Control** | `src/core/git/git-status.ts` + `src/renderer/source-control.ts` (novos) + IPC `git.*` | rail → seção "Source Control"; status, stage/unstage/stageAll, commit, branch, badge |
+| 5 | **🔀 Diff** | `src/core/git/git-diff.ts` + `src/renderer/diff-view.ts` (novos) + IPC `git.diffText` | clicar num arquivo do SCM abre o diff; hunks navegáveis; "pular" abre na linha |
+
+A **lateral virou um workbench de seções** (uma por vez, `aria-pressed` coerente, 3 botões novos
+na rail) e o CSS dos 5 painéis (+724 linhas) saiu **só** com tokens `var(--s-*)` — **zero cor
+literal nova** (`test/renderer-shell-tokens.test.ts` trava isso).
+
+### Os 4 itens da fila
+
+- **🧩 DAP — salvar antes de depurar** — `DapManager.setBeforeLaunch(hook)`: o hook é **aguardado
+  antes** do `launch` (e antes do *spawn*); se rejeita, **nenhum** request sai e a sessão vai a
+  `errored`. No renderer: **flush do lote → save → start** (falha no save ⇒ não há start).
+  Provado no E2E: arquivo com buffer sujo ⇒ o debuggee parou na **linha 5, que só existia no
+  buffer novo** (gravado 227 ms após o launch).
+- **🔍 Grep** — `regex` (com **recusa** de padrões catastróficos), `caseSensitive`, `includeBinary`
+  (toggle na UI); a dobra de acentos cobre **NFD** e bases não-ASCII (`ø`, `ł`, `ß`, `đ`, `þ`)
+  mantendo a **invariante 1:1** (a coluna dos achados continua válida). O teto de tamanho do
+  arquivo é aplicado **antes** da leitura (`stat` no `main`).
+- **⌘P** — pontuação pelo **caminho** (dois `main.ts` não empatam), query com **`/`** (`src/main`
+  acha `src/main.ts`), item **"criar" (NOV)** que nasce o arquivo **ao lado do documento ativo**.
+- **🖥️ Folding × soft wrap** — regra nova: **linha colapsada = 0 rows**; o folding é aplicado
+  **antes** de a contagem ser publicada (o bug de ordem) e o scroll é **reancorado** ao dobrar.
+  Provado por pixel no E2E: deslocamento constante de **11,00 rows** e **0 divergências/19 amostras**.
+
+### 🔒 Segurança (4 achados do `security`, todos corrigidos + testados)
+
+| Sev | Achado | Correção |
+|---|---|---|
+| **alto** | `core.fsmonitor` do `.git/config` local ⇒ o `git status` **executava** um script | `-c core.fsmonitor=false` (+ `core.untrackedCache=false`) no `GIT_HARDENED_CONFIG` |
+| **alto** | `commit.gpgsign` + `gpg.program` ⇒ o `git commit` executava o gpg | `-c commit.gpgsign=false` |
+| **alto** | o `root` do renderer era fonte de verdade ⇒ commit/stage em **qualquer repo** | o `main` deriva a raiz e **rejeita** repo fora da workspace (`root-outside-workspace`) |
+| **alto** | `git.diffText` lia o conteúdo não commitado de **repo alheio** | o path tem de estar dentro de uma raiz conhecida (`path-outside-workspace`) |
+| **alto** | `createFile` escapava por **symlink** (confinamento lexical) | validação **realpath-based**, segmento por segmento (`lstat`), `mkdir` depois de validar |
+| **médio** | pathspec magic (`:/`, `:!x`) stageava em massa | `GIT_LITERAL_PATHSPECS=1` |
+
+⇒ `test/git-security-regression.test.ts` (**10 testes**, repos temporários reais): revertendo as
+correções, **6/10 falham**.
+
+### 🐛 3 bugs que só o E2E revelou
+
+1. **O `pyright` travava** — o cliente LSP **ignorava requests servidor→cliente**; o pyright pedia
+   `workspace/configuration` e ficava bloqueado ⇒ em `.py` **não havia** símbolo, diagnóstico nem
+   hover (e as features novas ficavam vazias). Agora todo request é respondido (e método
+   desconhecido ⇒ erro `-32601`, **nunca** silêncio — silêncio = o servidor trava).
+2. **Enter não inseria quebra de linha** — não dava para criar linhas; `Ctrl+A` não selecionava
+   tudo e `Ctrl+End` não movia o caret.
+3. **Outline/Problems vazios no documento do boot** — o `open` inicial rodava **antes** de
+   `onActiveDocumentChanged` ser atribuído.
+
+### Verificação
+
+- Gates: `typecheck`/`lint` exit 0 · **1585 testes / 108 arquivos** (era 1176/94).
+- **E2E por CDP** (2 rodadas): 9/9 na 1ª rodada; na reverificação, 7/9 verdes (os 2 parciais
+  eram o Outline no boot e a mensagem do grep — **corrigidos** depois).
+
+### Limitações declaradas
+
+- O **scan do grep é síncrono no main** (sem orçamento de tempo): um padrão que escape do
+  detector ainda pode travar ⇒ follow-up "mover para o worker".
+- As **raízes ainda são achatadas em 1** (multi-root de verdade = follow-up).
+- `workspace/applyEdit` do LSP é sempre **recusado** (o Scribe não aplica edits do servidor).
+- A identidade do **commit** depende do `.git/config` local (o env global do git é sanitizado).
+- `executeCommand` do **core** não implementa 11 dos 15 comandos (a UI funciona por switch próprio).
+
+---
+
 ## 🗂️ Estado do repositório
 
 - ✅ **Working tree LIMPO na abertura desta sessão** (2026-10-20) — a pendência de 2026-10-17
@@ -1202,6 +1288,8 @@ E2E de usabilidade **TUDO OK** · E2E das features **21/21**.
   `be14f29` (5 features) · `7d5a12b` (LSP no AppImage) — ver `git log --oneline -8`.
 - ✅ **📦 AppImage 0.6.0** — `release/Scribe-0.6.0.AppImage` (117 MB), **gerado e testado com
   `env` limpo**: sobe, **os 2 servidores LSP iniciam**, plugin host pronto (pid real no log).
+- ✅ **📦 AppImage 0.7.0** — `release/Scribe-0.7.0.AppImage`, gerado e verificado nesta sessão
+  (a 5 features + os 4 itens da fila + as correções de segurança).
 - ✅ **Servidores LSP instalados** — `typescript-language-server` + `typescript@5` + `pyright`
   (**etapa 13/13** do `setup/setup.py`; opcional — sem eles o app funciona, mas fica sem
   diagnóstico/completecão). ⚠️ O `typescript` precisa ser o **5.x**: o 7+ (tsgo) **não tem**

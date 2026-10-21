@@ -16,6 +16,7 @@ const { mockLspClient, mockTransport } = vi.hoisted(() => {
   const mockClientDisconnect = vi.fn();
   const mockClientOnDiagnostics = vi.fn();
   const mockClientDispose = vi.fn();
+  const mockClientSetRequestHandler = vi.fn();
 
   const mClient = vi.fn().mockImplementation(() => ({
     connect: mockClientConnect,
@@ -24,6 +25,7 @@ const { mockLspClient, mockTransport } = vi.hoisted(() => {
     disconnect: mockClientDisconnect,
     onDiagnostics: mockClientOnDiagnostics,
     dispose: mockClientDispose,
+    setRequestHandler: mockClientSetRequestHandler,
   }));
 
   const mockTransportConnect = vi.fn();
@@ -41,7 +43,7 @@ const { mockLspClient, mockTransport } = vi.hoisted(() => {
   }));
 
   return {
-    mockLspClient: { impl: mClient, connect: mockClientConnect, sendRequest: mockClientSendRequest, sendNotification: mockClientSendNotification, disconnect: mockClientDisconnect, onDiagnostics: mockClientOnDiagnostics, dispose: mockClientDispose },
+    mockLspClient: { impl: mClient, connect: mockClientConnect, sendRequest: mockClientSendRequest, sendNotification: mockClientSendNotification, disconnect: mockClientDisconnect, onDiagnostics: mockClientOnDiagnostics, dispose: mockClientDispose, setRequestHandler: mockClientSetRequestHandler },
     mockTransport: { impl: mTransport, connect: mockTransportConnect, send: mockTransportSend, disconnect: mockTransportDisconnect, onMessage: mockTransportOnMessage, dispose: mockTransportDispose },
   };
 });
@@ -81,6 +83,7 @@ describe("LspManager", () => {
 
     mockLspClient.connect.mockResolvedValue(undefined);
     mockLspClient.onDiagnostics.mockReturnValue({ dispose: vi.fn() });
+    mockLspClient.setRequestHandler.mockReturnValue({ dispose: vi.fn() });
 
     manager = new LspManager([TS_CONFIG, PY_CONFIG]);
   });
@@ -433,6 +436,59 @@ describe("LspManager", () => {
       const symbols = await manager.requestDocumentSymbols("file:///test.ts");
 
       expect(symbols).toEqual([]);
+    });
+  });
+
+  describe("requests servidor→cliente (o servidor nunca pode ficar esperando)", () => {
+    /** Handler registrado no cliente para um `method` servidor→cliente. */
+    function handlerFor(method: string): (params: unknown) => unknown {
+      const call = mockLspClient.setRequestHandler.mock.calls.find((c: unknown[]) => c[0] === method);
+      expect(call, `sem handler para ${method}`).toBeDefined();
+      return call?.[1] as (params: unknown) => unknown;
+    }
+
+    it("registra handlers para workspace/workspaceFolders e workspace/configuration", async () => {
+      await manager.startServer(TS_CONFIG);
+
+      const methods = mockLspClient.setRequestHandler.mock.calls.map((c: unknown[]) => c[0]);
+      expect(methods).toContain("workspace/workspaceFolders");
+      expect(methods).toContain("workspace/configuration");
+    });
+
+    it("workspace/workspaceFolders ⇒ as pastas conhecidas (setWorkspaceFolders)", async () => {
+      await manager.startServer(TS_CONFIG);
+      manager.setWorkspaceFolders([{ uri: "file:///proj", name: "proj" }]);
+
+      expect(handlerFor("workspace/workspaceFolders")(undefined)).toEqual([
+        { uri: "file:///proj", name: "proj" },
+      ]);
+    });
+
+    it("workspace/workspaceFolders ⇒ null quando não há pasta", async () => {
+      await manager.startServer(TS_CONFIG);
+
+      expect(handlerFor("workspace/workspaceFolders")(undefined)).toBeNull();
+    });
+
+    it("workspace/configuration ⇒ uma entrada por item, com a config da seção", async () => {
+      await manager.startServer(TS_CONFIG);
+      manager.setConfiguration("python.analysis", { typeCheckingMode: "strict" });
+
+      const result = handlerFor("workspace/configuration")({
+        items: [{ section: "python.analysis" }, { section: "python" }],
+      });
+
+      expect(result).toEqual([{ typeCheckingMode: "strict" }, null]);
+    });
+
+    it("workspace/configuration ⇒ null quando não há config (default do servidor)", async () => {
+      await manager.startServer(TS_CONFIG);
+
+      const result = handlerFor("workspace/configuration")({
+        items: [{ section: "python" }, { section: "outra" }],
+      });
+
+      expect(result).toEqual([null, null]);
     });
   });
 

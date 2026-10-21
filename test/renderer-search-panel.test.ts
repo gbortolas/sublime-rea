@@ -2,18 +2,20 @@
  * Scribe — testes do **painel de busca na workspace** (`src/renderer/search-panel.ts`).
  *
  * O renderer não tem DOM no ambiente de teste (`node`) ⇒ o que se testa aqui é a
- * **lógica pura** que o painel extraiu: o agrupamento por arquivo e a descrição do estado
- * (buscando / N resultados em M arquivos / nada encontrado / truncado).
- *
- * O DOM em si (criação, foco, clique) é verificado pelo smoke test do app.
+ * **lógica pura** que o painel extraiu: o agrupamento por arquivo, a descrição do estado
+ * (buscando / N resultados em M arquivos / nada encontrado / truncado) e os **toggles**
+ * de regex/case/binários (a parte de DOM degrada sem quebrar — ela é verificada pelo smoke test).
  */
 import { describe, expect, it } from "vitest";
 
 import type { GrepMatch, GrepResult } from "../src/core/workspace/grep";
 import {
   basenameOf,
+  DEFAULT_SEARCH_PANEL_FLAGS,
   describeSearchStatus,
+  describeToggle,
   groupMatchesByFile,
+  toggleFlag,
 } from "../src/renderer/search-panel";
 
 function match(path: string, line: number, column: number, text = "a linha do arquivo"): GrepMatch {
@@ -116,5 +118,74 @@ describe("describeSearchStatus — o estado do painel", () => {
     const status = describeSearchStatus(resultOf([match("/w/a.txt", 0, 0)], true), false);
     expect(status.kind).toBe("truncated");
     expect(status.text).toBe("1 resultado em 1 arquivo (resultado truncado)");
+  });
+});
+
+describe("os toggles do painel — regex, case e binários", () => {
+  it("o default é literal, sem case e sem binários (o default do `grep`)", () => {
+    expect(DEFAULT_SEARCH_PANEL_FLAGS).toEqual({
+      regex: false,
+      caseSensitive: false,
+      includeBinary: false,
+    });
+  });
+
+  it("alterna só a flag pedida", () => {
+    const regex = toggleFlag(DEFAULT_SEARCH_PANEL_FLAGS, "regex");
+    expect(regex.regex).toBe(true);
+    expect(regex.caseSensitive).toBe(false);
+    expect(regex.includeBinary).toBe(false);
+
+    const caseSensitive = toggleFlag(DEFAULT_SEARCH_PANEL_FLAGS, "caseSensitive");
+    expect(caseSensitive.regex).toBe(false);
+    expect(caseSensitive.caseSensitive).toBe(true);
+    expect(caseSensitive.includeBinary).toBe(false);
+
+    // O toggle de binários (o item de backlog que **não** tinha toggle na UI).
+    const binary = toggleFlag(DEFAULT_SEARCH_PANEL_FLAGS, "includeBinary");
+    expect(binary.includeBinary).toBe(true);
+    expect(binary.regex).toBe(false);
+    expect(binary.caseSensitive).toBe(false);
+  });
+
+  it("alterna de volta (o toggle é um interruptor)", () => {
+    const once = toggleFlag(DEFAULT_SEARCH_PANEL_FLAGS, "regex");
+    const twice = toggleFlag(once, "regex");
+    expect(twice).toEqual(DEFAULT_SEARCH_PANEL_FLAGS);
+  });
+
+  it("não mexe no objeto original (o estado do painel é imutável)", () => {
+    const flags = { ...DEFAULT_SEARCH_PANEL_FLAGS };
+    toggleFlag(flags, "caseSensitive");
+    toggleFlag(flags, "includeBinary");
+    expect(flags).toEqual({ regex: false, caseSensitive: false, includeBinary: false });
+  });
+
+  it("descreve o toggle: o rótulo, a dica e o estado", () => {
+    expect(describeToggle(DEFAULT_SEARCH_PANEL_FLAGS, "regex")).toEqual({
+      id: "regex",
+      label: ".*",
+      title: "Expressão regular",
+      pressed: false,
+    });
+    expect(describeToggle(DEFAULT_SEARCH_PANEL_FLAGS, "caseSensitive")).toEqual({
+      id: "caseSensitive",
+      label: "Aa",
+      title: "Diferenciar maiúsculas de minúsculas",
+      pressed: false,
+    });
+    expect(describeToggle(DEFAULT_SEARCH_PANEL_FLAGS, "includeBinary")).toEqual({
+      id: "includeBinary",
+      label: "Bin",
+      title: "Incluir arquivos binários",
+      pressed: false,
+    });
+  });
+
+  it("o toggle ligado aparece com `pressed: true`", () => {
+    const flags = toggleFlag(toggleFlag(DEFAULT_SEARCH_PANEL_FLAGS, "regex"), "caseSensitive");
+    expect(describeToggle(flags, "regex").pressed).toBe(true);
+    expect(describeToggle(flags, "caseSensitive").pressed).toBe(true);
+    expect(describeToggle(flags, "includeBinary").pressed).toBe(false);
   });
 });
