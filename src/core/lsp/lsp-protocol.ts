@@ -196,7 +196,18 @@ export interface DidOpenTextDocumentParams {
 
 export interface DidChangeTextDocumentParams {
   readonly textDocument: VersionedTextDocumentIdentifier;
-  readonly contentChanges: readonly { readonly text: string }[];
+  readonly contentChanges: readonly TextDocumentContentChangeEvent[];
+}
+
+/**
+ * Mudança de conteúdo no `textDocument/didChange`.
+ *
+ * `range` **ausente** = sincronização **full** (o `text` é o documento inteiro);
+ * `range` presente = sincronização **incremental** (o `text` substitui só aquele trecho).
+ */
+export interface TextDocumentContentChangeEvent {
+  readonly range?: Range;
+  readonly text: string;
 }
 
 export interface DidCloseTextDocumentParams {
@@ -301,10 +312,38 @@ export interface DocumentSymbol {
   readonly detail?: string;
   readonly kind: number;
   readonly tags?: readonly number[];
-  readonly range: Range;
-  readonly selectionRange: Range;
+  /**
+   * Range **completo** do símbolo. Opcional de propósito: um servidor pode devolver um
+   * payload incompleto — o cliente **tolera** a ausência e ignora o símbolo em vez de
+   * estourar (o popup de Document Symbols não pode quebrar por causa do servidor).
+   */
+  readonly range?: Range;
+  /**
+   * Range do **nome** do símbolo. Opcional pelo mesmo motivo (ver `range`).
+   */
+  readonly selectionRange?: Range;
   readonly children?: readonly DocumentSymbol[];
 }
+
+/**
+ * Símbolo **plano** (`SymbolInformation`) — a forma que o servidor devolve quando o
+ * cliente não declara `textDocument.documentSymbol.hierarchicalDocumentSymbolSupport`.
+ * O range vive em `location.range` (e não em `selectionRange`).
+ */
+export interface SymbolInformation {
+  readonly name: string;
+  readonly kind: number;
+  readonly location: Location;
+  readonly containerName?: string;
+  /**
+   * Detalhe textual do símbolo (o LSP plano não define este campo; alguns servidores o
+   * mandam mesmo assim — o cliente o usa como "detail" no popup de Document Symbols).
+   */
+  readonly detail?: string;
+}
+
+/** Formas aceitas na resposta de `textDocument/documentSymbol`. */
+export type DocumentSymbolLike = DocumentSymbol | SymbolInformation;
 
 export interface DocumentSymbolParams {
   readonly textDocument: TextDocumentIdentifier;
@@ -430,8 +469,24 @@ export interface InlayHint {
 
 // ── Server capabilities ─────────────────────────────────────────────────────────────────────
 
+/**
+ * Modo de sincronização do texto (LSP `TextDocumentSyncKind`).
+ *
+ * `Full` = o cliente manda o documento inteiro a cada `didChange`;
+ * `Incremental` = o cliente manda **só o delta** (`range` + `text`).
+ */
+export enum TextDocumentSyncKind {
+  None = 0,
+  Full = 1,
+  Incremental = 2,
+}
+
 export interface ServerCapabilities {
-  readonly textDocumentSync?: number | { readonly openClose?: boolean; readonly change?: number };
+  readonly textDocumentSync?: number | {
+    readonly openClose?: boolean;
+    readonly change?: number;
+    readonly save?: { readonly includeText?: boolean };
+  };
   readonly completionProvider?: { readonly triggerCharacters?: readonly string[] };
   readonly hoverProvider?: boolean;
   readonly definitionProvider?: boolean | { readonly dynamicRegistration?: boolean };
@@ -460,10 +515,118 @@ export interface WorkspaceFolder {
   readonly name: string;
 }
 
+// ── Client capabilities ─────────────────────────────────────────────────────────────────────
+
+/** `textDocument.publishDiagnostics` — o que o cliente sabe consumir de um diagnóstico. */
+export interface PublishDiagnosticsClientCapabilities {
+  readonly relatedInformation?: boolean;
+  readonly versionSupport?: boolean;
+  readonly codeDescriptionSupport?: boolean;
+  readonly dataSupport?: boolean;
+}
+
+/**
+ * `textDocument.synchronization` — como o cliente sincroniza o texto.
+ *
+ * ⚠️ `textDocumentSync` **não** faz parte do LSP padrão (a sincronização é declarada pelo
+ * **servidor**). É uma extensão nossa que enviamos como **pedido**: 1 = sincronização
+ * **full** (o cliente manda o documento inteiro). Servidores que aceitam a dica respondem
+ * `textDocumentSync.change = 1`; os que ignoram respondem com o que preferem — e o
+ * cliente **respeita a resposta** (ver `LspManager`).
+ */
+export interface TextDocumentSyncClientCapabilities {
+  readonly dynamicRegistration?: boolean;
+  readonly willSave?: boolean;
+  readonly willSaveWaitUntil?: boolean;
+  readonly didSave?: boolean;
+  /** Pedido (não-padrão) de sincronização **full**. */
+  readonly textDocumentSync?: number;
+}
+
+/** `textDocument.documentSymbol` — o cliente sabe ler a forma hierárquica? */
+export interface DocumentSymbolClientCapabilities {
+  readonly dynamicRegistration?: boolean;
+  readonly hierarchicalDocumentSymbolSupport?: boolean;
+  readonly labelSupport?: boolean;
+}
+
+/** `textDocument.completion` — capacidades do completion item. */
+export interface CompletionClientCapabilities {
+  readonly dynamicRegistration?: boolean;
+  readonly completionItem?: {
+    readonly snippetSupport?: boolean;
+    readonly commitCharactersSupport?: boolean;
+    readonly documentationFormat?: readonly string[];
+    readonly deprecatedSupport?: boolean;
+    readonly preselectSupport?: boolean;
+    readonly tagSupport?: { readonly valueSet?: readonly number[] };
+  };
+  readonly completionItemKind?: { readonly valueSet?: readonly number[] };
+}
+
+/** `textDocument.codeAction` — capacidades de code action. */
+export interface CodeActionClientCapabilities {
+  readonly dynamicRegistration?: boolean;
+  readonly resolveSupport?: boolean | { readonly properties?: readonly string[] };
+  readonly codeActionLiteralSupport?: {
+    readonly codeActionKind: {
+      readonly valueSet: readonly string[];
+    };
+  };
+}
+
+/** `textDocument.hover` — formatos de markup aceitos no hover. */
+export interface HoverClientCapabilities {
+  readonly dynamicRegistration?: boolean;
+  readonly contentFormat?: readonly string[];
+}
+
+/** `textDocument.definition` — o link de definição é navegável? */
+export interface DefinitionClientCapabilities {
+  readonly dynamicRegistration?: boolean;
+  readonly linkSupport?: boolean;
+}
+
+/** `textDocument.foldingRange` / `textDocument.references` — capacidades simples. */
+export interface FoldingRangeClientCapabilities {
+  readonly dynamicRegistration?: boolean;
+  readonly lineFoldingOnly?: boolean;
+}
+
+export interface ReferencesClientCapabilities {
+  readonly dynamicRegistration?: boolean;
+}
+
+/** `textDocument` — o bloco de capacidades do cliente. */
+export interface TextDocumentClientCapabilities {
+  readonly publishDiagnostics?: PublishDiagnosticsClientCapabilities;
+  readonly synchronization?: TextDocumentSyncClientCapabilities;
+  readonly documentSymbol?: DocumentSymbolClientCapabilities;
+  readonly completion?: CompletionClientCapabilities;
+  readonly definition?: DefinitionClientCapabilities;
+  readonly codeAction?: CodeActionClientCapabilities;
+  readonly hover?: HoverClientCapabilities;
+  readonly foldingRange?: FoldingRangeClientCapabilities;
+  readonly references?: ReferencesClientCapabilities;
+}
+
+/** `workspace` — o bloco de capacidades do cliente. */
+export interface WorkspaceClientCapabilities {
+  readonly workspaceFolders?: boolean;
+  readonly configuration?: boolean;
+  readonly didChangeConfiguration?: { readonly dynamicRegistration?: boolean };
+}
+
+/** Capacidades do cliente no `initialize` — **não** são opcionais: declarar é o ato. */
+export interface ClientCapabilities {
+  readonly textDocument?: TextDocumentClientCapabilities;
+  readonly workspace?: WorkspaceClientCapabilities;
+}
+
 export interface InitializeParams {
   readonly processId: number | null;
   readonly clientInfo?: { readonly name: string; readonly version?: string };
-  readonly capabilities: unknown;
+  readonly capabilities: ClientCapabilities;
   readonly rootUri?: string | null;
   readonly workspaceFolders?: readonly WorkspaceFolder[] | null;
   /** Opções específicas do servidor (ex.: `tsserver.path` para TypeScript). */

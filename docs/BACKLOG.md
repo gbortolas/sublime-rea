@@ -804,6 +804,23 @@ Problemas identificados ao testar o AppImage pela primeira vez:
       hit-test off-by-5px · O(documento)/frame · mensagem de erro crua · `aria-pressed` ·
       menu nativo sem `Ctrl+W`. **1039 testes / 79 arquivos** · E2E de usabilidade **TUDO OK**.
 
+## 🎨 Design system + 3 features de última geração (2026-10-21, noite)
+
+- [x] **Design system da casca** ✅ — contraste AA em toda a casca (texto pequeno 3,58:1 → **5,85:1**
+      no tema claro), degraus de superfície (o tema claro deixou de ser um vazio branco), anel de
+      foco 2px, seleção com barra de acento, escala tipográfica com degraus, superfícies
+      flutuantes legíveis, a lupa no sistema, alvos de clique ≥ 24px, cores semânticas.
+- [x] **⌘P — Quick Open** ✅ — fuzzy de **arquivos** da workspace + comandos + recentes, com prévia
+      e navegação por teclado (`src/core/workspace/file-index.ts`, `src/renderer/quick-open.ts`).
+- [x] **📌 Sticky scroll** ✅ — a "envelope" do código gruda no topo ao rolar, sem duplicar texto
+      (`src/core/render/sticky-scroll.ts` + `scene.ts`).
+- [x] **🔍 Grep na workspace** ✅ — varredura paralela/cancelável com tetos e resultados agrupados
+      por arquivo na lateral (`src/core/workspace/grep.ts`, `src/renderer/search-panel.ts`).
+- [x] **LSP de verdade** ✅ — capabilities reais (o TS estava **sem diagnóstico nenhum**), framing
+      por **byte** (acento/emoji travavam a mensagem), Document Symbols tolerante, broadcast sem
+      atraso, `didClose`, `didChange` incremental, `tsserver.path` do AppImage, `npm` fora do nvm.
+      **1176 testes / 94 arquivos** · E2E de usabilidade **TUDO OK** · E2E das features **21/21**.
+
 ---
 
 ## 🏠 P3 — Housekeeping (2026-10-20, bootstrap)

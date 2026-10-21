@@ -13,7 +13,7 @@ import { LspError } from "./lsp-protocol";
 
 // ── Helpers ─────────────────────────────────────────────────────────────────────────────────
 
-const HEADER_TERMINATOR = "\r\n\r\n";
+const HEADER_TERMINATOR = Buffer.from("\r\n\r\n", "utf8");
 const CONTENT_LENGTH_RE = /^Content-Length:\s*(\d+)\r?$/im;
 
 /**
@@ -21,13 +21,21 @@ const CONTENT_LENGTH_RE = /^Content-Length:\s*(\d+)\r?$/im;
  *
  * Acumula dados crus do stdout e extrai mensagens completas na ordem em que chegam.
  * Lida com múltiplas mensagens num mesmo chunk e mensagens fracionadas em chunks.
+ *
+ * ⚠️ O accumulate é em **bytes**, não em string: o `Content-Length` do protocolo LSP é o
+ * tamanho do corpo **em bytes UTF-8**. Decodificar em string e comparar com o comprimento
+ * da string quebra com **qualquer caractere não-ASCII** (acento, emoji) — a mensagem
+ * nunca é extraída e **todas as seguintes** ficam travadas (o diagnóstico nunca chega).
  */
 class MessageBuffer {
-  private data = "";
+  private data: Buffer = Buffer.alloc(0);
   private pendingLength = -1;
 
-  append(chunk: string): void {
-    this.data += chunk;
+  append(chunk: Buffer | string): void {
+    this.data = Buffer.concat([
+      this.data,
+      typeof chunk === "string" ? Buffer.from(chunk, "utf8") : chunk,
+    ]);
   }
 
   /**
@@ -40,8 +48,8 @@ class MessageBuffer {
         const termIdx = this.data.indexOf(HEADER_TERMINATOR);
         if (termIdx === -1) return null;
 
-        const headerBlock = this.data.slice(0, termIdx);
-        this.data = this.data.slice(termIdx + HEADER_TERMINATOR.length);
+        const headerBlock = this.data.subarray(0, termIdx).toString("utf8");
+        this.data = this.data.subarray(termIdx + HEADER_TERMINATOR.length);
 
         const match = headerBlock.match(CONTENT_LENGTH_RE);
         if (!match) continue; // cabeçalho inválido — descarta e tenta de novo
@@ -57,10 +65,11 @@ class MessageBuffer {
         }
       }
 
+      // `length` é em **bytes**: compara com o buffer, não com o comprimento da string.
       if (this.data.length < this.pendingLength) return null;
 
-      const body = this.data.slice(0, this.pendingLength);
-      this.data = this.data.slice(this.pendingLength);
+      const body = this.data.subarray(0, this.pendingLength).toString("utf8");
+      this.data = this.data.subarray(this.pendingLength);
       this.pendingLength = -1;
       return body;
     }
@@ -152,7 +161,7 @@ export class LspStdioTransport implements Disposable {
       }
 
       const onStdoutData = (chunk: Buffer): void => {
-        this.buffer.append(chunk.toString("utf8"));
+        this.buffer.append(chunk);
         this.flushBuffer();
       };
       proc.stdout.on("data", onStdoutData);

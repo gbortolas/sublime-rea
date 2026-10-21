@@ -105,9 +105,34 @@ describe("LspManager", () => {
       const initParams = mockLspClient.connect.mock.calls[0]?.[0];
       expect(initParams).toMatchObject({
         processId: expect.any(Number),
-        capabilities: {},
+        // ⚠️ **não** pode ser `{}`: sem `textDocument.publishDiagnostics` o servidor
+        // (typescript-language-server / pyright) **não publica diagnóstico nenhum**.
+        capabilities: expect.objectContaining({
+          textDocument: expect.objectContaining({
+            publishDiagnostics: expect.objectContaining({ relatedInformation: true }),
+          }),
+          workspace: expect.objectContaining({ workspaceFolders: true }),
+        }),
         clientInfo: { name: "Scribe" },
         rootUri: null,
+      });
+    });
+
+    it("pede as capabilities que o servidor precisa para publicar diagnósticos", async () => {
+      await manager.startServer(TS_CONFIG);
+
+      const initParams = mockLspClient.connect.mock.calls[0]?.[0] as {
+        readonly capabilities: Record<string, unknown>;
+      };
+      expect(initParams.capabilities).toMatchObject({
+        textDocument: {
+          publishDiagnostics: { relatedInformation: true, versionSupport: true },
+          synchronization: { didSave: true, dynamicRegistration: false, textDocumentSync: 1 },
+          documentSymbol: { hierarchicalDocumentSymbolSupport: true },
+          definition: { linkSupport: true },
+          hover: { contentFormat: ["markdown", "plaintext"] },
+        },
+        workspace: { workspaceFolders: true, configuration: true },
       });
     });
 
@@ -346,6 +371,68 @@ describe("LspManager", () => {
     it("retorna array vazio sem servidor para extensão", async () => {
       const result = await manager.requestCodeActions("file:///f.xyz", 0, 0, []);
       expect(result).toEqual([]);
+    });
+  });
+
+  describe("requestDocumentSymbols", () => {
+    it("normaliza a forma hierárquica (DocumentSymbol)", async () => {
+      await manager.startServer(TS_CONFIG);
+      mockLspClient.sendRequest.mockResolvedValue([
+        {
+          name: "classe",
+          kind: 5,
+          range: { start: { line: 0, character: 0 }, end: { line: 3, character: 1 } },
+          selectionRange: { start: { line: 0, character: 6 }, end: { line: 0, character: 11 } },
+        },
+      ]);
+
+      const symbols = await manager.requestDocumentSymbols("file:///test.ts");
+
+      expect(symbols).toHaveLength(1);
+      expect(symbols[0]?.name).toBe("classe");
+    });
+
+    it("normaliza a forma plana (SymbolInformation: range em location.range)", async () => {
+      await manager.startServer(TS_CONFIG);
+      mockLspClient.sendRequest.mockResolvedValue([
+        {
+          name: "funcao",
+          kind: 12,
+          location: {
+            uri: "file:///test.ts",
+            range: { start: { line: 2, character: 0 }, end: { line: 2, character: 6 } },
+          },
+        },
+      ]);
+
+      const symbols = await manager.requestDocumentSymbols("file:///test.ts");
+
+      expect(symbols).toHaveLength(1);
+      expect(symbols[0]?.name).toBe("funcao");
+    });
+
+    it("descarta entradas malformadas sem estourar", async () => {
+      await manager.startServer(TS_CONFIG);
+      mockLspClient.sendRequest.mockResolvedValue([
+        null,
+        "lixo",
+        { kind: 12 },
+        { name: "ok", kind: 12, range: { start: { line: 0, character: 0 }, end: { line: 0, character: 1 } } },
+      ]);
+
+      const symbols = await manager.requestDocumentSymbols("file:///test.ts");
+
+      expect(symbols).toHaveLength(1);
+      expect(symbols[0]?.name).toBe("ok");
+    });
+
+    it("devolve lista vazia para resposta que não é array", async () => {
+      await manager.startServer(TS_CONFIG);
+      mockLspClient.sendRequest.mockResolvedValue({ nope: true });
+
+      const symbols = await manager.requestDocumentSymbols("file:///test.ts");
+
+      expect(symbols).toEqual([]);
     });
   });
 

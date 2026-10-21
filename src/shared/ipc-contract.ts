@@ -88,6 +88,72 @@ export interface DocumentUndoState {
   readonly selections: SelectionSet;
 }
 
+// ── Workspace (Quick Open) e busca em todos os arquivos ───────────────────────────────────────
+
+/**
+ * Um arquivo da **workspace** (o índice do *Quick Open*).
+ *
+ * O `path` é **relativo** à raiz (é o que a UI mostra e o que casa na query fuzzy); o
+ * `absolutePath` é o que o `main` usa para abrir o arquivo.
+ */
+export interface WorkspaceFile {
+  readonly path: string;
+  readonly absolutePath: string;
+}
+
+/** Resultado do índice de arquivos da workspace (`workspace.files`). */
+export interface WorkspaceFilesResult {
+  readonly files: readonly WorkspaceFile[];
+  /** `true` quando algum teto foi atingido (o índice está **incompleto**). */
+  readonly truncated: boolean;
+  /** Avisos da varredura (diretórios ilegíveis, tetos) — nunca silencioso. */
+  readonly warnings: readonly string[];
+}
+
+/**
+ * Uma ocorrência da busca em todos os arquivos (o "grep").
+ *
+ * ⚠️ **Espelha** `GrepMatch` de `src/core/workspace/grep.ts`: o contrato IPC vive em
+ * `shared` (a base da dependência) e não pode importar o core. As duas formas são
+ * **estruturalmente idênticas** — se divergirem, o `tsc` falha no ponto de uso.
+ */
+export interface GrepMatch {
+  /** Caminho do arquivo (o mesmo string que o `main` varrreu). */
+  readonly path: string;
+  /** Linha da ocorrência — **0-based**. */
+  readonly line: number;
+  /** Coluna da ocorrência — **0-based**, em code units UTF-16. */
+  readonly column: number;
+  /** A **linha inteira** onde a ocorrência está (sem o terminador de linha). */
+  readonly text: string;
+}
+
+/**
+ * Resultado de uma varredura da workspace (`search.files`).
+ *
+ * ⚠️ **Espelha** `GrepResult` de `src/core/workspace/grep.ts` (mesma razão do espelho acima).
+ */
+export interface GrepResult {
+  /** Ocorrências ordenadas por `(path, line, column)`. */
+  readonly matches: readonly GrepMatch[];
+  /** `true` = o resultado está **incompleto** (bateu no teto de matches/arquivos). */
+  readonly truncated: boolean;
+  /** Quantos arquivos foram **de fato varridos**. */
+  readonly filesScanned: number;
+}
+
+/** Opções da busca em todos os arquivos (`search.files`). */
+export interface SearchFilesOptions {
+  /** Raízes da workspace (default: as do documento aberto; sem documento ⇒ o `cwd` do app). */
+  readonly roots?: readonly string[];
+  /** Teto de ocorrências. */
+  readonly maxMatches?: number;
+  /** Teto de arquivos varridos. */
+  readonly maxFiles?: number;
+  /** Busca acento-insensitiva (default `true`): "acao" casa com "ação". */
+  readonly ignoreAccents?: boolean;
+}
+
 /**
  * Mapa de métodos expostos pelo **main** ao **renderer**. O resultado é o valor da resposta
  * (o transporte é assíncrono: `invoke` devolve `Promise`). A ordem de declaração não é wire.
@@ -95,6 +161,14 @@ export interface DocumentUndoState {
 export interface IpcMethods {
   "document.open"(path: string): DocumentHandle;
   "document.openDialog"(): string | null;
+  /**
+   * Fecha o documento no **core** (o `EditorCore.closeDocument`).
+   *
+   * O `didClose` do LSP é enviado por aqui — sem isso o servidor LSP **acumula** os
+   * documentos abertos (memória + diagnósticos obsoletos). Documento sujo ⇒ o core
+   * **salva** antes de fechar (a semântica é do core, não da UI).
+   */
+  "document.close"(handle: DocumentHandle): void;
   "document.text"(handle: DocumentHandle): string;
   "document.revision"(handle: DocumentHandle): number;
   "document.save"(handle: DocumentHandle): void;
@@ -165,6 +239,21 @@ export interface IpcMethods {
    * `search.tooManyMatches` se a busca for truncada (nada de substituição parcial silenciosa).
    */
   "search.replaceAll"(handle: DocumentHandle, query: SearchQuery, replacement: string): ReplaceAllResult;
+  /**
+   * Índice de **arquivos da workspace** (o *Quick Open*, ⌘P).
+   *
+   * `roots` são as raízes candidatas (o renderer manda o diretório dos documentos
+   * abertos); o `main` expande cada uma até a **raiz da workspace** (a pasta que tem
+   * `.git`, quando existe) e varre a árvore. Sem `roots` ⇒ a raiz do processo (`cwd`).
+   */
+  "workspace.files"(roots?: readonly string[]): WorkspaceFilesResult;
+  /**
+   * Busca o padrão em **todos os arquivos** da workspace (o "grep", `Ctrl+Shift+F`).
+   *
+   * A operação é **cancelável** (o `signalId` do envelope) — o renderer aborta a busca
+   * anterior quando o usuário digita outro termo.
+   */
+  "search.files"(query: string, options?: SearchFilesOptions): GrepResult;
   "command.list"(): CommandListResult;
   "command.execute"(commandId: string): void;
   "lsp.completions"(handle: DocumentHandle, line: number, col: number): LspCompletionItem[];
@@ -247,6 +336,7 @@ export type IpcResult<M extends IpcMethodName> = ResultOf<IpcMethods[M]>;
 export const IPC_METHODS = [
   "document.open",
   "document.openDialog",
+  "document.close",
   "document.text",
   "document.revision",
   "document.save",
@@ -261,6 +351,8 @@ export const IPC_METHODS = [
   "syntax.highlight",
   "search.find",
   "search.replaceAll",
+  "workspace.files",
+  "search.files",
   "command.list",
   "command.execute",
   "lsp.completions",

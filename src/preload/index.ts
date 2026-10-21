@@ -20,6 +20,7 @@ import type {
   DocumentHighlight,
   DocumentInsertResult,
   DocumentUndoState,
+  GrepResult,
   LspCodeAction,
   LspCompletionItem,
   LspDiagnostic,
@@ -34,9 +35,11 @@ import type {
   MainThreadBusy,
   ReplaceAllResult,
   SearchDocumentResult,
+  SearchFilesOptions,
   SearchQuery,
   SelectionSet,
   SnippetsListResult,
+  WorkspaceFilesResult,
   DapBreakpoint,
   DapBreakpointSpec,
   DapEvaluation,
@@ -65,6 +68,30 @@ export interface ScribePreloadApi {
   };
   open(path: string, signalId?: number): Promise<DocumentHandle>;
   openDialog(): Promise<string | null>;
+  /**
+   * Fecha o documento no core (o `didClose` do LSP sai por aqui).
+   *
+   * Documento sujo ⇒ o core **salva** antes de fechar (a semântica é do core).
+   */
+  closeDocument(handle: DocumentHandle): Promise<void>;
+  /**
+   * Índice de **arquivos da workspace** (o *Quick Open*, ⌘P).
+   *
+   * `roots` são as raízes candidatas (o renderer manda o diretório dos documentos
+   * abertos); o main expande até a raiz da workspace e varre a árvore.
+   */
+  workspaceFiles(roots?: readonly string[]): Promise<WorkspaceFilesResult>;
+  /**
+   * Busca o padrão em **todos os arquivos** da workspace (o "grep", `Ctrl+Shift+F`).
+   *
+   * `signalId` torna a busca **cancelável** — o renderer aborta a busca anterior quando
+   * o usuário digita outro termo.
+   */
+  searchFiles(
+    query: string,
+    options?: SearchFilesOptions,
+    signalId?: number,
+  ): Promise<GrepResult>;
   text(handle: DocumentHandle): Promise<string>;
   revision(handle: DocumentHandle): Promise<number>;
   save(handle: DocumentHandle): Promise<void>;
@@ -140,6 +167,14 @@ export interface ScribePreloadApi {
   onDiagnostics(
     callback: (event: { handle: DocumentHandle; diagnostics: LspDiagnostic[] }) => void,
   ): () => void;
+  /**
+   * Diagnósticos LSP **atuais** do documento (relê o estado do core).
+   *
+   * O `onDiagnostics` é *push* (e pode perder o primeiro evento — o servidor publica uma vez
+   * só); este método é o *pull*: o renderer relê o estado quando precisa (ex.: ao abrir um
+   * arquivo já com diagnóstico).
+   */
+  diagnostics(handle: DocumentHandle): Promise<LspDiagnostic[]>;
   /** Go-to-definition LSP. */
   definition(handle: DocumentHandle, line: number, col: number): Promise<LspLocation | null>;
   /** Signature help LSP. */
@@ -289,6 +324,20 @@ const api: ScribePreloadApi = {
     return call<DocumentHandle>("document.open", [path], signalId);
   },
   openDialog: (): Promise<string | null> => call<string | null>("document.openDialog", []),
+  closeDocument: (handle: DocumentHandle): Promise<void> =>
+    call<void>("document.close", [handle]),
+  workspaceFiles: (roots?: readonly string[]): Promise<WorkspaceFilesResult> =>
+    call<WorkspaceFilesResult>("workspace.files", roots === undefined ? [] : [roots]),
+  searchFiles: (
+    query: string,
+    options?: SearchFilesOptions,
+    signalId?: number,
+  ): Promise<GrepResult> =>
+    call<GrepResult>(
+      "search.files",
+      options === undefined ? [query] : [query, options],
+      signalId,
+    ),
   text: (handle: DocumentHandle): Promise<string> => call<string>("document.text", [handle]),
   revision: (handle: DocumentHandle): Promise<number> =>
     call<number>("document.revision", [handle]),
@@ -407,6 +456,8 @@ const api: ScribePreloadApi = {
       ipcRenderer.removeListener(CHANNEL_EVENT, listener);
     };
   },
+  diagnostics: (handle: DocumentHandle): Promise<LspDiagnostic[]> =>
+    call<LspDiagnostic[]>("lsp.diagnostics", [handle]),
   definition: (handle: DocumentHandle, line: number, col: number): Promise<LspLocation | null> =>
     call<LspLocation | null>("lsp.definition", [handle, line, col]),
   signatureHelp: (handle: DocumentHandle, line: number, col: number, triggerCharacter?: string): Promise<LspSignatureHelp | null> =>

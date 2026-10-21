@@ -15,6 +15,7 @@ import {
   type VisualRowIndexLike,
 } from "./scene";
 import { collapsedLinesOf, VisualRowIndex } from "./soft-wrap";
+import type { StickyContext } from "./sticky-scroll";
 
 /** Resolvedor de tema mínimo local ao teste (evita import cruzado entre módulos de `core`). */
 function prefixTheme(rules: Readonly<Record<string, RGBA>>): ThemeResolver {
@@ -92,6 +93,8 @@ function buildWithMeasure(
     readonly activeLine?: number;
     readonly folding?: FoldingState;
     readonly rowIndex?: VisualRowIndexLike;
+    /** Contexto de sticky scroll (as linhas que grudam no topo). */
+    readonly sticky?: StickyContext;
   },
 ): SceneInstances {
   return buildInstances(
@@ -114,6 +117,7 @@ function buildWithMeasure(
     undefined, // breakpointLines
     extras?.activeLine,
     extras?.rowIndex,
+    extras?.sticky,
   );
 }
 
@@ -808,6 +812,117 @@ describe("buildInstances — folding × wrap (cena × índice)", () => {
     // O texto da linha 2 é desenhado na row 2 (Y = paddingTop + 2 * lineHeight = 44).
     expect(scene.glyphs.filter((g) => g.y === 44)).toHaveLength(1);
     expect(scene.glyphs.every((g) => g.y === 44)).toBe(true);
+  });
+});
+
+describe("buildInstances — sticky scroll", () => {
+  const atlas = new GlyphAtlas();
+  const measure = (text: string): number => text.length * 10;
+
+  it("as linhas de contexto são desenhadas grudadas no topo (sem scroll)", () => {
+    const lines = ["head", "x", "y", "z"];
+    const scene = buildWithMeasure(
+      sourceOf(lines),
+      layout(0),
+      atlas,
+      { first: 1, count: 3 },
+      measure,
+      { sticky: { startLine: 0, count: 1 } },
+    );
+    // "head" = 4 glifos na row grudada (Y = paddingTop = 4).
+    expect(scene.glyphs.filter((g) => g.y === 4)).toHaveLength(4);
+    // A faixa visível (linhas 1, 2, 3) continua nas rows normais.
+    expect([...new Set(scene.glyphs.map((g) => g.y))].sort((a, b) => a - b)).toEqual([4, 24, 44, 64]);
+  });
+
+  it("o bloco grudado não se move com o scroll", () => {
+    const lines = ["head", "x", "y", "z"];
+    const scene = buildWithMeasure(
+      sourceOf(lines),
+      layout(40),
+      atlas,
+      { first: 1, count: 3 },
+      measure,
+      { sticky: { startLine: 0, count: 1 } },
+    );
+    // Com 40px de scroll o texto normal sobe (Y = 4 + row*20 - 40 = -16, 4, 24). A linha
+    // coberta pelo bloco grudado (a row do topo da viewport) **não** é desenhada — o bloco a
+    // substitui (o pipeline desenha os fundos antes dos glifos ⇒ ela apareceria por cima).
+    expect(scene.glyphs.slice(0, 2).map((g) => g.y)).toEqual([-16, 24]);
+    // … mas o bloco grudado continua no topo (Y = paddingTop), sem scroll.
+    expect(scene.glyphs.slice(2).map((g) => g.y)).toEqual([4, 4, 4, 4]);
+  });
+
+  it("as linhas do contexto que já estão visíveis não são duplicadas", () => {
+    const scene = buildWithMeasure(
+      sourceOf(["a", "b", "c", "d"]),
+      layout(0),
+      atlas,
+      { first: 0, count: 4 },
+      measure,
+      { sticky: { startLine: 1, count: 2 } },
+    );
+    // O contexto (1..2) está dentro da faixa visível ⇒ nada gruda (a row 0 tem só a linha 0).
+    expect(scene.glyphs.filter((g) => g.y === 4)).toHaveLength(1);
+    // E o total de glifos é o do texto normal (nada foi repetido).
+    expect(scene.glyphs).toHaveLength(4);
+  });
+
+  it("a linha de contexto é desenhada uma vez só (grudada, não na posição original)", () => {
+    const lines = ["head", "x"];
+    const scene = buildWithMeasure(
+      sourceOf(lines),
+      layout(0),
+      atlas,
+      { first: 1, count: 1 },
+      measure,
+      { sticky: { startLine: 0, count: 1 } },
+    );
+    // 4 glifos de "head" (grudados) + 1 de "x" (visível) — "head" não aparece 2×.
+    expect(scene.glyphs).toHaveLength(5);
+    expect(scene.glyphs.filter((g) => g.y === 4)).toHaveLength(4);
+  });
+
+  it("o bloco grudado tem um realce sutil de fundo", () => {
+    const scene = buildWithMeasure(
+      sourceOf(["head", "x"]),
+      layout(0),
+      atlas,
+      { first: 1, count: 1 },
+      measure,
+      { sticky: { startLine: 0, count: 1 } },
+    );
+    // lighten(background 0x1e1f22ff, 0.05) = 0x292a2dff — na row do topo.
+    const stickyBg = scene.rects.find((r) => r.color === 0x292a2dff);
+    expect(stickyBg?.rect.y).toBe(4);
+    expect(stickyBg?.rect.h).toBe(20);
+  });
+
+  it("sem o contexto, a cena é idêntica (o sticky é opt-in)", () => {
+    const lines = ["head", "x", "y"];
+    const range = { first: 1, count: 2 };
+    const comSticky = buildWithMeasure(sourceOf(lines), layout(0), atlas, range, measure, {});
+    // A cena legada (sem o parâmetro novo) é **byte-a-byte** a mesma.
+    const legado = buildInstances(sourceOf(lines), layout(0), atlas, style, range);
+    expect(comSticky).toEqual(legado);
+  });
+
+  it("com wrap, a linha grudada é quebrada nos segmentos do wrap", () => {
+    const long = "a".repeat(26);
+    const scene = buildWithMeasure(
+      sourceOf([long, "x"]),
+      wrapLayout(100),
+      atlas,
+      { first: 1, count: 1 },
+      measure,
+      { sticky: { startLine: 0, count: 1 } },
+    );
+    // 26 glifos da linha grudada (3 segmentos de 10/10/6). A linha visível ("x") fica na row
+    // 0 da viewport, **coberta** pelo bloco grudado ⇒ ela não é desenhada (o bloco a substitui).
+    expect(scene.glyphs).toHaveLength(26);
+    // A linha grudada ocupa as rows 4, 24 e 44 (o topo da viewport, sem scroll).
+    const grudados = scene.glyphs;
+    expect([...new Set(grudados.map((g) => g.y))]).toEqual([4, 24, 44]);
   });
 });
 

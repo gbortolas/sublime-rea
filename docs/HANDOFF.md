@@ -1123,6 +1123,46 @@ usabilidade **TUDO OK**.
 
 ---
 
+## 🎨 Design system + 3 features de última geração (2026-10-21, noite)
+
+### Design (spec de um designer, com medição de contraste e screenshots)
+
+- **Contraste AA em toda a casca**: `--s-muted` 62%→80%, `--s-subtle` 40%→72%, novo
+  `--s-disabled`; o texto pequeno saiu de **3,58:1 → 5,85:1** no tema claro; "desabilitado"
+  1,47:1 → 3,01:1; ícones da rail 2,13:1 → 10,1:1.
+- **O tema claro deixou de ser um vazio branco**: degraus de superfície (rail/sidebar/abas/status/
+  aba ativa) + bordas próprias nos 2 temas.
+- **Estados com hierarquia**: anel de foco 2px (`:focus-visible`, antes 1px *inside*),
+  `--s-selected` 14% + **barra de acento** de 2px (em vez do bloco azul), "×" da find bar sem
+  chip acidental, `aria-pressed` nos 3 toggles, desabilitado legível.
+- **Superfícies flutuantes** (`--s-surface-raised` + `--s-border-strong`) — o popup sumia no branco.
+- **Escala tipográfica com degraus** (13px UI / 12px status / 11px rótulos / 15px paleta) —
+  o 13px era um degrau morto.
+- **A lupa de código** no sistema (zoom 1.8, 320px sem estourar a janela, z-index da escala).
+- Alvos de clique ≥ 24px · `kbd` com cara de tecla · cores semânticas · grade de espaçamento.
+
+### 3 features
+
+| # | Feature | Módulos | Como se usa |
+|---|---|---|---|
+| 1 | **⌘P — Quick Open** (fuzzy de arquivos + comandos + recentes, com prévia) | `src/core/workspace/file-index.ts`, `src/renderer/quick-open.ts` | `Ctrl/Cmd+P` |
+| 2 | **📌 Sticky scroll** (a "envelope" do código gruda no topo) | `src/core/render/sticky-scroll.ts`, `scene.ts` | automático ao rolar |
+| 3 | **🔍 Grep na workspace** (resultados agrupados por arquivo na lateral) | `src/core/workspace/grep.ts`, `src/renderer/search-panel.ts` | `Ctrl/Cmd+Shift+F` (ou o botão novo da rail) |
+
+### 🐛 LSP de verdade (o TypeScript estava **sem diagnóstico nenhum**)
+
+- **capabilities vazias** ⇒ o servidor zerava o `publishDiagnostics` ⇒ **zero** diagnóstico;
+- **framing em string** ⇒ o `Content-Length` (bytes) nunca casava com acento/emoji ⇒ mensagem travada;
+- o popup de Document Symbols **lançava** com símbolo plano;
+- o broadcast de diagnósticos saía **1 evento atrasado**;
+- `didClose` nunca saía; `didChange` mandava o documento inteiro; o `tsserver.path` do AppImage
+  apontava para um arquivo inexistente; o `npm` fora do nvm não era achado; o `HostSession.pid`.
+
+**Gates:** `typecheck`/`lint`/`test`/`build` exit 0 · **1176 testes / 94 arquivos** ·
+E2E de usabilidade **TUDO OK** · E2E das features **21/21**.
+
+---
+
 ## 🗂️ Estado do repositório
 
 - ✅ **Working tree LIMPO na abertura desta sessão** (2026-10-20) — a pendência de 2026-10-17

@@ -304,6 +304,8 @@ export class ExtensionHostImpl implements ExtensionHost {
     const session: HostSession = {
       handle,
       name,
+      // O `HostProcess` do Electron (`utilityProcess`) tem `pid`; o fake de teste não ⇒ opcional.
+      pid: "pid" in child && typeof child.pid === "number" ? child.pid : undefined,
       get state(): HostState {
         return bridge.state;
       },
@@ -386,6 +388,18 @@ export const electronHostSpawner: HostSpawner = {
       stdio: "pipe",
       serviceName: options.name,
     });
+    /**
+     * **wrapper** registrado no processo ↔ listener original pedido pelo cliente.
+     *
+     * ⚠️ O `on` do processo registra um *wrapper* (o `utilityProcess` entrega mensagens
+     * tipadas), mas o `off` recebia o listener **original** ⇒ `removeListener` não
+     * encontrava nada e o wrapper **nunca saía** (vazamento + mensagem pós-`close`).
+     * O mapa guarda o par para remover o wrapper certo.
+     */
+    const messageWrappers = new Map<
+      (message: unknown) => void,
+      ((message: unknown) => void)[]
+    >();
     return {
       get pid(): number | undefined {
         return child.pid;
@@ -397,9 +411,17 @@ export const electronHostSpawner: HostSpawner = {
       },
       on<E extends HostProcessEventName>(event: E, listener: HostProcessEvents[E]): void {
         if (event === "message") {
-          child.on("message", (message: unknown) =>
-            (listener as unknown as (m: unknown) => void)(message),
-          );
+          const original = listener as unknown as (message: unknown) => void;
+          const wrapper = (message: unknown): void => {
+            original(message);
+          };
+          const registered = messageWrappers.get(original);
+          if (registered === undefined) {
+            messageWrappers.set(original, [wrapper]);
+          } else {
+            registered.push(wrapper);
+          }
+          child.on("message", wrapper);
         } else if (event === "exit") {
           child.on("exit", (code: number) =>
             (listener as unknown as (c: number | null) => void)(code),
@@ -413,6 +435,15 @@ export const electronHostSpawner: HostSpawner = {
         }
       },
       off(_event: "message", listener: (message: unknown) => void): void {
+        const registered = messageWrappers.get(listener);
+        const wrapper = registered?.pop();
+        if (wrapper !== undefined) {
+          child.removeListener("message", wrapper);
+          if (registered !== undefined && registered.length === 0) {
+            messageWrappers.delete(listener);
+          }
+          return;
+        }
         child.removeListener("message", listener);
       },
       kill(): void {

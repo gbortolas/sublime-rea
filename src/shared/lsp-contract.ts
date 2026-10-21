@@ -175,7 +175,10 @@ export interface LspDocumentSymbolHierarchy extends LspDocumentSymbol {
 
 // ── Code Actions ────────────────────────────────────────────────────────────────────────────────
 
-/** Range LSP simplificado para o contrato IPC. */
+/**
+ * Range LSP simplificado (0‑based, linha/coluna) para o contrato IPC.
+ * (Uma única declaração — antes havia duas idênticas, o que gerava ambiguidade.)
+ */
 export interface LspRange {
   readonly start: { readonly line: number; readonly character: number };
   readonly end: { readonly line: number; readonly character: number };
@@ -193,12 +196,6 @@ export interface LspCodeAction {
   readonly diagnostics?: readonly number[];
   readonly edit?: LspWorkspaceEdit;
   readonly command?: { readonly command: string; readonly arguments?: readonly unknown[] };
-}
-
-/** Range 0‑based (linha/coluna) — contratos de fronteira do LSP. */
-export interface LspRange {
-  readonly start: { readonly line: number; readonly character: number };
-  readonly end: { readonly line: number; readonly character: number };
 }
 
 /** Resultado de rename (WorkspaceEdit simplificado). */

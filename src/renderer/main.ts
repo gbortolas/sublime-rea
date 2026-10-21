@@ -41,6 +41,7 @@ import type {
   DocumentHighlight,
   DocumentInsertResult,
   EditorTheme,
+  GrepResult,
   HighlightSpan,
   LspCodeAction,
   LspCompletionItem,
@@ -59,6 +60,7 @@ import type {
   ReplaceAllResult,
   RenderPipeline,
   SearchDocumentResult,
+  SearchFilesOptions,
   SearchMatch,
   SearchQuery,
   Selection,
@@ -67,6 +69,7 @@ import type {
   SnippetsListResult,
   TextStyle,
   Viewport,
+  WorkspaceFilesResult,
 } from "../shared";
 import {
   FindBarError,
@@ -76,6 +79,10 @@ import {
 import type { FindBarApi, FindBarState } from "./find-bar";
 import { attachCommandPalette } from "./command-palette";
 import type { CommandPaletteApi, CommandPaletteBinding } from "./command-palette";
+import { hideQuickOpen, showQuickOpen } from "./quick-open";
+import type { QuickOpenItem } from "./quick-open";
+import { attachSearchPanel } from "./search-panel";
+import type { SearchPanelBinding } from "./search-panel";
 import { createCompletionPopup } from "./completions";
 import type { CompletionPopupBinding } from "./completions";
 import { attachCodeLoupe } from "./code-loupe";
@@ -143,11 +150,25 @@ import {
   type SearchHighlight,
   type TextMeasurer,
   buildInstances,
+  computeStickyContext,
+  stickySymbolsFromLsp,
+  type StickySymbol,
 } from "../core/render";
 import { createSyntaxTheme } from "../core/syntax";
 
 const DEMO_LINE_COUNT = 200;
 const GLYPH_CHUNK = 2048;
+
+/** Debounce da busca dos símbolos do LSP (o sticky scroll) depois de uma edição. */
+const STICKY_SYMBOLS_DEBOUNCE_MS = 400;
+
+/**
+ * Contexto de *sticky scroll* (o retorno de `computeStickyContext`).
+ *
+ * Alias local: o *barrel* do render reexporta a **função**, não o tipo (o tipo mora em
+ * `core/render/sticky-scroll.ts`, que é interno do módulo).
+ */
+type StickyContext = ReturnType<typeof computeStickyContext>;
 
 /** Estado de folding: ranges por handle do documento. */
 const foldingStates = new Map<number, readonly FoldRange[]>();
@@ -811,6 +832,27 @@ interface ScribeBridge {
    * snippets embutidos (sem crash).
    */
   snippets?(): Promise<SnippetsListResult>;
+  /**
+   * Índice de **arquivos da workspace** (o *Quick Open*, ⌘P) — **opcional**: um preload
+   * mais antigo não expõe o método ⇒ o ⌘P mostra **só os comandos** (degradação, sem crash).
+   */
+  workspaceFiles?(roots?: readonly string[]): Promise<WorkspaceFilesResult>;
+  /**
+   * Busca em **todos os arquivos** da workspace (o "grep", `Ctrl+Shift+F`) — **opcional**:
+   * um preload mais antigo não expõe o método ⇒ o painel mostra "indisponível".
+   *
+   * `signalId` (o `nextSignalId()` da ponte) torna a busca **cancelável**.
+   */
+  searchFiles?(
+    query: string,
+    options?: SearchFilesOptions,
+    signalId?: number,
+  ): Promise<GrepResult>;
+  /**
+   * Fecha o documento no **core** (o `didClose` do LSP) — **opcional**: um preload mais
+   * antigo não expõe o método ⇒ a aba fecha só do lado do renderer.
+   */
+  closeDocument?(handle: number): Promise<void>;
 }
 
 function readBridge(): ScribeBridge | undefined {
@@ -2095,6 +2137,16 @@ class DocumentController {
     hideSnippetChoice();
     session.dispose();
     foldingStates.delete(session.handle);
+    // O **core** fecha o documento: o `didClose` do LSP sai por aqui — sem isto, o servidor
+    // LSP **acumula** os documentos fechados (memória + diagnósticos obsoletos).
+    //
+    // O preload antigo não expõe o método ⇒ a aba fecha só do lado do renderer (sem crash).
+    const closeDocument = this.bridge.closeDocument;
+    if (closeDocument !== undefined) {
+      void closeDocument.call(this.bridge, session.handle).catch((error: unknown) => {
+        console.warn("Scribe: falha ao fechar o documento no core", error);
+      });
+    }
     this.sessions.splice(index, 1);
     if (this.sessions.length === 0) {
       this.activeIndex = -1;
@@ -2919,6 +2971,307 @@ function hasOpenContextPopup(popups: ContextPopups): boolean {
   );
 }
 
+// ---- Quick Open (⌘P) e busca na workspace (grep) ---------------------------------------------
+
+/**
+ * O que o *Quick Open* sabe fazer com o item escolhido.
+ *
+ * O `payload` do `QuickOpenItem` é `unknown` (o módulo do popup é agnóstico): quem
+ * **interpreta** é o renderer, e este tipo é a forma canônica de fazer isso sem `any`.
+ */
+type QuickOpenPayload =
+  | { readonly kind: "command"; readonly id: string }
+  | { readonly kind: "file"; readonly path: string };
+
+/** `true` quando o `payload` é um `QuickOpenPayload` válido. */
+function isQuickOpenPayload(value: unknown): value is QuickOpenPayload {
+  if (typeof value !== "object" || value === null) return false;
+  const record = value as { kind?: unknown; id?: unknown; path?: unknown };
+  if (record.kind === "command") return typeof record.id === "string";
+  if (record.kind === "file") return typeof record.path === "string";
+  return false;
+}
+
+/** Último segmento de um caminho (o renderer não tem `node:path`). */
+function baseNameOf(path: string): string {
+  const cut = Math.max(path.lastIndexOf("/"), path.lastIndexOf("\\"));
+  return cut < 0 ? path : path.slice(cut + 1);
+}
+
+/**
+ * Um documento aberto (o mínimo que o *Quick Open* precisa).
+ *
+ * É um **vista estrutural** da sessão (`TabSession`): o *Quick Open* só usa o handle, o
+ * rótulo e o caminho.
+ */
+export interface OpenDocumentInfo {
+  readonly handle: number;
+  readonly label: string;
+  readonly path: string;
+}
+
+/**
+ * Diretórios dos documentos abertos — as **raízes candidatas** da workspace.
+ *
+ * O `main` expande cada uma até a raiz da workspace (a pasta com `.git`); sem documento
+ * aberto, ele usa a raiz do processo.
+ */
+function workspaceRootsOf(sessions: readonly OpenDocumentInfo[]): readonly string[] {
+  const roots = new Set<string>();
+  for (const session of sessions) {
+    const path = session.path;
+    const cut = Math.max(path.lastIndexOf("/"), path.lastIndexOf("\\"));
+    roots.add(cut > 0 ? path.slice(0, cut) : path);
+  }
+  return [...roots];
+}
+
+/**
+ * As **fontes** dos itens do *Quick Open* (o que a ponte oferece).
+ *
+ * É uma vista mínima da ponte (e não a ponte inteira) para que a montagem dos itens seja
+ * testável sem Electron.
+ */
+export interface QuickOpenSources {
+  /** Lista os comandos (a paleta e o *Quick Open* compartilham a mesma lista). */
+  readonly listCommands: () => Promise<CommandListResult>;
+  /**
+   * Índice de arquivos da workspace — **opcional**: um preload mais antigo não expõe o
+   * método ⇒ a lista tem só comandos e recentes (degradação, sem crash).
+   */
+  readonly workspaceFiles?: (roots: readonly string[]) => Promise<WorkspaceFilesResult>;
+}
+
+/**
+ * Monta os itens do *Quick Open*: **recentes** (primeiro), **comandos** e **arquivos**.
+ *
+ * - Sem `workspaceFiles` (preload antigo) ⇒ a lista tem só comandos e recentes;
+ * - Sem fontes ⇒ a lista é vazia (o popup ainda abre — degradação explícita).
+ */
+export async function collectQuickOpenItems(
+  sources: QuickOpenSources | undefined,
+  sessions: readonly OpenDocumentInfo[],
+): Promise<readonly QuickOpenItem[]> {
+  const items: QuickOpenItem[] = [];
+
+  // Recentes: as abas abertas, da mais recente para a mais antiga.
+  for (let i = sessions.length - 1; i >= 0; i -= 1) {
+    const session = sessions[i]!;
+    const payload: QuickOpenPayload = { kind: "file", path: session.path };
+    items.push({
+      id: `recent:${session.handle}`,
+      label: session.label,
+      description: session.path,
+      kind: "recent",
+      payload,
+    });
+  }
+
+  // Comandos (a mesma lista da paleta).
+  if (sources !== undefined) {
+    try {
+      const result = await sources.listCommands();
+      for (const command of result.commands) {
+        const payload: QuickOpenPayload = { kind: "command", id: command.id };
+        items.push({
+          id: `command:${command.id}`,
+          label: command.label,
+          ...(command.category !== undefined ? { description: command.category } : {}),
+          kind: "command",
+          payload,
+        });
+      }
+    } catch (error: unknown) {
+      console.warn("Scribe: falha ao listar comandos para o Quick Open", error);
+    }
+  }
+
+  // Arquivos da workspace (o preload antigo não expõe ⇒ só comandos e recentes).
+  if (sources?.workspaceFiles !== undefined) {
+    try {
+      const result = await sources.workspaceFiles(workspaceRootsOf(sessions));
+      for (const file of result.files) {
+        const payload: QuickOpenPayload = { kind: "file", path: file.absolutePath };
+        items.push({
+          id: `file:${file.absolutePath}`,
+          label: baseNameOf(file.path),
+          description: file.path,
+          kind: "file",
+          payload,
+        });
+      }
+      if (result.truncated) {
+        console.warn("Scribe: índice da workspace truncado", result.warnings);
+      }
+    } catch (error: unknown) {
+      console.warn("Scribe: falha ao indexar a workspace", error);
+    }
+  }
+
+  return items;
+}
+
+/** Controle do painel de busca na workspace (o "grep"). */
+export interface WorkspaceSearchController {
+  /** Abre o painel (o foco vai para o campo de busca). */
+  open(): void;
+  /** Fecha o painel (o foco volta ao editor). */
+  close(): void;
+  /** `true` enquanto o painel está aberto. */
+  isOpen(): boolean;
+}
+
+/** Dependências do painel de busca na workspace. */
+interface WorkspaceSearchDeps {
+  readonly bridge: ScribeBridge | undefined;
+  /**
+   * As **raízes** da workspace (as pastas dos documentos abertos).
+   *
+   * Sem elas, o `main` usa a raiz do processo (`cwd`) — por isso o painel passa as
+   * raízes do documento ativo: a busca é sobre a **workspace** do usuário.
+   */
+  readonly roots?: () => readonly string[];
+  /** Abre um arquivo na posição (o clique numa ocorrência). */
+  readonly onOpen: (path: string, line: number, column: number) => void;
+  /** Devolve o foco ao canvas do editor. */
+  readonly focusEditor: () => void;
+}
+
+/** Debounce da busca (300ms): a digitação não dispara uma varredura por tecla. */
+export const WORKSPACE_SEARCH_DEBOUNCE_MS = 300;
+
+/** Resultado vazio (o painel reflecting "nada encontrado"). */
+const EMPTY_GREP_RESULT: GrepResult = { matches: [], truncated: false, filesScanned: 0 };
+
+/**
+ * Cria o painel de busca na workspace (o "grep" do VS Code).
+ *
+ * O painel é **autocontido** (`./search-panel.ts`): aqui ficam só a política (debounce,
+ * cancelamento, visibilidade) e a tradução das intenções em IPC.
+ */
+export function createWorkspaceSearchController(
+  deps: WorkspaceSearchDeps,
+): WorkspaceSearchController {
+  const hostElement = document.getElementById("search-panel-host");
+  if (hostElement === null) {
+    console.info("Scribe: busca na workspace desligada (markup ausente)");
+    return { open: (): void => {}, close: (): void => {}, isOpen: (): boolean => false };
+  }
+  // `const` não-nulo: o TS não estreita o tipo dentro dos *closures* (o painel usa o host
+  // em várias callbacks).
+  const host: HTMLElement = hostElement;
+
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  let signalId: number | undefined;
+  let open = false;
+  let editorsHiddenBefore = false;
+
+  /** Escreve a mensagem do painel (o status é do módulo do painel — aqui é degradação). */
+  const setPanelMessage = (text: string): void => {
+    const status = host.querySelector(".search-panel-status");
+    if (status !== null) status.textContent = text;
+  };
+
+  /** Cancela a busca em voo (o `signalId` é o do cancelamento dedicado do IPC). */
+  const cancelRunning = (): void => {
+    if (signalId !== undefined) deps.bridge?.cancel(signalId);
+    signalId = undefined;
+  };
+
+  const runSearch = (query: string): void => {
+    const bridge = deps.bridge;
+    if (bridge?.searchFiles === undefined) {
+      // Ponte antiga: a busca em arquivos não existe — degradação **explícita**.
+      setPanelMessage("Busca em todos os arquivos indisponível");
+      return;
+    }
+    cancelRunning();
+    const next = bridge.nextSignalId();
+    signalId = next;
+    panel?.setBusy(true);
+    // As raízes da workspace (as pastas dos documentos abertos) — a busca é sobre a
+    // workspace do usuário, não sobre a raiz do processo.
+    const roots = deps.roots?.() ?? [];
+    void bridge.searchFiles(query, { roots }, next).then(
+      (result) => {
+        if (signalId !== next) return; // resposta obsoleta (a busca foi cancelada)
+        signalId = undefined;
+        panel?.setBusy(false);
+        panel?.setResults(result);
+      },
+      (error: unknown) => {
+        if (signalId !== next) return;
+        signalId = undefined;
+        panel?.setBusy(false);
+        panel?.setResults(EMPTY_GREP_RESULT);
+        console.warn("Scribe: falha na busca em todos os arquivos", error);
+      },
+    );
+  };
+
+  const scheduleSearch = (query: string): void => {
+    clearTimeout(timer);
+    timer = undefined;
+    if (query.trim().length === 0) {
+      cancelRunning();
+      panel?.setBusy(false);
+      panel?.setResults(EMPTY_GREP_RESULT);
+      return;
+    }
+    timer = setTimeout(() => {
+      timer = undefined;
+      runSearch(query);
+    }, WORKSPACE_SEARCH_DEBOUNCE_MS);
+  };
+
+  function closePanel(): void {
+    if (!open) return;
+    open = false;
+    clearTimeout(timer);
+    timer = undefined;
+    cancelRunning();
+    host.hidden = true;
+    const list = document.getElementById("sidebar-editors");
+    const header = document.getElementById("sidebar-section-toggle");
+    if (list !== null) list.hidden = editorsHiddenBefore;
+    if (header !== null) header.hidden = false;
+    deps.focusEditor();
+  }
+
+  function openPanel(): void {
+    if (open) {
+      const input = host.querySelector(".search-panel-input");
+      if (input instanceof HTMLInputElement) input.focus();
+      return;
+    }
+    open = true;
+    // O painel ocupa a sidebar inteira ⇒ a lista de "Abertos" sai de cena.
+    const list = document.getElementById("sidebar-editors");
+    const header = document.getElementById("sidebar-section-toggle");
+    editorsHiddenBefore = list?.hidden ?? false;
+    if (list !== null) list.hidden = true;
+    if (header !== null) header.hidden = true;
+    host.hidden = false;
+    if (deps.bridge?.searchFiles === undefined) {
+      setPanelMessage("Busca em todos os arquivos indisponível");
+    }
+    const input = host.querySelector(".search-panel-input");
+    if (input instanceof HTMLInputElement) input.focus();
+  }
+
+  const panel: SearchPanelBinding = attachSearchPanel(host, {
+    onOpen: (path, line, column) => deps.onOpen(path, line, column),
+    onQueryChange: (query) => scheduleSearch(query),
+    onClose: () => closePanel(),
+  });
+
+  return {
+    open: openPanel,
+    close: closePanel,
+    isOpen: (): boolean => open,
+  };
+}
+
 // ---- app ------------------------------------------------------------------------------------------
 
 class ScribeRenderer {
@@ -2955,6 +3308,15 @@ class ScribeRenderer {
   private gitDiffs: readonly GitDiffRange[] = [];
   /** Linhas (1-based) com breakpoint do documento ativo. */
   private breakpointLines: readonly number[] = [];
+  /**
+   * Símbolos do LSP (intervalos de linhas) do documento ativo — o **cache** do sticky scroll.
+   *
+   * É cacheado porque `lsp.documentSymbols` é uma chamada assíncrona: consultá-la a cada
+   * frame inundaria o servidor LSP. O `main.ts` busca uma vez por documento.
+   */
+  private stickySymbolsValue: readonly StickySymbol[] = [];
+  /** Handle do documento cujos símbolos estão no cache (`undefined` = nenhum). */
+  private stickySymbolsHandle: number | undefined;
   /**
    * `true` quando o layout mudou (minimap/painel) e o wrap precisa ser recalculado.
    *
@@ -3024,6 +3386,40 @@ class ScribeRenderer {
   /** Define as linhas com breakpoint do documento ativo (bolinha no gutter). */
   setBreakpointLines(lines: readonly number[]): void {
     this.breakpointLines = lines;
+  }
+
+  /**
+   * Define os **símbolos do LSP** (intervalos de linhas) usados pelo *sticky scroll*.
+   *
+   * O cache é do **renderer** (por handle): o `documentSymbols` do LSP é uma chamada
+   * assíncrona e cara — chamá-la a cada frame inundaria o servidor. O `main.ts` busca uma
+   * vez por documento (e rebusca quando o texto muda) e entrega o resultado aqui.
+   *
+   * Uma lista **vazia** significa "sem símbolos" ⇒ o sticky usa o *fallback* por indentação
+   * (é o que o `computeStickyContext` faz quando não há símbolos).
+   */
+  setStickySymbols(handle: number | undefined, symbols: readonly StickySymbol[]): void {
+    this.stickySymbolsHandle = handle;
+    this.stickySymbolsValue = symbols;
+  }
+
+  /**
+   * Contexto de *sticky scroll* do documento ativo (a "envelope" que envolve o caret).
+   *
+   * `undefined` = sem contexto (1ª linha do arquivo, ou o cabeçalho do próprio bloco).
+   */
+  private computeStickyContext(caretLine: number): StickyContext | undefined {
+    // Os symbols são do **documento ativo**: se o handle não bater, o cache é velho (o
+    // `main.ts` troca os symbols quando o documento muda) ⇒ sem symbols (fallback por
+    // indentação) até a troca chegar.
+    const symbols =
+      this.stickySymbolsHandle === this.activeHandle ? this.stickySymbolsValue : [];
+    return computeStickyContext({
+      caretLine,
+      firstVisibleLine: this.firstVisibleLine(),
+      lineAt: (line: number): string => this.source.line(line),
+      symbols,
+    });
   }
 
   /** Largura atual do gutter em px. */
@@ -3335,6 +3731,10 @@ class ScribeRenderer {
       // O índice de rows: a cena reusa os segmentos já quebrados (não re-quebra a faixa a
       // cada frame) e passa a contar as linhas colapsadas (folding) como o índice.
       this.visualRows,
+      // **Sticky scroll**: o contexto (a "envelope" do caret) que gruda no topo. O cálculo
+      // é por frame (barato: os symbols já vêm cacheados) e a cena desenha as linhas que
+      // saíram da viewport no topo, grudadas.
+      this.computeStickyContext(caretPos.line),
     );
     this.requestHighlight?.(range.first, range.count);
 
@@ -4413,13 +4813,97 @@ export async function bootRenderer(): Promise<boolean> {
     });
   }
 
+  // ── Sticky scroll: símbolos do LSP (cacheados por handle) ───────────────────────────────
+  //
+  // O `lsp.documentSymbols` é uma chamada **assíncrona** e cara: consultá-la a cada frame
+  // inundaria o servidor. O cache é **por documento** (handle) e só éinvalidado quando o
+  // **texto** muda (o `contentVersion` da fonte) — o cache do servidor (5s) no `main`
+  // cuida do resto.
+  const stickySymbolCache = new Map<
+    number,
+    { readonly symbols: readonly StickySymbol[]; readonly contentVersion: number }
+  >();
+  let stickyRefreshTimer: ReturnType<typeof setTimeout> | undefined;
+
+  /** Aplica os símbolos ao renderer (o desenho do sticky é por frame, os dados são cacheados). */
+  const applyStickySymbols = (
+    handle: number | undefined,
+    symbols: readonly StickySymbol[],
+  ): void => {
+    renderer.setStickySymbols(handle, symbols);
+    renderer.start();
+  };
+
+  /**
+   * Atualiza os símbolos do LSP do documento ativo (usados pelo sticky scroll).
+   *
+   * Com o cache válido, **não** há IPC (o `documentSymbols` só é chamado quando o texto
+   * mudou ou quando o documento é aberto).
+   */
+  const refreshStickySymbols = (session: TabSession | undefined): void => {
+    if (session === undefined) {
+      stickySymbolCache.clear();
+      applyStickySymbols(undefined, []);
+      return;
+    }
+    if (bridge?.documentSymbols === undefined) {
+      // Sem LSP: o sticky usa o *fallback* por indentação.
+      applyStickySymbols(session.handle, []);
+      return;
+    }
+    const handle = session.handle;
+    const cached = stickySymbolCache.get(handle);
+    if (cached !== undefined && cached.contentVersion === session.source.contentVersion) {
+      applyStickySymbols(handle, cached.symbols);
+      return;
+    }
+    void bridge.documentSymbols(handle).then(
+      (symbols) => {
+        // O documento pode ter mudado enquanto a chamada estava em voo.
+        if (controller?.current?.handle !== handle) return;
+        const converted = stickySymbolsFromLsp(
+          symbols,
+          (line: number): string => session.source.line(line),
+          session.source.lineCount(),
+        );
+        stickySymbolCache.set(handle, {
+          symbols: converted,
+          contentVersion: session.source.contentVersion,
+        });
+        applyStickySymbols(handle, converted);
+      },
+      (error: unknown) => {
+        console.warn("Scribe: falha ao buscar símbolos para o sticky scroll", error);
+      },
+    );
+  };
+
+  /** Rebusca os símbolos (debounced) depois de uma edição. */
+  const scheduleStickyRefresh = (): void => {
+    clearTimeout(stickyRefreshTimer);
+    stickyRefreshTimer = setTimeout(() => {
+      stickyRefreshTimer = undefined;
+      refreshStickySymbols(controller?.current);
+    }, STICKY_SYMBOLS_DEBOUNCE_MS);
+  };
+
   // O painel de breakpoints acompanha o **documento ativo**: trocar de aba (ou abrir
   // outro arquivo) ressincroniza a lista — sem isto, editar a condição do arquivo A
   // gravaria no arquivo B.
   if (controller !== undefined) {
-    controller.onActiveDocumentChanged = () => {
+    controller.onActiveDocumentChanged = (session) => {
       resyncDebugPanelToActiveDocument();
+      // O sticky scroll troca de documento ⇒ os símbolos cacheados do anterior não valem.
+      refreshStickySymbols(session);
     };
+  }
+
+  // Uma **edição** invalida os símbolos do LSP (o envelope do bloco mudou): a busca é
+  // rebuscada depois de uma pausa (o typing não gera um IPC por tecla).
+  if (bridge !== undefined) {
+    bridge.onDocumentChanged(() => {
+      scheduleStickyRefresh();
+    });
   }
 
   const handleMenuAction = (action: string): void => {
@@ -4559,6 +5043,38 @@ export async function bootRenderer(): Promise<boolean> {
     }
   };
 
+  /**
+   * Executa um comando **pela UI** (a paleta e o *Quick Open* compartilham o caminho).
+   *
+   * - Some comandos são **do renderer** (a find bar, o tema, a depuração): eles rodam aqui;
+   * - os demais são **do core** (`file.*`, `edit.undo/redo`): vão por IPC.
+   */
+  const executeCommandById = (commandId: string): void => {
+    if (commandId === "find.open") {
+      if (findBar !== undefined && !findBar.model.isOpen) {
+        findBar.model.open();
+        // O foco vai para o **input** da busca (sem isto, a digitação iria para o
+        // documento — o find bar aberto sem foco é inútil).
+        const findInput = document.getElementById("find-input");
+        if (findInput instanceof HTMLInputElement) findInput.focus();
+      }
+    } else if (
+      ["view.toggleTheme", "edit.cut", "edit.copy", "edit.paste", "edit.selectAll"].includes(
+        commandId,
+      )
+    ) {
+      handleMenuAction(commandId);
+    } else if (commandId.startsWith("debug.")) {
+      // Depuração: o core não tem UI — as ações rodam no renderer.
+      handleMenuAction(commandId);
+    } else {
+      // Comandos de core: file.*, edit.undo/redo — executa via IPC
+      void commandPaletteApi?.executeCommand(commandId).catch((error: unknown) => {
+        console.error("Scribe: falha ao executar comando", commandId, error);
+      });
+    }
+  };
+
   const palette =
     commandPaletteApi !== undefined
       ? attachCommandPalette({
@@ -4566,22 +5082,7 @@ export async function bootRenderer(): Promise<boolean> {
           onExecute: (command) => {
             // Fecha a palette antes de executar
             palette?.model.close();
-            // UI actions tratadas localmente no renderer
-            if (command.id === "find.open") {
-              if (findBar !== undefined && !findBar.model.isOpen) {
-                findBar.model.open();
-              }
-            } else if (["view.toggleTheme", "edit.cut", "edit.copy", "edit.paste", "edit.selectAll"].includes(command.id)) {
-              handleMenuAction(command.id);
-            } else if (command.id.startsWith("debug.")) {
-              // Depuração: o core não tem UI — as ações rodam no renderer.
-              handleMenuAction(command.id);
-            } else {
-              // Comandos de core: file.*, edit.undo/redo — executa via IPC
-              void commandPaletteApi.executeCommand(command.id).catch((error: unknown) => {
-                console.error("Scribe: falha ao executar comando", command.id, error);
-              });
-            }
+            executeCommandById(command.id);
             // Foca o canvas de volta
             surface.focus();
           },
@@ -4637,9 +5138,40 @@ export async function bootRenderer(): Promise<boolean> {
     referencesPopup = { isOpen: false, open: () => {}, close: () => {}, dispose: () => {} };
   }
 
-  // O abridor da paleta (o **mesmo** caminho do atalho `Ctrl+Shift+P`): foca o input e
-  // fecha os popups de contexto.
-  const openPalette = attachInputListeners(surface, viewport, renderer, controller, findBar, palette, bridge, completion, hoverTooltip, signatureHelpPopup, documentSymbolsPopup, referencesPopup, packageSnippets);
+  // ── Painel de busca na workspace (o "grep", `Ctrl+Shift+F`) ─────────────────────────────
+  /** Abre um arquivo e posiciona o caret (o clique numa ocorrência do grep). */
+  const openFileAt = async (path: string, line: number, column: number): Promise<void> => {
+    if (controller === undefined) return;
+    const opened = await controller.open(path);
+    if (!opened) return;
+    const session = controller.current;
+    if (session === undefined) return;
+    const targetLine = Math.max(0, Math.min(line, session.source.lineCount() - 1));
+    const targetColumn = Math.max(0, Math.min(column, session.source.line(targetLine).length));
+    const offset = session.source.offsetOf(targetLine, targetColumn);
+    session.caret = offset;
+    session.selection = SelectionOps.collapsed(offset);
+    session.selections = SelectionSetOps.singular(offset);
+    renderer.setSelection(session.selection);
+    renderer.setSelections(session.selections);
+    updateCaretStatus(session.source, offset);
+    viewport.scrollTo(targetLine);
+    renderer.start();
+    focusEditorSurface();
+  };
+
+  const searchController = createWorkspaceSearchController({
+    bridge,
+    roots: () => workspaceRootsOf(controller?.openSessions ?? []),
+    onOpen: (path, line, column) => {
+      void openFileAt(path, line, column);
+    },
+    focusEditor: focusEditorSurface,
+  });
+
+  // Os abridores de overlay (o **mesmo** caminho dos atalhos): a paleta, o *Quick Open* e o
+  // painel de busca focam o input e fecham os popups de contexto.
+  const openers = attachInputListeners(surface, viewport, renderer, controller, findBar, palette, bridge, completion, hoverTooltip, signatureHelpPopup, documentSymbolsPopup, referencesPopup, packageSnippets, searchController, executeCommandById);
 
   // Minimap (P2#9): as cores vêm do tema ativo — sem isso a faixa fica preta no tema claro.
   //
@@ -4780,7 +5312,11 @@ export async function bootRenderer(): Promise<boolean> {
   document.getElementById("activity-palette")?.addEventListener("click", () => {
     // ⚠️ Pelo **mesmo** caminho do atalho `Ctrl+Shift+P`: a paleta abre **focando o input**
     // (o botão chamava `palette.model.open()` direto e o input não recebia o foco).
-    openPalette();
+    openers.openPalette();
+  });
+  document.getElementById("activity-grep")?.addEventListener("click", () => {
+    // A busca em **todos os arquivos** (o "grep") — o mesmo caminho do `Ctrl+Shift+F`.
+    openers.openSearchPanel();
   });
 
   // Seção do painel: colapsa/expande a lista de documentos abertos.
@@ -5004,8 +5540,16 @@ export function attachFindBar(deps: FindBarDeps): FindBarBinding | undefined {
     }
   });
   // Ctrl/Cmd+F em qualquer lugar da janela: a barra pode estar focada, não só o canvas.
+  //
+  // ⚠️ `!event.shiftKey`: o **Ctrl+Shift+F** é a busca em **todos os arquivos** (o "grep") —
+  // sem esta guarda, o `Ctrl+F` abriria a find bar do documento **e** o grep.
   document.addEventListener("keydown", (event: KeyboardEvent) => {
-    if ((event.ctrlKey || event.metaKey) && !event.altKey && (event.key === "f" || event.key === "F")) {
+    if (
+      (event.ctrlKey || event.metaKey) &&
+      !event.altKey &&
+      !event.shiftKey &&
+      (event.key === "f" || event.key === "F")
+    ) {
       event.preventDefault();
       openFind();
       return;
@@ -5056,11 +5600,26 @@ export function attachFindBar(deps: FindBarDeps): FindBarBinding | undefined {
 }
 
 /**
+ * Os **abridores** de overlay do editor.
+ *
+ * A paleta, o *Quick Open* e o painel de busca são **mutuamente exclusivos**: só um fica
+ * visível por vez (é a mesma regra dos popups de contexto).
+ */
+export interface EditorOpeners {
+  /** Abre a paleta de comandos (`Ctrl+Shift+P`). */
+  readonly openPalette: () => void;
+  /** Abre o *Quick Open* (`Ctrl+P`): arquivos, comandos e recentes. */
+  readonly openQuickOpen: () => void;
+  /** Abre o painel de busca em todos os arquivos (`Ctrl+Shift+F`). */
+  readonly openSearchPanel: () => void;
+}
+
+/**
  * Liga os listeners de entrada (teclado, mouse, roda) do editor.
  *
- * Devolve o **abridor da command palette** (`openPalette`): o botão da rail de atividades
- * usa o **mesmo** caminho do atalho `Ctrl+Shift+P` — abrir por ele também foca o input (e
- * fecha os popups de contexto, que se sobrepunham à paleta).
+ * Devolve os **abridores** de overlay (a paleta, o *Quick Open* e o painel de busca): os
+ * botões da rail de atividades usam o **mesmo** caminho dos atalhos — abrir por eles também
+ * foca o input (e fecha os popups de contexto, que se sobrepunham ao overlay).
  */
 function attachInputListeners(
   surface: HTMLCanvasElement,
@@ -5077,7 +5636,11 @@ function attachInputListeners(
   referencesPopup: ReferencesPopupBinding,
   /** Snippets de pacote por trigger (lowercased) — cacheados no boot (ver `bootRenderer`). */
   packageSnippets: PackageSnippetIndex,
-): (() => void) {
+  /** Painel de busca na workspace (o "grep"). */
+  search: WorkspaceSearchController,
+  /** Executa um comando pela UI (a paleta e o *Quick Open* compartilham o caminho). */
+  executeCommand: (commandId: string) => void,
+): EditorOpeners {
   const lineHeight = Math.ceil(TEXT_STYLE.sizePx * 1.4);
 
   // Os popups de contexto num lugar só — para garantir exclusividade (um por vez).
@@ -5117,13 +5680,26 @@ function attachInputListeners(
     }, 200);
   };
 
+  // ── Overlays de aplicação (exclusivos entre si) ───────────────────────────────────────────
+  //
+  // A find bar, a paleta, o *Quick Open* e o painel de busca **não coexistem**: abrir um
+  // fecha os outros (a mesma regra dos popups de contexto).
+
+  /** Fecha a find bar (se estiver aberta). */
+  const closeFindBar = (): void => {
+    if (findBar !== undefined && findBar.model.isOpen) {
+      findBar.model.close();
+    }
+  };
+
   // Command palette: Ctrl+Shift+P interceptado antes de chegar ao canvas.
   const openPalette = (): void => {
     if (palette === undefined) return;
     // Se o find bar estiver aberto, fecha ele primeiro
-    if (findBar !== undefined && findBar.model.isOpen) {
-      findBar.model.close();
-    }
+    closeFindBar();
+    // O *Quick Open* e o painel de busca também saem de cena (exclusividade).
+    hideQuickOpen();
+    search.close();
     // ⚠️ Os popups de **contexto** (símbolos × paleta se sobrepunham) são fechados antes
     // de a paleta abrir — a exclusividade é a mesma dos popups entre si.
     closeContextPopups(popups);
@@ -5132,10 +5708,108 @@ function attachInputListeners(
       if (input instanceof HTMLInputElement) input.focus();
     });
   };
+
+  /**
+   * As fontes dos itens do *Quick Open* (a ponte).
+   *
+   * O índice de arquivos é **opcional**: um preload mais antigo não o expõe ⇒ o *Quick
+   * Open* mostra só comandos e recentes (degradação explícita, sem crash).
+   */
+  const quickOpenSources: QuickOpenSources | undefined = ((): QuickOpenSources | undefined => {
+    if (bridge === undefined) return undefined;
+    const workspaceFiles = bridge.workspaceFiles;
+    return {
+      listCommands: () => bridge.listCommands(),
+      ...(workspaceFiles !== undefined
+        ? {
+            workspaceFiles: (roots: readonly string[]): Promise<WorkspaceFilesResult> =>
+              workspaceFiles.call(bridge, roots),
+          }
+        : {}),
+    };
+  })();
+
+  /** Executa o item escolhido no *Quick Open* (comando ⇒ executa; arquivo ⇒ abre). */
+  const handleQuickOpenPick = (item: QuickOpenItem): void => {
+    if (!isQuickOpenPayload(item.payload)) return;
+    if (item.payload.kind === "command") {
+      // O popup **já** devolveu o foco ao canvas antes do `onPick` — não refocus aqui
+      // (um comando que abre um overlay — o "find.open" — precisa manter o foco dele).
+      executeCommand(item.payload.id);
+      return;
+    }
+    void controller?.open(item.payload.path);
+  };
+
+  /**
+   * Pré-visualização do item selecionado (o conteúdo do arquivo).
+   *
+   * Só há pré-visualização para os **documentos já abertos** (a ponte não expõe a leitura de
+   * um arquivo arbitrário) — o resto devolve `undefined` (o popup esconde a prévia).
+   */
+  const loadQuickOpenPreview = async (item: QuickOpenItem): Promise<string | undefined> => {
+    const payload = item.payload;
+    if (!isQuickOpenPayload(payload) || payload.kind !== "file") return undefined;
+    if (bridge === undefined) return undefined;
+    const session = controller?.openSessions.find((s) => s.path === payload.path);
+    if (session === undefined) return undefined;
+    try {
+      return await bridge.text(session.handle);
+    } catch (error: unknown) {
+      console.warn("Scribe: falha ao carregar a pré-visualização do Quick Open", error);
+      return undefined;
+    }
+  };
+
+  /** Quick Open (Ctrl+P): arquivos, comandos e recentes. */
+  const openQuickOpen = (): void => {
+    closeFindBar();
+    palette?.model.close();
+    hideQuickOpen();
+    search.close();
+    closeContextPopups(popups);
+    // Os itens chegam por IPC (comandos + índice da workspace): o popup abre assim que
+    // chegam (a lista vazia também é uma resposta válida).
+    void (async () => {
+      const items = await collectQuickOpenItems(quickOpenSources, controller?.openSessions ?? []);
+      showQuickOpen({
+        items,
+        title: "Abrir arquivo, comando ou recente",
+        onPick: (item) => handleQuickOpenPick(item),
+        onCancel: () => focusEditorSurface(),
+        loadPreview: loadQuickOpenPreview,
+      });
+    })();
+  };
+
+  /** Painel de busca em todos os arquivos (Ctrl+Shift+F — o "grep"). */
+  const openSearchPanel = (): void => {
+    closeFindBar();
+    palette?.model.close();
+    hideQuickOpen();
+    closeContextPopups(popups);
+    search.open();
+  };
+
   document.addEventListener("keydown", (event: KeyboardEvent) => {
-    if ((event.ctrlKey || event.metaKey) && event.shiftKey && !event.altKey && (event.key === "p" || event.key === "P")) {
+    const primary = event.ctrlKey || event.metaKey;
+    if (!primary || event.altKey) return;
+    // Ctrl+Shift+P — paleta de comandos.
+    if (event.shiftKey && (event.key === "p" || event.key === "P")) {
       event.preventDefault();
       openPalette();
+      return;
+    }
+    // Ctrl+Shift+F — busca em todos os arquivos (o "grep").
+    if (event.shiftKey && (event.key === "f" || event.key === "F")) {
+      event.preventDefault();
+      openSearchPanel();
+      return;
+    }
+    // Ctrl+P — Quick Open (arquivos, comandos e recentes).
+    if (!event.shiftKey && (event.key === "p" || event.key === "P")) {
+      event.preventDefault();
+      openQuickOpen();
     }
   });
 
@@ -6032,9 +6706,9 @@ function attachInputListeners(
     }
   });
 
-  // O **mesmo** caminho do atalho `Ctrl+Shift+P`: o botão da rail abre a paleta **focando o
+  // Os **mesmos** caminhos dos atalhos: os botões da rail abrem os overlays **focando o
   // input** (o botão chamava `palette.model.open()` direto e o input não recebia o foco).
-  return openPalette;
+  return { openPalette, openQuickOpen, openSearchPanel };
 }
 
 /** Tecla imprimível (um code point, sem modificadores) — a porta da digitação mínima. */

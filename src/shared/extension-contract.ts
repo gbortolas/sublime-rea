@@ -131,6 +131,8 @@ export interface HostSession {
   readonly name: string;
   readonly state: HostState;
   readonly bridge: ExtensionBridge;
+  /** PID do processo do host (`undefined` se o spawner não informar). */
+  readonly pid?: number | undefined;
   /** Resolve quando o processo termina (código `null` = sinal). */
   readonly exited: Promise<{ readonly code: number | null }>;
   dispose(): Promise<void>;

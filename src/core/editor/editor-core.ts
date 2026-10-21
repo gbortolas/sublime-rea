@@ -86,7 +86,7 @@ import {
 import type { ExtensionHost } from "../../shared";
 import type { LspDiagnostic, LspCompletionItem, LspHoverResult, LspLocation, LspSignatureHelp, LspDocumentSymbol, LspRenameResult, LspCodeAction, LspTextEdit, LspFoldingRange, LspInlayHint } from "../../shared";
 import { LspManager } from "../lsp";
-import type { Diagnostic, CompletionItem, Hover, Location, SignatureHelp, DocumentSymbol, TextEdit, FoldingRange, InlayHint } from "../lsp";
+import type { Diagnostic, CompletionItem, Hover, Location, SignatureHelp, DocumentSymbol, DocumentSymbolLike, Range, TextEdit, FoldingRange, InlayHint } from "../lsp";
 
 /** Lane `index` (cold-start) — teto por propriedade (DEC-CON-6/9). */
 export const PROPERTY_INDEX_WORKERS = "index.indexWorkers";
@@ -177,6 +177,14 @@ export interface EditorCore {
   readonly extensionHost: ExtensionHost | undefined;
 
   openDocument(path: string, signal?: AbortSignal): Promise<DocumentHandle>;
+  /**
+   * Fecha o documento: salva se estiver sujo, avisa o servidor LSP (`textDocument/didClose`)
+   * e descarta o buffer.
+   *
+   * Sem o `didClose`, o servidor LSP continua com o documento aberto — memória e
+   * diagnósticos obsoletos acumulam por arquivo aberto.
+   */
+  closeDocument(handle: DocumentHandle): Promise<void>;
   documentText(handle: DocumentHandle): string;
   /**
    * Insere texto na posição `at` do documento, devolvendo resultado rico
@@ -545,36 +553,69 @@ function convertSignatureHelp(help: SignatureHelp): LspSignatureHelp {
 }
 
 /**
- * Achata a árvore de `DocumentSymbol` numa lista plana de `LspDocumentSymbol`, na ordem
- * de profundidade (pre-order). Cada nível é indentado com prefixo `··` no `detail`.
+ * Achata a árvore de símbolos do documento numa lista plana de `LspDocumentSymbol`, na
+ * ordem de profundidade (pre-order). Cada nível é indentado com prefixo `··` no `detail`.
+ *
+ * Aceita as **duas** formas do protocolo:
+ * - hierárquica (`DocumentSymbol`): o range do nome está em `selectionRange`;
+ * - plana (`SymbolInformation`): o range está em `location.range` (é o que o servidor
+ *   devolve quando o cliente não pede `hierarchicalDocumentSymbolSupport`).
+ *
+ * Símbolo **sem range** (payload incompleto) é **pulado** (1 warn) — nunca estouramos:
+ * o popup de Document Symbols não pode quebrar por causa do servidor.
  */
 function flattenDocumentSymbols(
-  symbols: readonly DocumentSymbol[],
+  symbols: readonly DocumentSymbolLike[],
   depth = 0,
 ): LspDocumentSymbol[] {
   const result: LspDocumentSymbol[] = [];
+  let skipped = 0;
   for (const sym of symbols) {
-    const entry: Record<string, unknown> = {
+    const range = symbolRangeOf(sym);
+    if (range === undefined) {
+      skipped += 1;
+      continue;
+    }
+    const entry: LspDocumentSymbol = {
       name: sym.name,
       kind: sym.kind,
       range: {
-        startLine: sym.selectionRange.start.line,
-        startCol: sym.selectionRange.start.character,
-        endLine: sym.selectionRange.end.line,
-        endCol: sym.selectionRange.end.character,
+        startLine: range.start.line,
+        startCol: range.start.character,
+        endLine: range.end.line,
+        endCol: range.end.character,
       },
+      ...(depth > 0
+        ? { detail: "·".repeat(depth) }
+        : sym.detail !== undefined
+          ? { detail: sym.detail }
+          : {}),
     };
-    if (depth > 0) {
-      entry.detail = "·".repeat(depth);
-    } else if (sym.detail !== undefined) {
-      entry.detail = sym.detail;
-    }
-    result.push(entry as unknown as LspDocumentSymbol);
-    if (sym.children !== undefined && sym.children.length > 0) {
+    result.push(entry);
+    if (isHierarchicalSymbol(sym) && sym.children !== undefined && sym.children.length > 0) {
       result.push(...flattenDocumentSymbols(sym.children, depth + 1));
     }
   }
+  if (skipped > 0) {
+    console.warn(`[lsp] ${skipped} símbolo(s) sem range ignorado(s) em documentSymbols`);
+  }
   return result;
+}
+
+/**
+ * Range do símbolo, qualquer que seja a forma do servidor.
+ * `undefined` = o símbolo não tem range utilizável (é pulado).
+ */
+function symbolRangeOf(sym: DocumentSymbolLike): Range | undefined {
+  if (isHierarchicalSymbol(sym)) {
+    return sym.selectionRange ?? sym.range;
+  }
+  return sym.location?.range;
+}
+
+/** Guard: o símbolo é da forma hierárquica (`DocumentSymbol`). */
+function isHierarchicalSymbol(sym: DocumentSymbolLike): sym is DocumentSymbol {
+  return !("location" in sym);
 }
 
 function convertTextEdit(edit: TextEdit): LspTextEdit {
@@ -1565,6 +1606,36 @@ export function createEditorCore(options: EditorCoreOptions = {}): EditorCore {
       return handle;
     },
 
+    async closeDocument(handle: DocumentHandle): Promise<void> {
+      assertNotDisposed();
+      const docState = registry.get(handle);
+      if (docState === undefined) throw new InvalidDocumentHandleError(handle);
+      const path = docState.uri;
+      const uri = toFileUri(path);
+
+      // 0) Documento sujo ⇒ **salva** antes de fechar (o `close` do registry descarta o
+      //    buffer; sem salvar, a edição se perde).
+      if (docState.dirty) {
+        await this.saveDocument(handle);
+      }
+
+      // 1) LSP: `textDocument/didClose` — o servidor solta o documento (memória +
+      //    diagnósticos obsoletos). É idempotente: o `LspManager` ignora URIs sem servidor.
+      if (lspManager !== null) {
+        lspManager.closeDocument(uri);
+      }
+      diagnosticsCache.delete(uri);
+      uriToHandle.delete(path);
+
+      // 2) Buffer: fecha o documento (flush + descarte) e limpa o estado do core.
+      await registry.close(handle);
+      opened.delete(handle);
+      documentExtensions.delete(handle);
+      subscriptions.get(handle)?.dispose();
+      subscriptions.delete(handle);
+      if (state.activeHandle === handle) state.activeHandle = undefined;
+    },
+
     documentText(handle: DocumentHandle): string {
       return resolveBuffer(handle).text();
     },
@@ -2106,6 +2177,16 @@ export function createEditorCore(options: EditorCoreOptions = {}): EditorCore {
       disposed = true;
       lspDisposable?.dispose();
       lspDisposable = undefined;
+      // Fecha os documentos **no servidor LSP** antes de derrubar os servidores: sem
+      // `textDocument/didClose` o servidor fica com cada documento aberto (memória +
+      // diagnósticos obsoletos) até o processo morrer.
+      if (lspManager !== null) {
+        for (const handle of opened) {
+          const path = registry.get(handle)?.uri;
+          if (path === undefined) continue;
+          lspManager.closeDocument(toFileUri(path));
+        }
+      }
       void lspManager?.disconnectAll().catch(() => {});
       lspManager = null;
       diagnosticsCache.clear();

@@ -456,6 +456,111 @@ textarea {
   background: var(--s-warn);
 }
 
+/* ══ Painel de busca na workspace (o "grep") ═════════════════════════════════ */
+
+#search-panel-host {
+  /* O painel ocupa a sidebar inteira (a lista de "Abertos" é escondida enquanto ele
+     está aberto) ⇒ ele é o flex child que sobra. */
+  flex: 1 1 auto;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  background: var(--s-sidebar);
+}
+
+.search-panel-head {
+  display: flex;
+  align-items: center;
+  gap: var(--s-space-1);
+  padding: var(--s-space-2);
+  border-bottom: 1px solid var(--s-border);
+}
+
+.search-panel-input {
+  flex: 1 1 auto;
+  min-width: 0;
+  padding: var(--s-space-1) var(--s-space-2);
+  background: var(--s-bg);
+  color: var(--s-fg);
+  border: 1px solid var(--s-border-strong);
+  border-radius: var(--s-radius);
+  font-family: var(--s-font-ui);
+  font-size: var(--s-fs-sm);
+}
+
+.search-panel-input:focus-visible {
+  outline: 2px solid var(--s-ring);
+  outline-offset: 1px;
+}
+
+.search-panel-close {
+  flex: 0 0 auto;
+  background: transparent;
+  border: none;
+  color: var(--s-muted);
+  font-size: var(--s-fs-lg);
+  line-height: 1;
+  cursor: pointer;
+}
+
+.search-panel-close:hover {
+  color: var(--s-fg);
+}
+
+.search-panel-status {
+  padding: var(--s-space-1) var(--s-space-2);
+  color: var(--s-muted);
+  font-size: var(--s-fs-xs);
+}
+
+.search-panel-results {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+}
+
+.search-panel-file {
+  display: flex;
+  align-items: baseline;
+  gap: var(--s-space-2);
+  padding: var(--s-space-1) var(--s-space-2);
+  font-weight: 600;
+}
+
+.search-panel-file-count {
+  color: var(--s-muted);
+  font-weight: 400;
+  font-size: var(--s-fs-xs);
+}
+
+.search-panel-hit {
+  display: flex;
+  gap: var(--s-space-2);
+  width: 100%;
+  text-align: left;
+  background: transparent;
+  border: none;
+  color: var(--s-fg-muted);
+  font-family: var(--s-font-mono);
+  font-size: var(--s-fs-xs);
+  padding: 1px var(--s-space-2);
+  cursor: pointer;
+}
+
+.search-panel-hit-line {
+  flex: 0 0 auto;
+  color: var(--s-subtle);
+}
+
+.search-panel-hit-text {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: pre;
+}
+
 /* ══ Abas ══════════════════════════════════════════════════════════════════ */
 
 #tab-bar {

@@ -19,10 +19,26 @@ import {
   buildVisualRowMap,
   buildVisualRowMapFromIndex,
   collapsedLinesOf,
+  wrapLine,
   type VisualRowIndexLike,
   type VisualRowMap,
+  type VisualRowSegment,
 } from "./soft-wrap";
+import type { StickyContext } from "./sticky-scroll";
 import type { LineRange } from "./viewport";
+
+/**
+ * A API do **sticky scroll** é re-exportada aqui para que o *barrel* do módulo
+ * (`src/core/render/index.ts`) a exponha sem depender de um arquivo interno.
+ */
+export {
+  computeStickyContext,
+  DEFAULT_STICKY_MAX_LINES,
+  stickySymbolsFromLsp,
+  type StickyLspSymbol,
+  type StickyOptions,
+  type StickySymbol,
+} from "./sticky-scroll";
 
 /** Fonte de linhas — a costura que o documento real implementará depois. */
 export interface LineSource {
@@ -256,6 +272,21 @@ export function buildInstances(
    * contagem de rows do índice (que conhece as linhas colapsadas).
    */
   rowIndex?: VisualRowIndexLike,
+  /**
+   * Contexto de **sticky scroll** — as linhas de contexto (a "envelope" do código) que
+   * **grudam no topo** da viewport.
+   *
+   * Vem de `computeStickyContext` (`sticky-scroll.ts`): o renderer calcula o contexto da
+   * linha do caret (com os symbols do LSP ou, na falta deles, pela indentação) e passa aqui.
+   *
+   * Regras do desenho:
+   * - as linhas do contexto que estão **acima** da 1ª linha visível são desenhadas **grudadas**
+   *   (Y = `paddingTop`, sem o scroll) e **não** na posição original;
+   * - as linhas do contexto que já estão **visíveis** ficam na posição normal (nada duplica).
+   *
+   * `undefined` (default) = sem sticky scroll (comportamento atual, idêntico).
+   */
+  sticky?: StickyContext,
 ): SceneInstances {
   const rects: RectInstance[] = [
     { rect: layout.viewport, color: layout.background },
@@ -297,6 +328,35 @@ export function buildInstances(
           ...(wrap && layout.visualRowOffset !== undefined ? { firstRow: layout.visualRowOffset } : {}),
           ...(collapsedLines.size > 0 ? { collapsedLines } : {}),
         });
+
+  // ── Sticky scroll: o bloco de contexto que gruda no topo ───────────────────────────────────
+  // As linhas do contexto que já saíram da viewport são **repetidas** no topo (Y = paddingTop,
+  // sem o scroll). Os **fundos** entram aqui (logo atrás do fundo da viewport) para que a
+  // seleção, o caret e a busca desenhem **por cima**; os **glifos** entram no fim (por cima do
+  // texto normal da faixa).
+  const stickyInstances =
+    sticky !== undefined
+      ? buildStickyInstances(
+          source,
+          layout,
+          atlas,
+          style,
+          highlight,
+          sticky,
+          first,
+          spaceAdvance,
+          rowIndex,
+          mw,
+        )
+      : undefined;
+  if (stickyInstances !== undefined) {
+    rects.splice(1, 0, ...stickyInstances.rects);
+  }
+  // Rows do topo cobertas pelo bloco grudado: o conteúdo normal nessas rows ficaria **atrás**
+  // do bloco (e o pipeline desenha os rects antes dos glifos ⇒ o texto normal apareceria por
+  // cima do bloco). Elas são omitidas — o bloco é a，它们 são substituídas pelo contexto.
+  const stickyCoveredRows = stickyInstances?.rows ?? 0;
+  const scrollRows = layout.scrollOffsetPx / Math.max(1, layout.lineHeight);
 
   // ── Caret (posição do cursor) e linha ativa (destaque de linha atual) ──────────────────────
   // São **dois** conceitos: o caret é a **posição** (a barra desenhada); a linha ativa é a
@@ -389,6 +449,11 @@ export function buildInstances(
       // Y = row visual (acumulada: 1 row por segmento de wrap) — nunca colide com a
       // linha lógica seguinte, porque a row avança pelo nº de segmentos da linha anterior.
       const y = layout.paddingTop + seg.row * layout.lineHeight - layout.scrollOffsetPx;
+      // Linha coberta pelo bloco grudado ⇒ não se desenha (o bloco a substitui).
+      // O bloco ocupa as rows do **topo da viewport**: absolute `[scrollRows, scrollRows+rows)`.
+      if (stickyCoveredRows > 0 && seg.row >= scrollRows && seg.row < scrollRows + stickyCoveredRows) {
+        continue;
+      }
       const spans = highlight?.spansFor(index);
 
       // Gutter: número da linha (1-based), direita-alinhado no gutter.
@@ -468,38 +533,8 @@ export function buildInstances(
         }
       }
 
-      let x = layout.paddingLeft;
-      let column = 0;
-      let offset = 0;
-
-      while (offset < text.length) {
-        const code = text.codePointAt(offset);
-        if (code === undefined) break;
-        const rune = String.fromCodePoint(code);
-        const size = rune.length;
-        if (rune === "\t") {
-          const stop = layout.tabWidth - (column % layout.tabWidth);
-          x += spaceAdvance * stop;
-          column += stop;
-          offset += size;
-          continue;
-        }
-        const placed = atlas.resolveGlyph(rune, style);
-        if (rune !== " ") {
-          glyphs.push({
-            atlasX: placed.region.x,
-            atlasY: placed.region.y,
-            atlasW: placed.region.w,
-            atlasH: placed.region.h,
-            x,
-            y,
-            color: glyphColor(spans, highlight?.theme, offset + seg.start) ?? layout.defaultColor,
-          });
-        }
-        x += placed.advance;
-        column += 1;
-        offset += size;
-      }
+      // Texto do segmento (glifos, tabs e cor do escopo) — a mesma routine do sticky scroll.
+      pushLineGlyphs(glyphs, atlas, style, layout, spaceAdvance, seg, y, spans, highlight?.theme);
 
       // Bracket matching (P3#14): destaca o par com um retângulo fino (underline-like).
       // Com wrap, o bracket só é desenhado no **segmento** que o contém.
@@ -676,7 +711,169 @@ export function buildInstances(
   // desenhado): com wrap, o índice lógico subiria as guias N rows e elas cruzariam o texto.
   const indentGuides = calcIndentGuides(source, layout, range, rowMap);
 
+  // Sticky scroll: os **glifos** do bloco grudado entram **no fim** (ficam por cima do texto
+  // normal da faixa visível — é o que faz o bloco "grudar" no topo).
+  if (stickyInstances !== undefined) {
+    glyphs.push(...stickyInstances.glyphs);
+  }
+
   return { rects, glyphs, lines, ...(indentGuides !== undefined ? { indentGuides } : {}) };
+}
+
+/**
+ * Desenha os **glifos** de um segmento (visual) de uma linha: o texto, com a cor do escopo
+ * quando há highlighter.
+ *
+ * Extraído do laço principal para que o **sticky scroll** desenhe as linhas grudadas com
+ * exatamente o mesmo cálculo de posição (tabulação inclusa).
+ */
+function pushLineGlyphs(
+  glyphs: GlyphInstance[],
+  atlas: GlyphAtlas,
+  style: TextStyle,
+  layout: LineLayout,
+  spaceAdvance: number,
+  segment: VisualRowSegment,
+  y: number,
+  spans: readonly HighlightSpan[] | undefined,
+  theme: ThemeResolver | undefined,
+): void {
+  const text = segment.text;
+  let x = layout.paddingLeft;
+  let column = 0;
+  let offset = 0;
+
+  while (offset < text.length) {
+    const code = text.codePointAt(offset);
+    if (code === undefined) break;
+    const rune = String.fromCodePoint(code);
+    const size = rune.length;
+    if (rune === "\t") {
+      const stop = layout.tabWidth - (column % layout.tabWidth);
+      x += spaceAdvance * stop;
+      column += stop;
+      offset += size;
+      continue;
+    }
+    const placed = atlas.resolveGlyph(rune, style);
+    if (rune !== " ") {
+      glyphs.push({
+        atlasX: placed.region.x,
+        atlasY: placed.region.y,
+        atlasW: placed.region.w,
+        atlasH: placed.region.h,
+        x,
+        y,
+        color: glyphColor(spans, theme, offset + segment.start) ?? layout.defaultColor,
+      });
+    }
+    x += placed.advance;
+    column += 1;
+    offset += size;
+  }
+}
+
+/** Instâncias do bloco grudado (sticky scroll): o fundo (realce) e os glifos. */
+interface StickyInstances {
+  readonly rects: RectInstance[];
+  readonly glyphs: GlyphInstance[];
+  /** Nº de rows que o bloco **ocupa** no topo (o conteúdo normal nessas rows fica atrás dele). */
+  readonly rows: number;
+}
+
+/**
+ * Monta as instâncias do **bloco grudado** (sticky scroll).
+ *
+ * Regras:
+ * - só as linhas do contexto que estão **acima** da 1ª linha visível são desenhadas aqui (as
+ *   outras já são desenhadas na posição normal ⇒ **nada é duplicado**);
+ * - a Y é `paddingTop + row * lineHeight` — **sem** o scroll (é o que faz "grudar");
+ * - o fundo é um realce sutil (o bloco grudado fica distinguível do texto da faixa);
+ * - o bloco nunca cobre a viewport inteira (para no último row que cabe).
+ */
+function buildStickyInstances(
+  source: LineSource,
+  layout: LineLayout,
+  atlas: GlyphAtlas,
+  style: TextStyle,
+  highlight: SceneHighlight | undefined,
+  sticky: StickyContext,
+  firstVisible: number,
+  spaceAdvance: number,
+  rowIndex: VisualRowIndexLike | undefined,
+  measure: ((text: string) => number) | undefined,
+): StickyInstances {
+  const rects: RectInstance[] = [];
+  const glyphs: GlyphInstance[] = [];
+  const textWidth = layout.viewport.w - layout.gutterWidth - layout.scrollbarWidth;
+  // Nº de rows que cabem na viewport (o bloco grudado não pode cobri-la inteira).
+  const maxRows = Math.max(
+    0,
+    Math.floor((layout.viewport.h - layout.paddingTop) / Math.max(1, layout.lineHeight)),
+  );
+
+  let row = 0;
+  for (let line = sticky.startLine; line < sticky.startLine + sticky.count; line++) {
+    // A linha já está na faixa visível ⇒ é desenhada na posição normal (nada duplica).
+    if (line >= firstVisible) break;
+    for (const segment of stickySegmentsOf(source, layout, line, rowIndex, measure)) {
+      if (row >= maxRows) return { rects, glyphs, rows: row };
+      const y = layout.paddingTop + row * layout.lineHeight;
+      rects.push({
+        rect: { x: layout.gutterWidth, y, w: textWidth, h: layout.lineHeight },
+        color: lighten(layout.background, 0.05),
+      });
+      pushLineGlyphs(
+        glyphs,
+        atlas,
+        style,
+        layout,
+        spaceAdvance,
+        segment,
+        y,
+        highlight?.spansFor(line),
+        highlight?.theme,
+      );
+      row += 1;
+    }
+  }
+  return { rects, glyphs, rows: row };
+}
+
+/**
+ * Segmentos (visuais) de uma linha **fora** da faixa visível — o sticky scroll desenha linhas
+ * que já saíram da viewport, e a malha da faixa não as cobre.
+ *
+ * Com o índice de rows, os segmentos vêm dele (já quebrados e em cache); sem ele, a linha é
+ * quebrada sob demanda (`wrapLine`); sem wrap, é uma única row.
+ */
+function stickySegmentsOf(
+  source: LineSource,
+  layout: LineLayout,
+  line: number,
+  rowIndex: VisualRowIndexLike | undefined,
+  measure: ((text: string) => number) | undefined,
+): readonly VisualRowSegment[] {
+  const text = source.line(line);
+  if (rowIndex !== undefined) {
+    return rowIndex.segmentsOf(line).map((segment) => ({
+      row: segment.segmentIndex,
+      segmentIndex: segment.segmentIndex,
+      start: segment.start,
+      end: segment.end,
+      text: segment.text,
+    }));
+  }
+  if (layout.wrapWidth > 0 && measure !== undefined) {
+    return wrapLine(text, layout.wrapWidth, measure).map((segment, index) => ({
+      row: index,
+      segmentIndex: index,
+      start: segment.start,
+      end: segment.end,
+      text: segment.text,
+    }));
+  }
+  return [{ row: 0, segmentIndex: 0, start: 0, end: text.length, text }];
 }
 
 function caretAdvance(atlas: GlyphAtlas, style: TextStyle, column: number, spaceAdvance: number): number {

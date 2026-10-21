@@ -4,6 +4,47 @@ Todas as mudanças notáveis neste projeto.
 
 ---
 
+## [0.6.0] — 2026-10-21
+
+### 🎨 Design system (a casca ficou elegante)
+
+- **Contraste AA em toda a casca** — `--s-muted` 62%→80% e `--s-subtle` 40%→72%: o texto pequeno
+  saiu de **3,58:1** (reprovado) para **5,85:1** no tema claro; o "desabilitado" foi de 1,47:1
+  (invisível) para 3,01:1; os ícones da rail de 2,13:1 para 10,1:1.
+- **O tema claro deixou de ser um vazio branco** — degraus reais de superfície (rail #f3f3f3 ·
+  painel/abas #f7f7f7 · aba ativa #ffffff) e bordas #e0e0e2.
+- **Anel de foco** de 2px com `outline-offset` (antes 1px *inside*, reprovava WCAG 2.4.11 e se
+  confundia com o hover) · **seleção** de 14% com barra de acento de 2px (em vez do bloco azul) ·
+  escala tipográfica com degraus (13px na UI, 12px na status bar, 11px em rótulos) ·
+  superfícies flutuantes (`--s-surface-raised` + `--s-border-strong`) para os popups não sumirem
+  no branco · alvos de clique ≥ 24px · `kbd` com cara de tecla · **cores semânticas**
+  (`--s-error/--s-info/--s-success`).
+- **A lupa de código** entrou no sistema (zoom 1.8 em vez de 2.5, 320px sem estourar a janela,
+  raio/sombra/z-index da escala) — era o elemento mais "adesivo" do app.
+
+### ✨ 3 features de última geração
+
+- **⌘P / Ctrl+P — Quick Open** — busca **fuzzy** de arquivos da workspace + comandos + recentes,
+  com prévia do arquivo e navegação por teclado (o `Ctrl+P`/`Ctrl+Shift+P` unificados do VS Code).
+- **📌 Sticky scroll** — as linhas de contexto (a "envelope" do código) **grudam no topo** durante
+  a rolagem, com o realce sutil e sem duplicar texto.
+- **🔍 Busca em todos os arquivos (grep)** — varre a workspace em paralelo (cancelável, com tetos),
+  agrupa os resultados por arquivo no painel da lateral (`Ctrl+Shift+F`).
+
+### 🐛 LSP de verdade (o TypeScript estava **sem diagnóstico nenhum**)
+
+- As **capabilities** do cliente estavam vazias ⇒ o `typescript-language-server` **zerava** o
+  `publishDiagnostics` ⇒ **nenhum** diagnóstico chegava. Agora são capabilities reais.
+- O `Content-Length` do protocolo LSP é em **bytes**: o decoder comparava com o tamanho da
+  **string** ⇒ **qualquer acento/emoji travava** a mensagem (e todas as seguintes).
+- O popup de Document Symbols **lançava** com o símbolo plano (`SymbolInformation`).
+- O broadcast de diagnósticos saía **1 evento atrasado** (o renderer via um cache velho).
+- `didClose` nunca era enviado (o servidor acumulava documentos) · `didChange` incremental
+  respeitando o que o servidor negociou · o `tsserver.path` do AppImage (o `node_modules` do
+  projeto não existe lá) · o `npm` do usuário fora do nvm · o `HostSession.pid`.
+
+---
+
 ## [0.5.0] — 2026-10-21
 
 ### 🐛 LSP no AppImage (o app abriu sem diagnóstico/completecão)

@@ -11,8 +11,9 @@
  * **dinâmico**, dentro de `startMainProcess()`, que só roda quando o processo é o Electron
  * (`process.versions.electron`) — por isso este módulo é importável em `node`/vitest.
  */
-import { execFile } from "node:child_process";
+import { execFile, execFileSync } from "node:child_process";
 import { existsSync, readdirSync, statSync } from "node:fs";
+import { readdir, readFile, stat } from "node:fs/promises";
 import { homedir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -21,6 +22,9 @@ import type { BrowserWindow as ElectronBrowserWindow } from "electron";
 import { createNodeFileSystem } from "../core/buffer";
 import { createEditorCore as composeEditorCore } from "../core/editor";
 import type { EditorCore, EditorCoreOptions } from "../core/editor";
+import { indexFiles } from "../core/workspace/file-index";
+import type { DirectoryReader, FileIndexResult } from "../core/workspace/file-index";
+import { grepWorkspace } from "../core/workspace/grep";
 import {
   IPC_CHANNEL,
   IPC_VERSION,
@@ -36,14 +40,18 @@ import type {
   IpcEventEnvelope,
   IpcRequest,
   IpcResponse,
+  LspDiagnostic,
   MainThreadBusy,
+  PackageResolver,
   PackageSnippetDefinition,
   ResourceLayer,
   SearchQuery,
   Selection,
   SelectionSet,
 } from "../shared";
+import type { Event } from "../shared/events";
 import { LspManager } from "../core/lsp/lsp-manager";
+import type { Diagnostic } from "../core/lsp/lsp-protocol";
 import { BUILTIN_LSP_SERVERS } from "../shared/lsp-contract";
 import { collectPackageSnippets } from "../core/packages/package-snippets";
 import { DapManager } from "../core/dap/dap-manager";
@@ -230,6 +238,247 @@ export function createEventBroadcaster(
       }
     },
   };
+}
+
+/**
+ * Severidade do LSP (protocolo) → severidade do contrato que o renderer consome.
+ * Mesma mapeação do `core` (`convertSeverity`): 1=erro, 2=warning, 3=info, 4=hint.
+ */
+function toLspSeverity(severity: number | undefined): LspDiagnostic["severity"] {
+  switch (severity) {
+    case 1: return "error";
+    case 2: return "warning";
+    case 3: return "info";
+    case 4: return "hint";
+    default: return "info";
+  }
+}
+
+/**
+ * Converte um diagnóstico **cru** do LSP no contrato que o renderer consome.
+ *
+ * ⚠️ Duplicata de propósito: o `core` tem a sua (`convertDiagnostic`, **privada**), mas o
+ * `main` **não pode** reler o cache do core (ele é atualizado **depois** do nosso listener —
+ * ver {@link broadcastLspDiagnostics}). As duas conversões precisam concordar no formato.
+ */
+export function toLspDiagnostic(diagnostic: Diagnostic): LspDiagnostic {
+  return {
+    range: {
+      startLine: diagnostic.range.start.line,
+      startCol: diagnostic.range.start.character,
+      endLine: diagnostic.range.end.line,
+      endCol: diagnostic.range.end.character,
+    },
+    severity: toLspSeverity(diagnostic.severity),
+    message: diagnostic.message,
+    source: diagnostic.source ?? "LSP",
+  };
+}
+
+/**
+ * Fonte de diagnósticos do LSP — o subset do `LspManager` que o `main` consome
+ * (injetável: um `Emitter` basta para o teste).
+ */
+export interface LspDiagnosticsSource {
+  readonly onDiagnostics: Event<{
+    readonly uri: string;
+    readonly diagnostics: readonly Diagnostic[];
+  }>;
+}
+
+/**
+ * Conecta os diagnósticos do LSP ao *broadcast* IPC (`lsp.diagnostics`).
+ *
+ * ⚠️ **Usa os dados do próprio evento** (`params.diagnostics`) e **não** o cache do core
+ * (`documentDiagnostics`): o core assina o `onDiagnostics` do `LspManager` **depois** (no
+ * `attachLsp`, assíncrono) ⇒ o `Emitter.fire` (Set ⇒ ordem de inserção) chamava o `main`
+ * **primeiro**, com o cache ainda da publicação **anterior** ⇒ o renderer recebia o
+ * diagnóstico **atrasado em um evento** (e, se o servidor publicasse **uma vez só**, o
+ * renderer **nunca** veria o diagnóstico).
+ */
+export function broadcastLspDiagnostics(
+  source: LspDiagnosticsSource,
+  core: Pick<EditorCore, "findHandleByUri">,
+  events: IpcEventBroadcaster,
+): Disposable {
+  return source.onDiagnostics((params) => {
+    const handle = core.findHandleByUri(params.uri);
+    if (handle === undefined) return; // documento não está aberto no core
+    const envelope: IpcEventEnvelope<"lsp.diagnostics"> = {
+      v: IPC_VERSION,
+      event: "lsp.diagnostics",
+      args: [{ handle, diagnostics: params.diagnostics.map(toLspDiagnostic) }],
+    };
+    events.broadcast(IPC_CHANNEL.event, envelope);
+  });
+}
+
+// ── Servidores LSP fora do shell do usuário (AppImage) ────────────────────────────────────
+
+/**
+ * Layout global do node: onde ficam os **binários** (`typescript-language-server`,
+ * `pyright-langserver`) e os `node_modules` **globais** (`typescript/lib/tsserver.js`).
+ */
+export interface GlobalNodeLayout {
+  /** Diretórios de binários globais (o `npm -g` instala aqui). */
+  readonly binDirs: readonly string[];
+  /** Raízes de `node_modules` global (`<prefixo>/lib/node_modules`). */
+  readonly moduleRoots: readonly string[];
+}
+
+/** Layout vazio (nada encontrado). */
+const EMPTY_NODE_LAYOUT: GlobalNodeLayout = { binDirs: [], moduleRoots: [] };
+
+/**
+ * Descobre o **prefixo global** do `npm` (onde o `npm -g` instala os binários).
+ *
+ * ⚠️ O `npm -g` do usuário pode estar em **qualquer** prefixo (nvm, pnpm, volta, asdf, npm
+ * do sistema) — o AppImage só varria o `~/.nvm`, então fora dele o app ficava **sem LSP
+ * nenhum** (achado MÉDIO). `npm config get prefix` é o caminho canônico; `npm bin -g`
+ * (npm < 9) é o fallback.
+ *
+ * @param npmCandidates executáveis do `npm` a tentar, em ordem (o `npm` do PATH primeiro).
+ * @param run           sonda (injetável — em produção: `execFileSync` **sem shell**).
+ */
+export function detectGlobalNodeLayout(
+  npmCandidates: readonly string[],
+  run: (file: string, args: readonly string[]) => string | undefined,
+): GlobalNodeLayout {
+  for (const npm of npmCandidates) {
+    const prefix = trimProbe(run(npm, ["config", "get", "prefix"]));
+    if (prefix !== undefined) {
+      return {
+        binDirs: [join(prefix, "bin")],
+        moduleRoots: [join(prefix, "lib", "node_modules")],
+      };
+    }
+  }
+  for (const npm of npmCandidates) {
+    // npm < 9: `npm bin -g` devolve o **diretório de binários** (não o prefixo).
+    const bin = trimProbe(run(npm, ["bin", "-g"]));
+    if (bin !== undefined) {
+      return {
+        binDirs: [bin],
+        moduleRoots: [join(dirname(bin), "lib", "node_modules")],
+      };
+    }
+  }
+  return EMPTY_NODE_LAYOUT;
+}
+
+/**
+ * Layout do node gerenciado pelo **nvm** (`~/.nvm/versions/node/*`).
+ *
+ * @param nvmRoot  raiz do nvm.
+ * @param listDirs lista os diretórios (injetável p/ teste).
+ * @param exists   predicado de existência (injetável p/ teste).
+ */
+export function nvmNodeLayout(
+  nvmRoot: string,
+  listDirs: (path: string) => readonly string[],
+  exists: (path: string) => boolean,
+): GlobalNodeLayout {
+  let versions: readonly string[];
+  try {
+    versions = listDirs(nvmRoot);
+  } catch {
+    return EMPTY_NODE_LAYOUT; // sem nvm
+  }
+  const binDirs: string[] = [];
+  const moduleRoots: string[] = [];
+  // Do **mais novo** para o mais antigo (mesma ordem do código anterior).
+  for (const version of [...versions].sort().reverse()) {
+    const bin = join(nvmRoot, version, "bin");
+    if (exists(bin)) binDirs.push(bin);
+    moduleRoots.push(join(nvmRoot, version, "lib", "node_modules"));
+  }
+  return { binDirs, moduleRoots };
+}
+
+/** Normaliza a saída da sonda (`undefined` = comando falhou / não existe). */
+function trimProbe(output: string | undefined): string | undefined {
+  if (output === undefined) return undefined;
+  const trimmed = output.trim();
+  return trimmed.length > 0 ? trimmed : undefined;
+}
+
+/** Lista os diretórios de um caminho (vazio quando não existe). */
+function readDirNames(path: string): readonly string[] {
+  try {
+    return readdirSync(path);
+  } catch {
+    return [];
+  }
+}
+
+/**
+ * Orçao **total** da sondagem do `npm` no boot (o app não pode ficar pendurado).
+ *
+ * ⚠️ O `npm config get prefix` é rápido, mas numa máquina estragada ele pode travar ⇒ o
+ * orçamento corta a sondagem e o app segue (com o fallback do nvm).
+ */
+const NPM_PROBE_BUDGET_MS = 3_000;
+
+/**
+ * Sonda o `npm` — **sem shell** (`execFileSync` com array de args) e com orçamento de tempo.
+ */
+function makeNpmProbe(
+  budgetMs: number,
+): (file: string, args: readonly string[]) => string | undefined {
+  const deadline = Date.now() + budgetMs;
+  return (file, args) => {
+    const remaining = deadline - Date.now();
+    if (remaining <= 0) return undefined;
+    try {
+      const output: string = execFileSync(file, args, {
+        encoding: "utf8",
+        timeout: remaining,
+        stdio: ["ignore", "pipe", "ignore"],
+        windowsHide: true,
+      });
+      return output;
+    } catch {
+      // Sem `npm`, timeout ou erro ⇒ segue com o fallback (nvm).
+      return undefined;
+    }
+  };
+}
+
+/**
+ * Monta o layout global do node: prefixo do `npm` (o `npm -g` do usuário) + nvm.
+ *
+ * A ordem importa: o prefixo do `npm` vem **primeiro** (é o toolchain ativo do usuário — o
+ * mesmo `node` com que os servidores LSP foram instalados).
+ */
+function buildGlobalNodeLayout(): GlobalNodeLayout {
+  const nvm = nvmNodeLayout(
+    join(homedir(), ".nvm", "versions", "node"),
+    readDirNames,
+    existsSync,
+  );
+  const npm = detectGlobalNodeLayout(
+    ["npm", ...nvm.binDirs.map((dir) => join(dir, "npm"))],
+    makeNpmProbe(NPM_PROBE_BUDGET_MS),
+  );
+  return {
+    binDirs: [...npm.binDirs, ...nvm.binDirs],
+    moduleRoots: [...npm.moduleRoots, ...nvm.moduleRoots],
+  };
+}
+
+/**
+ * PID do processo hospedado (o plugin host), para o log de boot.
+ *
+ * ⚠️ O `HostSession` **não expõe** o pid (só o `core` sabe — o `HostProcess` tem `pid`).
+ * Até o `core` expor, o log diz isso explicitamente (antes imprimia `bridge.port`, que é um
+ * **objeto** — e a linha ficava sem o `)` de fechamento).
+ */
+export function describePluginHostPid(session: unknown): string {
+  if (typeof session === "object" && session !== null) {
+    const pid = (session as { readonly pid?: unknown }).pid;
+    if (typeof pid === "number" && Number.isInteger(pid) && pid > 0) return String(pid);
+  }
+  return "(não exposto pelo core)";
 }
 
 /**
@@ -420,6 +669,118 @@ function runGit(
   });
 }
 
+// ── Workspace: índice de arquivos (Quick Open) e busca em todos os arquivos (grep) ────────────
+
+/**
+ * Adaptador do port de I/O do índice (`DirectoryReader`) para o `node:fs/promises`.
+ *
+ * O core **não** importa `node:fs` (o mesmo bundle roda no renderer) — a I/O entra por este
+ * port, que só o `main` implementa.
+ */
+export const nodeDirectoryReader: DirectoryReader = {
+  readDir: async (path: string): Promise<readonly { name: string; isDirectory: boolean; isFile: boolean }[]> => {
+    const entries = await readdir(path, { withFileTypes: true });
+    return entries.map((entry) => ({
+      name: entry.name,
+      isDirectory: entry.isDirectory(),
+      isFile: entry.isFile(),
+    }));
+  },
+  readFile: (path: string): Promise<string> => readFile(path, "utf8"),
+};
+
+/** Lê um arquivo de texto (o port do `grepWorkspace`). */
+async function readTextFile(path: string): Promise<string> {
+  return readFile(path, "utf8");
+}
+
+/**
+ * Raiz da **workspace** de um diretório: a pasta que contém `.git` (o *work root*).
+ *
+ * ⚠️ **Escolha nossa** (o alvo não expõe o conceito): o *Quick Open* e o *grep* trabalham
+ * sobre a **workspace**, não sobre o diretório do arquivo. Sem `.git` (ou sem repo), o
+ * próprio diretório é a raiz.
+ */
+export async function findWorkspaceRoot(dir: string): Promise<string> {
+  let current = resolve(dir);
+  for (;;) {
+    // `.git` pode ser um diretório (repo normal) ou um arquivo (worktree/submodule).
+    if (existsSync(join(current, ".git"))) return current;
+    const parent = dirname(current);
+    if (parent === current) return resolve(dir);
+    current = parent;
+  }
+}
+
+/** Raízes candidatas → raízes reais (expandidas até a raiz da workspace, sem duplicatas). */
+async function resolveWorkspaceRoots(roots: readonly string[]): Promise<string[]> {
+  const candidates = roots.length > 0 ? roots : [process.cwd()];
+  const out: string[] = [];
+  for (const candidate of candidates) {
+    if (typeof candidate !== "string" || candidate.length === 0) continue;
+    const absolute = resolve(candidate);
+    try {
+      const info = await stat(absolute);
+      if (!info.isDirectory()) continue;
+    } catch (error) {
+      console.warn(`Scribe: raiz da workspace inacessível "${absolute}": ${messageOf(error)}`);
+      continue;
+    }
+    const root = await findWorkspaceRoot(absolute);
+    if (!out.includes(root)) out.push(root);
+  }
+  return out;
+}
+
+/** TTL do cache do índice (5s): o *Quick Open* e o *grep* reusam a mesma varredura. */
+export const WORKSPACE_INDEX_TTL_MS = 5_000;
+
+/** Cache do índice por conjunto de raízes (o *grep* varre a árvore a cada tecla sem reindexar). */
+const workspaceIndexCache = new Map<string, { at: number; result: FileIndexResult }>();
+
+/** Limpa o cache do índice da workspace (teste). */
+export function clearWorkspaceIndexCache(): void {
+  workspaceIndexCache.clear();
+}
+
+/**
+ * Índice de arquivos da workspace (com cache curto).
+ *
+ * As raízes são expandidas até a raiz da workspace; a varredura usa o `indexFiles` do core
+ * (que respeita o `.gitignore`, pula diretórios ruidosos e tem tetos).
+ */
+export async function workspaceIndex(roots: readonly string[]): Promise<FileIndexResult> {
+  const resolved = await resolveWorkspaceRoots(roots);
+  const key = resolved.join("\u0000");
+  const cached = workspaceIndexCache.get(key);
+  const now = Date.now();
+  if (cached !== undefined && now - cached.at < WORKSPACE_INDEX_TTL_MS) return cached.result;
+  const result = await indexFiles(resolved, nodeDirectoryReader);
+  workspaceIndexCache.set(key, { at: now, result });
+  // Cache pequeno: só as últimas raízes importam.
+  if (workspaceIndexCache.size > 8) {
+    const oldest = [...workspaceIndexCache.entries()].sort((a, b) => a[1].at - b[1].at)[0];
+    if (oldest !== undefined) workspaceIndexCache.delete(oldest[0]);
+  }
+  return result;
+}
+
+/** Lê um array de strings do wire (a lista de raízes do *Quick Open*). */
+function optionalStringArray(value: unknown, method: string): readonly string[] | undefined {
+  if (value === undefined || value === null) return undefined;
+  if (!Array.isArray(value)) {
+    throw new IpcProtocolError("invalid-args", `${method}: roots deve ser um array`);
+  }
+  const out: string[] = [];
+  for (const item of value) {
+    if (typeof item !== "string") {
+      throw new IpcProtocolError("invalid-args", `${method}: roots deve conter strings`);
+    }
+    out.push(item);
+  }
+  return out;
+}
+
 async function dispatchIpc(
   core: EditorCore,
   request: IpcRequest,
@@ -440,6 +801,10 @@ async function dispatchIpc(
     }
     case "document.text":
       return core.documentText(requireHandle(request.args[0], "document.text"));
+    case "document.close":
+      // Fecha o documento no core: o `didClose` do LSP sai por aqui (sem ele, o servidor
+      // LSP **acumula** os documentos abertos).
+      return core.closeDocument(requireHandle(request.args[0], "document.close"));
     case "document.revision":
       return core.revisionOf(requireHandle(request.args[0], "document.revision"));
     case "document.save": {
@@ -497,6 +862,39 @@ async function dispatchIpc(
       const query = requireSearchQuery(request.args[1], "search.replaceAll");
       const replacement = requireString(request.args[2], "search.replaceAll", "replacement");
       return core.replaceAll(handle, query, replacement, signal);
+    }
+    case "workspace.files": {
+      const roots = optionalStringArray(request.args[0], "workspace.files") ?? [];
+      const index = await workspaceIndex(roots);
+      return {
+        files: index.entries.map((entry) => ({
+          path: entry.path,
+          absolutePath: entry.absolutePath,
+        })),
+        truncated: index.truncated,
+        warnings: index.warnings,
+      };
+    }
+    case "search.files": {
+      const query = requireString(request.args[0], "search.files", "query");
+      const options = optionalSearchFilesOptions(request.args[1]);
+      const index = await workspaceIndex(options.roots ?? []);
+      // O `grep` varre os **caminhos absolutos** (o que o `readFile` do main abre).
+      const files = index.entries.map((entry) => entry.absolutePath);
+      return grepWorkspace({
+        query,
+        files,
+        readFile: readTextFile,
+        ...(signal !== undefined ? { signal } : {}),
+        ...(options.maxMatches !== undefined ? { maxMatches: options.maxMatches } : {}),
+        ...(options.maxFiles !== undefined ? { maxFiles: options.maxFiles } : {}),
+        ...(options.ignoreAccents !== undefined ? { ignoreAccents: options.ignoreAccents } : {}),
+        // Arquivo ilegível/diretório: pula e continua (o `grepWorkspace` já faz isso) — o
+        // aviso vai para o log do main (o resultado não carrega ruído).
+        onError: (path, error) => {
+          console.warn(`Scribe: grep pulou "${path}": ${error.message}`);
+        },
+      });
     }
     case "command.list":
       // O contrato (`CommandListResult`) é `{ commands: [...] }` — devolver o array puro
@@ -807,16 +1205,36 @@ async function dispatchIpc(
 }
 
 /**
+ * Fonte dos snippets de pacote — o subset do `EditorCore` que o cache usa (injetável: o
+ * teste precisa de um `PackageResolver` fake).
+ */
+export interface PackageSnippetSource {
+  /** Resolve quando o índice de pacotes estiver pronto. */
+  readonly packagesReady: Promise<void>;
+  /** Resolvedor de recursos de pacote. */
+  readonly packages: PackageResolver;
+}
+
+/**
  * Cache dos snippets de pacote por core (o `snippets.list` é **global ao app**).
  *
  * A lista é lida do `PackageResolver` (I/O) — sem cache, cada chamada releria os arquivos
  * do pacote. O cache é invalidado quando o índice de pacotes é **reconstruído**
  * (`onDidBuild`).
  */
-const snippetCache = new WeakMap<EditorCore, Promise<readonly PackageSnippetDefinition[]>>();
+const snippetCache = new WeakMap<PackageSnippetSource, Promise<readonly PackageSnippetDefinition[]>>();
 
-/** Lê (e cacheia) os snippets de pacote do core. */
-async function packageSnippetsFor(core: EditorCore): Promise<readonly PackageSnippetDefinition[]> {
+/**
+ * Lê (e cacheia) os snippets de pacote do core.
+ *
+ * ⚠️ O cache guarda a **promise**: se ela **rejeitar**, todo `snippets.list` posterior
+ * receberia a **mesma** rejeição (o cache nunca era invalidado) ⇒ o app ficava sem
+ * snippets **para sempre**. Na rejeição a entrada é **evictida** (o erro é devolvido só
+ * uma vez; a próxima chamada tenta de novo).
+ */
+export async function packageSnippetsFor(
+  core: PackageSnippetSource,
+): Promise<readonly PackageSnippetDefinition[]> {
   const cached = snippetCache.get(core);
   if (cached !== undefined) return cached;
   const pending = (async (): Promise<readonly PackageSnippetDefinition[]> => {
@@ -825,6 +1243,10 @@ async function packageSnippetsFor(core: EditorCore): Promise<readonly PackageSni
     return collectPackageSnippets(core.packages);
   })();
   snippetCache.set(core, pending);
+  // Promessa rejeitada ⇒ **evictir** a entrada (senão o erro se repete para sempre).
+  void pending.catch(() => {
+    if (snippetCache.get(core) === pending) snippetCache.delete(core);
+  });
   // Índice reconstruído ⇒ a lista cacheada não vale mais.
   const subscription = core.packages.onDidBuild(() => {
     snippetCache.delete(core);
@@ -1015,6 +1437,47 @@ function requireSearchQuery(value: unknown, method: string): SearchQuery {
   return query;
 }
 
+/** Opções da busca em todos os arquivos (`search.files`) — validadas no wire. */
+function optionalSearchFilesOptions(value: unknown): {
+  readonly roots?: readonly string[];
+  readonly maxMatches?: number;
+  readonly maxFiles?: number;
+  readonly ignoreAccents?: boolean;
+} {
+  if (value === undefined || value === null) return {};
+  if (typeof value !== "object") {
+    throw new IpcProtocolError("invalid-args", "search.files: options deve ser um objeto");
+  }
+  const record = value as Record<string, unknown>;
+  const options: {
+    roots?: readonly string[];
+    maxMatches?: number;
+    maxFiles?: number;
+    ignoreAccents?: boolean;
+  } = {};
+  const roots = record["roots"];
+  if (roots !== undefined) {
+    const parsed = optionalStringArray(roots, "search.files");
+    if (parsed !== undefined) options.roots = parsed;
+  }
+  for (const key of ["maxMatches", "maxFiles"] as const) {
+    const field = record[key];
+    if (field === undefined) continue;
+    if (typeof field !== "number" || !Number.isFinite(field)) {
+      throw new IpcProtocolError("invalid-args", `search.files: '${key}' deve ser número`);
+    }
+    options[key] = field;
+  }
+  const ignoreAccents = record["ignoreAccents"];
+  if (ignoreAccents !== undefined) {
+    if (typeof ignoreAccents !== "boolean") {
+      throw new IpcProtocolError("invalid-args", "search.files: 'ignoreAccents' deve ser booleano");
+    }
+    options.ignoreAccents = ignoreAccents;
+  }
+  return options;
+}
+
 /** Raízes de recursos do app (diretório ausente é ignorado pelo scanner — DEC-PKG). */
 export function packageRoots(appPath: string, userData: string): Partial<Record<ResourceLayer, readonly string[]>> {
   return {
@@ -1049,6 +1512,7 @@ export async function startMainProcess(): Promise<void> {
   let core: EditorCore | null = null;
   let mainWindow: ElectronBrowserWindow | null = null;
   let ipcRegistration: Disposable | null = null;
+  let diagnosticsSubscription: Disposable | null = null;
   let metricsTimer: NodeJS.Timeout | null = null;
   let shuttingDown = false;
 
@@ -1140,6 +1604,8 @@ export async function startMainProcess(): Promise<void> {
     }
     void lspManager.disconnectAll().catch(() => {});
     void dapManager.stop().catch(() => {});
+    diagnosticsSubscription?.dispose();
+    diagnosticsSubscription = null;
     ipcRegistration?.dispose();
     ipcRegistration = null;
     core?.dispose();
@@ -1318,11 +1784,19 @@ export async function startMainProcess(): Promise<void> {
   ensureLspServersOnPath();
   const lspManager = new LspManager(BUILTIN_LSP_SERVERS);
 
+  /** Layout global do node (prefixo do `npm` + nvm) — memoizado no boot. */
+  let nodeLayout: GlobalNodeLayout | undefined;
+  function globalNodeLayout(): GlobalNodeLayout {
+    nodeLayout ??= buildGlobalNodeLayout();
+    return nodeLayout;
+  }
+
   /**
    * Acha o `tsserver.js` do TypeScript **5.x** (o que o `typescript-language-server` usa).
    *
-   * Ordem: (1) o `typescript` do próprio projeto (dev/build local); (2) o `typescript` global do
-   * node gerenciado (nvm) — é o caso do **AppImage**, que não embute `node_modules`.
+   * Ordem: (1) o `typescript` do próprio projeto (dev/build local); (2) o `typescript` global
+   * do node do usuário — prefixo do `npm` **e** nvm (é o caso do **AppImage**, que não
+   * embute `node_modules`).
    * ⚠️ O TypeScript **7+** (tsgo) **não tem** `tsserver.js` ⇒ o LSP não funciona com ele.
    */
   function resolveTsserverPath(): string | undefined {
@@ -1335,17 +1809,7 @@ export async function startMainProcess(): Promise<void> {
     } catch {
       // sem `typescript` local — tenta o global
     }
-    const home = homedir();
-    const roots: string[] = [];
-    const nvmRoot = join(home, ".nvm", "versions", "node");
-    try {
-      for (const v of readdirSync(nvmRoot).sort().reverse()) {
-        roots.push(join(nvmRoot, v, "lib", "node_modules"));
-      }
-    } catch {
-      // sem nvm
-    }
-    for (const root of roots) {
+    for (const root of globalNodeLayout().moduleRoots) {
       const candidate = join(root, "typescript", "lib", "tsserver.js");
       if (existsSync(candidate)) return candidate;
     }
@@ -1358,8 +1822,8 @@ export async function startMainProcess(): Promise<void> {
    *
    * Eles são instalados pelo `npm -g` — que o `setup.py` roda no **shell do usuário**. Quando o
    * app é aberto pelo **AppImage** (launcher do desktop), o `PATH` é o da sessão do desktop e
-   * **não** tem o `bin` do nvm ⇒ o spawn falhava com ENOENT e o app ficava sem LSP.
-   * Aqui acrescentamos o `bin` do node gerenciado (nvm), se existir.
+   * **não** tem o `bin` do node do usuário ⇒ o spawn falhava com ENOENT e o app ficava sem
+   * LSP. Aqui acrescentamos o `bin` do **prefixo global do `npm`** e o do nvm, se existirem.
    */
   function ensureLspServersOnPath(): void {
     const path = process.env["PATH"] ?? "";
@@ -1367,19 +1831,15 @@ export async function startMainProcess(): Promise<void> {
     const has = (bin: string): boolean => parts.some((p) => existsSync(join(p, bin)));
     if (has("typescript-language-server") && has("pyright-langserver")) return;
 
-    const home = homedir();
-    const candidates: string[] = [];
-    // nvm: ~/.nvm/versions/node/*/bin (o mais novo primeiro)
-    const nvmRoot = join(home, ".nvm", "versions", "node");
-    try {
-      const versions = readdirSync(nvmRoot)
-        .filter((v) => existsSync(join(nvmRoot, v, "bin")))
-        .sort()
-        .reverse();
-      for (const v of versions) candidates.push(join(nvmRoot, v, "bin"));
-    } catch {
-      // sem nvm — segue
-    }
+    // ⚠️ Ordem: o prefixo do `npm` (toolchain ativo do usuário) **primeiro**, depois o nvm
+    // (do mais novo para o mais antigo). Duplicatas removidas (o prefixo do `npm` pode ser
+    // uma das versões do nvm).
+    const seen = new Set<string>();
+    const candidates = globalNodeLayout().binDirs.filter((dir) => {
+      if (seen.has(dir)) return false;
+      seen.add(dir);
+      return true;
+    });
     // ⚠️ `unshift` em laço inverteria a ordem (o **mais antigo** do nvm ficaria na frente ⇒ o
     // `node` v14 seria o do PATH ⇒ os servidores LSP (que exigem Node ≥ 18) não subem).
     // `unshift(...candidates)` preserva a ordem: o mais novo primeiro.
@@ -1401,18 +1861,11 @@ export async function startMainProcess(): Promise<void> {
   const wf = detectWorkspaceFolders();
   if (wf.length > 0) lspManager.setWorkspaceFolders(wf);
 
-  // Conecta diagnósticos ao broadcast IPC: resolve handle pela URI e dispara evento
-  lspManager.onDiagnostics((params) => {
-    const handle = activeCore.findHandleByUri(params.uri);
-    if (handle === undefined) return; // documento não está aberto no core
-    const diagnostics = activeCore.documentDiagnostics(handle);
-    const envelope: IpcEventEnvelope<"lsp.diagnostics"> = {
-      v: IPC_VERSION,
-      event: "lsp.diagnostics",
-      args: [{ handle, diagnostics: [...diagnostics] }],
-    };
-    events.broadcast(IPC_CHANNEL.event, envelope);
-  });
+  // Conecta diagnósticos ao broadcast IPC: resolve handle pela URI e dispara evento.
+  // ⚠️ Os dados vêm do **próprio evento** (e não do cache do core) — ver
+  // {@link broadcastLspDiagnostics}: o cache do core é atualizado **depois** deste listener.
+  diagnosticsSubscription = broadcastLspDiagnostics(lspManager, activeCore, events);
+
   // Inicia cada servidor builtin com try/catch (pode não estar instalado)
   const lspInitPromises = [];
   for (const baseConfig of BUILTIN_LSP_SERVERS) {
@@ -1458,7 +1911,9 @@ export async function startMainProcess(): Promise<void> {
   void activeCore.startPluginHost(join(__dirname, "../core/extension/plugin-host-entry.js"), {
     name: "scribe-plugin-host",
   }).then((session) => {
-    console.info(`Scribe: plugin host ready (handle=${session.handle}, pid=${String((session as { bridge?: { port?: unknown } }).bridge?.port)}`);
+    console.info(
+      `Scribe: plugin host ready (handle=${session.handle}, name=${session.name}, pid=${describePluginHostPid(session)})`,
+    );
   }).catch((error: unknown) => {
     console.warn("Scribe: plugin host não disponível (modo headless ou Electron ausente?)", error);
   });
