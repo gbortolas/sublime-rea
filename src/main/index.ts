@@ -1781,7 +1781,6 @@ export async function startMainProcess(): Promise<void> {
   });
 
   // ── LSP: inicializa servidores ──────────────────────────────────────────────────────────────
-  ensureLspServersOnPath();
   const lspManager = new LspManager(BUILTIN_LSP_SERVERS);
 
   /** Layout global do node (prefixo do `npm` + nvm) — memoizado no boot. */
@@ -1847,6 +1846,10 @@ export async function startMainProcess(): Promise<void> {
     if (missing.length > 0) parts.unshift(...missing);
     if (parts.length > 0) process.env["PATH"] = parts.join(":");
   }
+
+  // ⚠️ A chamada vem **depois** da declaração de `nodeLayout` (acima): chamar antes cairia
+  // na zona morta temporal do `let` ⇒ ReferenceError no boot (o app não subia no AppImage).
+  ensureLspServersOnPath();
 
   // Detecta pastas de workspace a partir do CWD (marcador: .git / package.json / pyproject.toml)
   function detectWorkspaceFolders(): readonly { readonly uri: string; readonly name: string }[] {
