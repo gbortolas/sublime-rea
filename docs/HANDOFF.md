@@ -61,9 +61,8 @@ Sem o deadline maior, `open_binary`/`analyze` **via MCP** volta a estourar os 33
 > Os 7 bugs de usabilidade achados (e o crash que matava o app) estão em
 > [§🐛 Varredura de usabilidade](#-varredura-de-usabilidade-2026-10-21).
 
-1. **📝 Snippets — fiação do dropdown** — o parser e a sessão já sabem lidar com
-   `${1|a,b,c|}` e as variáveis TM; falta **cablear** no renderer (`main.ts`) o popup de escolha
-   (`src/renderer/snippet-choice.ts` já existe, com a API `showSnippetChoice`).
+1. **📝 Snippets — próximos passos** — snippets de **pacote** (`.sublime-snippet` via
+   `PackageResolver`) e expansão de snippets LSP (`insertTextFormat: 2`) no popup de completação.
 2. **⌨️ Ctrl+D / Alt+Shift+Up** — criar cursores extras (hoje só o **Ctrl+click** cria).
 3. **🗃️ Pilha de undo por documento** — hoje a pilha é **global**: desfazer na aba B pode
    aplicar deltas da aba A no buffer de B (bug pré-existente, **não** corrigido).
@@ -1047,6 +1046,18 @@ existe, com setas/Enter/Esc) e `$TM_FILENAME`, `$TM_FILENAME_BASE`, `$TM_DIRECTO
 expansão (variável desconhecida ou sem contexto fica **literal**). 29 testes novos.
 
 > ⚠️ **Pendente:** a **fiação no renderer** (o `main.ts` ainda não chama `showSnippetChoice`).
+
+### 3b. 📝 Fiação do dropdown no renderer (2026-10-21, noite) ✅
+
+O `main.ts` agora monta o `SnippetVariableContext` na expansão, abre o
+`showSnippetChoice` ao entrar numa parada **com escolhas**, aplica a opção escolhida
+(`chooseSnippetOption` → primária → `updates` → sessão nova) e **fecha o popup** em todos os fins
+de sessão (Esc, clique fora, troca de documento, undo/redo, `$0`). Dois snippets embutidos novos
+tornam o caminho alcançável: `const` (com `${1|let,const,var|}`) e `file` (com `$TM_FILENAME`).
+
+**E2E por CDP** (`/tmp/opencode/cdp-choice.mjs`): digitar `const` + Tab expande para
+`const let name = value;` e abre o dropdown com `["let","const","var"]`; **seta + Enter** troca
+para `const const name = value;` e o popup sai do DOM ✓.
 
 ---
 

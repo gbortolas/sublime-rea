@@ -92,6 +92,10 @@ const BUILTIN_SNIPPETS: Snippet[] = [
   { trigger: "log",    template: "console.log($1);$0" },
   { trigger: "try",    template: "try {\n  $0\n} catch (${1:error}) {\n  \n}" },
   { trigger: "class",  template: "class ${1:Name} {\n  constructor(${2:params}) {\n    $0\n  }\n}" },
+  // Escolhas (`${1|a,b,c|}`) e variáveis TM — o dropdown de escolha e a resolução de
+  // variáveis só são alcançáveis por um template que as use.
+  { trigger: "const",  template: "const ${1|let,const,var|} ${2:name} = ${3:value};$0" },
+  { trigger: "file",   template: "// ${TM_FILENAME}\n$0" },
 ];
 
 /** Busca snippet pelo trigger (case-insensitive). */

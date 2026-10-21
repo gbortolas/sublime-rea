@@ -97,15 +97,19 @@ import {
 import { attachMinimap } from "./minimap";
 import type { MinimapBinding } from "./minimap";
 import { findSnippet, parseSnippet } from "./snippets";
+import type { SnippetVariableContext } from "./snippets";
 import {
   applyEdit,
+  chooseSnippetOption,
   createSnippetSession,
+  currentChoice,
   currentStop,
   nextTabStop,
   previousTabStop,
   sessionRange,
 } from "./snippet-session";
 import type { SnippetEditRange, SnippetSession } from "./snippet-session";
+import { hideSnippetChoice, showSnippetChoice } from "./snippet-choice";
 import {
   Canvas2DBackend,
   GlyphAtlas,
@@ -638,6 +642,206 @@ interface TabSession extends DocumentSession {
   /** Offset de scroll salvo quando a sessão perde o foco. */
   savedScrollPx: number;
   dirty: boolean;
+}
+
+// ---- snippets: contexto de variáveis, âncora do dropdown e ciclo de vida ------------------------
+
+/**
+ * Vista mínima do documento para montar o **contexto de variáveis TM** de um snippet.
+ *
+ * `DocumentLineSource` satisfaz este contrato: a função só precisa do texto, da
+ * linha/coluna de um offset e do texto de uma linha.
+ */
+export interface SnippetDocumentView {
+  readonly text: string;
+  positionAt(offset: number): { readonly line: number; readonly column: number };
+  line(index: number): string;
+}
+
+/** Entrada de `buildSnippetVariableContext`. */
+export interface SnippetVariableInput {
+  /** Documento ativo (texto + posições). */
+  readonly document: SnippetDocumentView;
+  /** Caminho do arquivo (`undefined` quando não há — demo sem ponte). */
+  readonly path: string | undefined;
+  /** Offset do caret. */
+  readonly caret: number;
+  /** Seleção corrente (o trecho selecionado vira `TM_SELECTED_TEXT`). */
+  readonly selection: Selection;
+}
+
+/** `true` para caractere de "palavra" (mesma classe usada no trigger de snippet). */
+function isSnippetWordChar(ch: string): boolean {
+  return /[A-Za-z0-9_]/.test(ch);
+}
+
+/** A palavra sob o caret (`undefined` quando não há palavra ali). */
+function snippetWordAt(lineText: string, column: number): string | undefined {
+  const limit = Math.max(0, Math.min(column, lineText.length));
+  let start = limit;
+  let end = limit;
+  while (start > 0 && isSnippetWordChar(lineText[start - 1]!)) start -= 1;
+  while (end < lineText.length && isSnippetWordChar(lineText[end]!)) end += 1;
+  if (start === end) return undefined;
+  return lineText.slice(start, end);
+}
+
+/** Último segmento de um caminho (`/a/b/c.md` → `c.md`; "" → `undefined`). */
+function snippetBasename(path: string): string | undefined {
+  if (path.length === 0) return undefined;
+  const idx = path.lastIndexOf("/");
+  return idx === -1 ? path : path.slice(idx + 1);
+}
+
+/** Diretório de um caminho (`/a/b/c.md` → `/a/b`; `c.md` → `undefined`). */
+function snippetDirname(path: string): string | undefined {
+  const idx = path.lastIndexOf("/");
+  if (idx === -1) return undefined;
+  if (idx === 0) return "/";
+  return path.slice(0, idx);
+}
+
+/** Nome do arquivo sem extensão (`notes.md` → `notes`; `.gitignore` → `.gitignore`). */
+function snippetStem(name: string): string {
+  const dot = name.lastIndexOf(".");
+  if (dot <= 0) return name;
+  return name.slice(0, dot);
+}
+
+/**
+ * Monta o **contexto de variáveis TM** (`SnippetVariableContext`) a partir do documento ativo.
+ *
+ * Derivados: nome do arquivo, nome sem extensão, diretório, texto selecionado, linha do
+ * caret, palavra sob o caret e índice da linha. Tudo é **opcional** — o que não existir fica
+ * `undefined` e a variável correspondente continua **literal** na expansão (regra do parser).
+ */
+export function buildSnippetVariableContext(input: SnippetVariableInput): SnippetVariableContext {
+  const { document: doc, path, caret, selection } = input;
+  const pos = doc.positionAt(caret);
+  const lineText = doc.line(pos.line);
+  const fileName = path !== undefined ? snippetBasename(path) : undefined;
+  const range = SelectionOps.normalized(selection);
+  const selectedText =
+    range.start === range.end ? undefined : doc.text.slice(range.start, range.end);
+  const hasPath = path !== undefined && path.length > 0;
+  const filePath = hasPath ? path : undefined;
+  return {
+    fileName,
+    fileNameBase: fileName !== undefined ? snippetStem(fileName) : undefined,
+    filePath,
+    directory: filePath !== undefined ? snippetDirname(filePath) : undefined,
+    selectedText,
+    currentLine: lineText.length > 0 ? lineText : undefined,
+    currentWord: snippetWordAt(lineText, pos.column),
+    lineIndex: pos.line,
+  };
+}
+
+/** Entrada de `snippetChoiceAnchor` (geometria do canvas em tela). */
+export interface SnippetChoiceAnchorInput {
+  /** `left` do canvas na tela (px). */
+  readonly canvasLeft: number;
+  /** `top` do canvas na tela (px). */
+  readonly canvasTop: number;
+  /** Linha (0-based) do caret. */
+  readonly line: number;
+  /** Coluna (0-based) do caret. */
+  readonly column: number;
+  /** Scroll vertical da viewport (px). */
+  readonly scrollOffsetPx: number;
+  /** Largura do gutter (px) — a mesma do desenho do texto. */
+  readonly gutterWidth: number;
+  /** Altura da linha (px). */
+  readonly lineHeight: number;
+  /** Largura média de um caractere (px). */
+  readonly charWidth: number;
+}
+
+/**
+ * Posição (px de tela) do dropdown de escolha: **abaixo** do caret, na sua coluna.
+ *
+ * A origem é a **mesma** do desenho do texto no canvas (gutter + padding à esquerda,
+ * `paddingTop` no topo, scroll subtraído) — o dropdown nasce em cima da linha do caret.
+ */
+export function snippetChoiceAnchor(input: SnippetChoiceAnchorInput): {
+  readonly x: number;
+  readonly y: number;
+} {
+  const x =
+    input.canvasLeft +
+    input.gutterWidth +
+    TEXT_PADDING_LEFT_PX +
+    input.column * input.charWidth;
+  const y =
+    input.canvasTop +
+    TEXT_PADDING_TOP_PX +
+    (input.line + 1) * input.lineHeight -
+    input.scrollOffsetPx;
+  return { x, y };
+}
+
+/**
+ * Encerra a **sessão de snippet** do documento: limpa o estado e colapsa a seleção no caret
+ * (o mesmo que o `Esc` faz).
+ */
+function endSnippetSession(session: DocumentSession, renderer: ScribeRenderer): void {
+  session.snippetSession = undefined;
+  session.selection = SelectionOps.collapsed(session.caret);
+  session.selections = SelectionSetOps.singular(session.caret);
+  renderer.setSelection(session.selection);
+  renderer.setSelections(session.selections);
+  updateCaretStatus(session.source, session.caret);
+  renderer.start();
+}
+
+/**
+ * Abre o **dropdown de escolha** (`${1|a,b,c|}`) quando a parada atual da sessão é uma escolha.
+ *
+ * O popup é **substituído** a cada abertura (a API mantém só um — o anterior some do DOM sem
+ * `onCancel`) e o **foco volta ao canvas**: o teclado do editor vive no `<canvas>`, e o popup
+ * focaria o próprio elemento — sem isto, a digitação pararia enquanto o dropdown estivesse
+ * aberto (as teclas do popup são consumidas em `capture` no `document`).
+ */
+function openSnippetChoicePopup(
+  session: TabSession,
+  controller: DocumentController,
+  surface: HTMLCanvasElement,
+  renderer: ScribeRenderer,
+  viewport: ViewportImpl,
+): void {
+  const active = session.snippetSession;
+  if (active === undefined) return;
+  const choice = currentChoice(active);
+  if (choice === null || choice.choices.length === 0) return;
+  const pos = session.source.positionAt(choice.end);
+  const rect = surface.getBoundingClientRect();
+  const anchor = snippetChoiceAnchor({
+    canvasLeft: rect.left,
+    canvasTop: rect.top,
+    line: pos.line,
+    column: pos.column,
+    scrollOffsetPx: viewport.scrollOffsetPx(),
+    gutterWidth: gutterWidthOf(renderer),
+    lineHeight: Math.ceil(TEXT_STYLE.sizePx * 1.4),
+    charWidth: TEXT_STYLE.sizePx * 0.6,
+  });
+  showSnippetChoice({
+    choices: choice.choices,
+    x: anchor.x,
+    y: anchor.y,
+    onPick: (index) => {
+      void controller.applySnippetChoice(session, choice.index, index);
+    },
+    onCancel: () => {
+      // Cancelar o dropdown encerra a sessão (como o `Esc`).
+      endSnippetSession(session, renderer);
+    },
+  });
+  // O popup nasce dentro do `#ui-overlay`, que tem `pointer-events: none` (a camada de UI
+  // não intercepta o mouse) — sem isto, o **clique** nas opções não chegaria ao popup.
+  const popup = document.getElementById("snippet-choice-popup");
+  if (popup instanceof HTMLElement) popup.style.pointerEvents = "auto";
+  focusEditorSurface();
 }
 
 /** Requisição de destaque em voo: o que o renderer pediu (a resposta tem de cobrir exatamente isto). */
@@ -1310,6 +1514,7 @@ class DocumentController {
     // Snippets (P4#18): abrir outro documento encerra a sessão de snippet do ativo.
     const previous = this.current;
     if (previous !== undefined) previous.snippetSession = undefined;
+    hideSnippetChoice();
     this.cancelOpening();
     const signalId = this.bridge.nextSignalId();
     this.opening = { signalId, path };
@@ -1421,6 +1626,7 @@ class DocumentController {
       old.savedScrollPx = this.viewport.scrollOffsetPx();
       // Snippets (P4#18): trocar de documento encerra a sessão de snippet ativa.
       old.snippetSession = undefined;
+      hideSnippetChoice();
     }
     // Ativa nova sessão
     this.activeIndex = index;
@@ -1462,6 +1668,7 @@ class DocumentController {
     const session = this.sessions[index]!;
     // Snippets (P4#18): fechar o documento encerra a sessão de snippet dele.
     session.snippetSession = undefined;
+    hideSnippetChoice();
     session.dispose();
     foldingStates.delete(session.handle);
     this.sessions.splice(index, 1);
@@ -1854,6 +2061,7 @@ class DocumentController {
     const next = applyEdit(active, edit, newText);
     if (next === null) {
       session.snippetSession = undefined;
+      hideSnippetChoice();
       return;
     }
     session.snippetSession = next;
@@ -1880,6 +2088,7 @@ class DocumentController {
       } catch (error) {
         console.error("Scribe: falha ao atualizar espelho de snippet — sessão encerrada", error);
         session.snippetSession = undefined;
+        hideSnippetChoice();
         return;
       }
     }
@@ -1889,12 +2098,88 @@ class DocumentController {
     }
   }
 
+  /**
+   * Snippets (P4#18): aplica a **opção escolhida** de uma tab stop com escolha
+   * (`${1|a,b,c|}`).
+   *
+   * Sequência (a mesma de `propagateSnippetEdit`): **1º** a troca do texto da primária no
+   * documento (`replaceOne`), **2º** os espelhos/ancestrais re-renderizados (`session.updates`,
+   * na ordem da lista), **3º** a sessão nova (offsets já ajustados) e o caret/seleção na
+   * opção escolhida. `chooseSnippetOption` devolve `null` quando a troca engoliria outro
+   * campo — aí a sessão encerra.
+   */
+  async applySnippetChoice(
+    session: TabSession,
+    stopIndex: number,
+    optionIndex: number,
+  ): Promise<void> {
+    const active = session.snippetSession;
+    if (active === undefined) return;
+    // A parada atual tem de ser **a** escolha do dropdown (o popup pode ter ficado velho).
+    const choice = currentChoice(active);
+    if (choice === null || choice.index !== stopIndex) return;
+    const field = active.fields.find((f) => f.index === stopIndex && f.isPrimary);
+    if (field === undefined || field.choices === undefined) return;
+    const optionText = field.choices[optionIndex];
+    if (optionText === undefined) return;
+    const next = chooseSnippetOption(active, stopIndex, optionIndex);
+    if (next === null) {
+      // A troca seria inconsistente (engoliria outro campo) → sessão encerrada.
+      endSnippetSession(session, this.renderer);
+      hideSnippetChoice();
+      return;
+    }
+    try {
+      // 1) o texto da primária passa a ser a opção escolhida.
+      const primary = await session.bridge.replaceOne(
+        session.handle,
+        field.start,
+        field.end - field.start,
+        optionText,
+      );
+      session.source.setText(primary.text, primary.revision);
+      session.dirty = true;
+      setUndoStatus(primary.canUndo, primary.canRedo);
+      // 2) os espelhos/ancestrais re-renderizados, na ordem da lista.
+      for (const update of next.updates) {
+        const applied = await session.bridge.replaceOne(
+          session.handle,
+          update.start,
+          update.end - update.start,
+          update.newText,
+        );
+        session.source.setText(applied.text, applied.revision);
+        session.dirty = true;
+        setUndoStatus(applied.canUndo, applied.canRedo);
+      }
+    } catch (error) {
+      console.error("Scribe: falha ao aplicar escolha de snippet — sessão encerrada", error);
+      endSnippetSession(session, this.renderer);
+      hideSnippetChoice();
+      return;
+    }
+    // 3) a sessão nova (offsets já ajustados) + caret/seleção na opção escolhida.
+    session.snippetSession = next;
+    const chosen = next.fields.find((f) => f.index === stopIndex && f.isPrimary);
+    const start = chosen?.start ?? field.start;
+    const end = chosen?.end ?? start + optionText.length;
+    session.caret = end;
+    session.selection = { anchor: start, active: end };
+    session.selections = [session.selection] as SelectionSet;
+    this.renderer.setSelection(session.selection);
+    this.renderer.setSelections(session.selections);
+    this.viewport.setMetrics({ lineCount: session.source.lineCount() });
+    updateCaretStatus(session.source, session.caret);
+    this.renderer.start();
+  }
+
   private async runHistory(action: "undo" | "redo"): Promise<void> {
     await this.flushBatch();
     const session = this.current;
     if (session === undefined) return;
     // Snippets (P4#18): undo/redo invalida a sessão — os offsets não sobrevivem ao rollback.
     session.snippetSession = undefined;
+    hideSnippetChoice();
     try {
       const state =
         action === "undo"
@@ -1977,6 +2262,9 @@ const SCROLLBAR_WIDTH_PX = 10;
 
 /** Padding horizontal entre o gutter e o texto (mesma origem usada no desenho). */
 const TEXT_PADDING_LEFT_PX = 8;
+
+/** Padding vertical acima da primeira linha (mesma origem usada no desenho). */
+const TEXT_PADDING_TOP_PX = 8;
 
 /**
  * Largura padrão do minimap (px) — espelha `--s-minimap-w` do `index.css`.
@@ -2280,7 +2568,7 @@ class ScribeRenderer {
     const layout: LineLayout = {
       lineHeight: this.lineHeight(),
       paddingLeft: gutterWidth + TEXT_PADDING_LEFT_PX,
-      paddingTop: 8,
+      paddingTop: TEXT_PADDING_TOP_PX,
       tabWidth: 4,
       scrollOffsetPx: this.viewport.scrollOffsetPx(),
       viewport: viewportRect,
@@ -4042,7 +4330,10 @@ function attachInputListeners(
     const activeSnippet = session.snippetSession;
     if (activeSnippet !== undefined) {
       const span = sessionRange(activeSnippet);
-      if (offset < span.start || offset > span.end) session.snippetSession = undefined;
+      if (offset < span.start || offset > span.end) {
+        session.snippetSession = undefined;
+        hideSnippetChoice();
+      }
     }
     mouseDragAnchor = offset;
     if (event.ctrlKey || event.metaKey) {
@@ -4444,13 +4735,9 @@ function attachInputListeners(
       const snippetOwner = controller?.current;
       if (snippetOwner?.snippetSession !== undefined) {
         event.preventDefault();
-        snippetOwner.snippetSession = undefined;
-        snippetOwner.selection = SelectionOps.collapsed(snippetOwner.caret);
-        snippetOwner.selections = SelectionSetOps.singular(snippetOwner.caret);
-        renderer.setSelection(snippetOwner.selection);
-        renderer.setSelections(snippetOwner.selections);
-        updateCaretStatus(snippetOwner.source, snippetOwner.caret);
-        renderer.start();
+        // O dropdown de escolha (se aberto) encerra a sessão junto (o `onCancel`).
+        hideSnippetChoice();
+        endSnippetSession(snippetOwner, renderer);
         return;
       }
       // Esc fecha a find bar primeiro (se aberta); só depois é que cancela uma abertura em curso.
@@ -4479,6 +4766,7 @@ function attachInputListeners(
             ? undefined
             : active.fields.find((f) => f.index === 0 && f.isPrimary);
           session.snippetSession = undefined;
+          hideSnippetChoice();
           if (zero !== undefined) {
             session.caret = zero.end;
             session.selection = { anchor: zero.start, active: zero.end };
@@ -4501,6 +4789,10 @@ function attachInputListeners(
         renderer.setSelections(session.selections);
         updateCaretStatus(session.source, session.caret);
         renderer.start();
+        // Parada com **escolhas** (`${1|a,b,c|}`) → abre o dropdown.
+        if (controller !== undefined) {
+          openSnippetChoicePopup(session, controller, surface, renderer, viewport);
+        }
         return;
       }
       if (!event.shiftKey && session !== undefined && session.caret > 0) {
@@ -4513,7 +4805,15 @@ function attachInputListeners(
         const snippet = findSnippet(word);
         if (snippet !== undefined) {
           event.preventDefault();
-          const expansion = parseSnippet(snippet.template);
+          // Variáveis TM: o contexto é montado **antes** da expansão (o texto selecionado,
+          // a linha e a palavra são os do instante da expansão).
+          const variables = buildSnippetVariableContext({
+            document: session.source,
+            path: session.path,
+            caret: session.caret,
+            selection: session.selection,
+          });
+          const expansion = parseSnippet(snippet.template, variables);
           void (async () => {
             // Flush lote pendente antes de operação que vai direto ao main
             await controller?.flushBatch?.();
@@ -4545,6 +4845,10 @@ function attachInputListeners(
             renderer.setSelections(session.selections);
             updateCaretStatus(session.source, session.caret);
             renderer.start();
+            // A 1ª parada pode ser uma **escolha** (`${1|a,b,c|}`) → abre o dropdown.
+            if (controller !== undefined && first !== null && first.index !== 0) {
+              openSnippetChoicePopup(session, controller, surface, renderer, viewport);
+            }
           })();
           return;
         }

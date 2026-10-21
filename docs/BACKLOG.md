@@ -766,9 +766,13 @@ Problemas identificados ao testar o AppImage pela primeira vez:
 - [x] **📝 Snippets — escolhas + variáveis TM** ✅ **fechado (2026-10-21, parser/sessão)** —
       `${1|a,b,c|}` vira escolha (popup pronto, `snippet-choice.ts`) e `$TM_*` são resolvidas.
       29 testes. ⚠️ **falta a fiação no `main.ts`** (próximo item).
-- [ ] **📝 Fiar o dropdown de escolhas no renderer** — `main.ts` ainda não chama
-      `showSnippetChoice`; falta abrir o popup ao entrar numa tab stop com escolhas e aplicar
-      `chooseSnippetOption` ao escolher.
+- [x] **📝 Fiar o dropdown de escolhas no renderer** ✅ **fechado (2026-10-21)** — o `main.ts` monta
+      o contexto TM na expansão, abre o `showSnippetChoice` ao entrar numa parada com escolhas,
+      aplica a opção escolhida (`chooseSnippetOption` → primária → `updates` → sessão nova) e
+      fecha o popup em todo fim de sessão. 2 snippets embutidos novos tornam o caminho alcançável
+      (`const` com `${1|let,const,var|}` e `file` com `$TM_FILENAME`).
+      **E2E por CDP**: `const` + Tab → dropdown com as 3 opções → seta + Enter troca a opção ✓
+      (831 testes / 64 arquivos).
 
 ## 🏠 P3 — Housekeeping (2026-10-20, bootstrap)
 
