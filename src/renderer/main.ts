@@ -116,12 +116,15 @@ import type { DebugAction, DebugViewBinding } from "./debug-panel";
 import {
   DebugHoverMemo,
   DebugWatchModel,
-  columnFromPointerX,
   extractExpressionAt,
   isSameFilePath,
   mergeBreakpointSpecs,
   normalizeBreakpointList,
 } from "./debug-inspect";
+import { attachMenuBar } from "./menu-bar";
+import type { MenuBarHandle, MenuBarItem } from "./menu-bar";
+import { hitTestVisualRow } from "./hit-test";
+import type { VisualRowLocator } from "./hit-test";
 import { attachMinimap } from "./minimap";
 import type { MinimapBinding } from "./minimap";
 import { findSnippet, parseSnippet } from "./snippets";
@@ -460,21 +463,118 @@ function fontString(style: TextStyle): string {
   return `${style.italic ? "italic " : ""}${style.weight} ${style.sizePx}px ${style.family}`;
 }
 
+/**
+ * Caixa de conteúdo da fonte (ascendente/descendente) — o par que define **onde a baseline cai**.
+ *
+ * São métricas de **fonte** (não de glifo): não dependem do caractere ⇒ 1 medição por estilo
+ * serve para todos os glifos (cacheado por string de fonte).
+ */
+interface FontBox {
+  /** Distância da baseline até o topo da caixa da fonte (px). */
+  readonly ascent: number;
+  /** Distância da baseline até a base da caixa da fonte (px). */
+  readonly descent: number;
+}
+
+/** `TextMetrics` com as métricas de caixa **opcionais** (degradação p/ navegadores antigos). */
+interface FontBoxMetrics {
+  readonly fontBoundingBoxAscent?: number;
+  readonly fontBoundingBoxDescent?: number;
+  readonly actualBoundingBoxAscent?: number;
+  readonly actualBoundingBoxDescent?: number;
+}
+
+/**
+ * Lê a caixa de conteúdo da fonte em 3 degraus: `fontBoundingBox*` (caixa da fonte) →
+ * `actualBoundingBox*` (caixa do glifo "A") → aproximação `sizePx * 0.8 / 0.2`.
+ */
+function readFontBox(metrics: TextMetrics, sizePx: number): FontBox {
+  const box: FontBoxMetrics = metrics;
+  const ascent = box.fontBoundingBoxAscent ?? box.actualBoundingBoxAscent ?? sizePx * 0.8;
+  const descent = box.fontBoundingBoxDescent ?? box.actualBoundingBoxDescent ?? sizePx * 0.2;
+  return {
+    ascent: Number.isFinite(ascent) && ascent > 0 ? ascent : sizePx * 0.8,
+    descent: Number.isFinite(descent) && descent > 0 ? descent : sizePx * 0.2,
+  };
+}
+
+/** Número finito (ou o *fallback*) — métricas degeneradas não podem virar `NaN` na geometria. */
+function finiteOr(value: number, fallback: number): number {
+  return Number.isFinite(value) ? value : fallback;
+}
+
+/**
+ * Geometria vertical do bitmap de um glifo: **em que linha do bitmap fica a baseline** e qual é
+ * a altura do bitmap.
+ *
+ * Convenção CSS: a caixa de conteúdo da fonte (`ascent + descent`) fica **centrada** na faixa da
+ * linha, com o *half-leading* (`(lineHeight − (ascent + descent)) / 2`) em cima e embaixo. Como o
+ * bitmap começa **no topo da faixa** (o `y` do destino é o topo da banda — ver `scene.ts`), a
+ * baseline dentro do bitmap é `halfLeading + ascent`.
+ *
+ * Invariantes garantidas aqui:
+ * - `baselineRow ≥ ascent` ⇒ o topo da caixa da fonte (e, portanto, a tinta) **nunca** é cortado;
+ * - `0 < baselineRow < bitmapHeight` ⇒ a baseline fica **dentro** do bitmap;
+ * - `bitmapHeight ≥ ascent + descent` ⇒ a caixa de conteúdo inteira cabe no bitmap.
+ */
+export function computeBaselineRow(options: {
+  readonly sizePx: number;
+  readonly lineHeight: number;
+  readonly ascent: number;
+  readonly descent: number;
+}): { readonly baselineRow: number; readonly bitmapHeight: number } {
+  const sizePx = Math.max(1, finiteOr(options.sizePx, 1));
+  const lineHeight = Math.max(1, finiteOr(options.lineHeight, 1));
+  const ascent = Math.max(0, finiteOr(options.ascent, 0));
+  const descent = Math.max(0, finiteOr(options.descent, 0));
+  const halfLeading = (lineHeight - (ascent + descent)) / 2;
+  // A baseline nunca pode subir acima da ascendente: o topo da tinta seria cortado pelo bitmap.
+  const baselineRow = Math.max(1, ascent, Math.round(halfLeading + ascent));
+  // Altura: caixa de conteúdo inteira + descendente — e nunca menor que a altura histórica.
+  const needed = Math.max(ascent + descent, baselineRow + descent);
+  const bitmapHeight = Math.max(Math.ceil(needed), Math.ceil(sizePx * 1.3), baselineRow + 1);
+  return { baselineRow, bitmapHeight };
+}
+
 function createCanvasRasterizer(): GlyphRasterizer {
   const canvas = document.createElement("canvas");
   const ctx = canvas.getContext("2d", { willReadFrequently: true });
   if (!ctx) throw new Error("Scribe: contexto 2D indisponível para rasterizar glifos");
+  // Caixa da fonte por **string de fonte** (family|peso|italic|size) ⇒ 1 medição por estilo.
+  const fontBoxes = new Map<string, FontBox>();
+  const fontBoxOf = (style: TextStyle): FontBox => {
+    const font = fontString(style);
+    const hit = fontBoxes.get(font);
+    if (hit !== undefined) return hit;
+    ctx.font = font;
+    const box = readFontBox(ctx.measureText("A"), style.sizePx);
+    fontBoxes.set(font, box);
+    return box;
+  };
   return {
     rasterize(rune: string, style: TextStyle): GlyphBitmap {
-      const height = Math.max(1, Math.ceil(style.sizePx * 1.3));
+      const font = fontString(style);
+      const box = fontBoxOf(style);
+      // Altura da linha do layout (o mesmo `ceil(sizePx * 1.4)` do `Viewport`/cena): é ela que
+      // define onde a caixa de conteúdo da fonte deve ficar **centrada** dentro da faixa.
+      const geometry = computeBaselineRow({
+        sizePx: style.sizePx,
+        lineHeight: Math.ceil(style.sizePx * 1.4),
+        ascent: box.ascent,
+        descent: box.descent,
+      });
+      const { baselineRow, bitmapHeight: height } = geometry;
       const width = Math.max(1, Math.ceil(style.sizePx * 0.8));
       canvas.width = width;
       canvas.height = height;
       ctx.clearRect(0, 0, width, height);
-      ctx.font = fontString(style);
-      ctx.textBaseline = "top";
+      // ⚠️ redimensionar o canvas **reseta o estado** do contexto ⇒ a fonte vai depois do resize.
+      ctx.font = font;
+      // `alphabetic` (e não `top`): a baseline fica na linha `baselineRow` do bitmap, e não no
+      // topo dele — era esse `top` que colava a tinta no topo da faixa e cortava as ascendentes.
+      ctx.textBaseline = "alphabetic";
       ctx.fillStyle = "#ffffff";
-      ctx.fillText(rune, 0, 0);
+      ctx.fillText(rune, 0, baselineRow);
       const advance = ctx.measureText(rune).width;
       const rgba = ctx.getImageData(0, 0, width, height).data;
       const pixels = new Uint8Array(width * height * 4);
@@ -486,7 +586,8 @@ function createCanvasRasterizer(): GlyphRasterizer {
         pixels[i * 4 + 2] = 255;
         pixels[i * 4 + 3] = alpha;
       }
-      return { width, height, bearingX: 0, bearingY: height, advance, pixels };
+      // `bearingY` = **baseline** relativa ao topo do bitmap (não a altura do bitmap).
+      return { width, height, bearingX: 0, bearingY: baselineRow, advance, pixels };
     },
   };
 }
@@ -802,6 +903,14 @@ interface ScribeBridge {
   onDocumentChanged(callback: (event: { handle: number; revision: number }) => void): () => void;
   listCommands(): Promise<CommandListResult>;
   executeCommand(commandId: string): Promise<void>;
+  /**
+   * Ações de menu do processo principal — **mortas** (o `main` não emite mais: o menu nativo
+   * foi removido e o menu é do DOM).
+   *
+   * A assinatura fica (o preload a expõe) ⇒ um preload velho não quebra. O renderer **não**
+   * se inscreve mais: o `handleMenuAction` é chamado pelo `executeCommandById` (a paleta, o
+   * ⌘P e a barra de menu compartilham o caminho).
+   */
   onMenuAction(callback: (action: string) => void): () => void;
   /** Pedido de completação LSP (opcional: preload antigo pode não expor). */
   completions?(handle: number, line: number, col: number): Promise<LspCompletionItem[]>;
@@ -898,6 +1007,15 @@ interface ScribeBridge {
    * arquivo existente.
    */
   createFile?(path: string): Promise<WorkspaceCreateFileResult>;
+  /**
+   * Cria um arquivo **novo** (o diálogo "salvar como" é do `main`) — **opcional**: um preload
+   * mais antigo não expõe o método ⇒ o "Novo arquivo" responde "indisponível" (degradação
+   * explícita, sem crash).
+   *
+   * Devolve o **caminho criado** (`null` = o usuário cancelou o diálogo — o que **não** é
+   * erro: nada acontece).
+   */
+  newFile?(): Promise<string | null>;
   /**
    * Status do repositório git (o painel de *Source Control*) — **opcional**: um preload mais
    * antigo não expõe o método ⇒ a seção fica vazia (degradação, sem crash).
@@ -4164,6 +4282,30 @@ class ScribeRenderer {
   }
 
   /**
+   * Row **visual** de um Y do canvas (px) — a mesma unidade do `lineAtCanvasY`, mas **sem**
+   * a conversão para a linha lógica.
+   *
+   * ⚠️ O **hit-test** (`./hit-test`) precisa da **row** (e não da linha): com soft wrap, a
+   * coluna do clique é medida **dentro do segmento** da row ⇒ a row é a entrada do hit-test.
+   */
+  rowAtCanvasY(y: number): number {
+    return rowAtCanvasY(
+      y,
+      this.viewport.scrollOffsetPx(),
+      this.lineHeight(),
+      TEXT_PADDING_TOP_PX,
+    );
+  }
+
+  /**
+   * O índice de rows visuais (o **locator** do hit-test) — `undefined` enquanto o 1º render
+   * não aconteceu (o hit-test degrada para o comportamento antigo).
+   */
+  visualRowLocator(): VisualRowLocator | undefined {
+    return this.visualRows;
+  }
+
+  /**
    * Row **visual** de uma linha lógica — a row em que a linha é desenhada.
    *
    * Com soft wrap, a row de uma linha **não** é o seu índice: as linhas anteriores podem
@@ -4560,6 +4702,90 @@ function setBreadcrumbs(path: string | undefined): void {
 function setUndoStatus(canUndo: boolean, canRedo: boolean): void {
   document.getElementById("status-undo")?.classList.toggle("disabled", !canUndo);
   document.getElementById("status-redo")?.classList.toggle("disabled", !canRedo);
+}
+
+/**
+ * A **ação** que um atalho da barra de menu dispara (o mapa é **puro** — testável sem DOM).
+ *
+ * ⚠️ `undefined` = o atalho **não** é da barra (o canvas já o trata: `Ctrl+O`, `Ctrl+S`,
+ * `Ctrl+Z`, `Ctrl+F`, `Ctrl+Shift+T`, …) — tratá-lo aqui abriria o diálogo **duas** vezes.
+ */
+export type MenuAcceleratorAction =
+  | "new-file"
+  | "find-next"
+  | "find-prev"
+  | "debug-start"
+  | "debug-stop"
+  | "debug-toggle-breakpoint"
+  | "debug-toggle-panel"
+  | "debug-step-over"
+  | "debug-step-into"
+  | "debug-step-out";
+
+/**
+ * O mapa **puro**: comando ⇒ ação do renderer.
+ *
+ * ⚠️ São os atalhos que **só existiam no menu nativo** (o `main` consumia o atalho **antes**
+ * do renderer ⇒ eles eram código morto no renderer). Com o menu nativo removido, eles
+ * voltam — aqui.
+ */
+export function menuAcceleratorAction(commandId: string): MenuAcceleratorAction | undefined {
+  switch (commandId) {
+    case "file.new":
+      return "new-file";
+    case "find.next":
+      return "find-next";
+    case "find.prev":
+      return "find-prev";
+    case "debug.start":
+      return "debug-start";
+    case "debug.stop":
+      return "debug-stop";
+    case "debug.toggleBreakpoint":
+      return "debug-toggle-breakpoint";
+    case "debug.togglePanel":
+      return "debug-toggle-panel";
+    case "debug.stepOver":
+      return "debug-step-over";
+    case "debug.stepInto":
+      return "debug-step-into";
+    case "debug.stepOut":
+      return "debug-step-out";
+    default:
+      return undefined;
+  }
+}
+
+/**
+ * Os comandos que **só existem no renderer** (o core não os anuncia).
+ *
+ * O **menu nativo** (o do GTK) tinha estes itens — com o menu nativo removido, eles precisam
+ * de uma fonte: sem eles, o menu do DOM perderia o "próxima ocorrência" (F3) e os "passos"
+ * do depurador (F10/F11/Shift+F11) — os atalhos que **só** o menu nativo tratava.
+ *
+ * ⚠️ O `file.new` também está aqui (o `Ctrl+N` é do renderer): o comando existe no core, mas
+ * a lista abaixo garante que ele **aparece** mesmo com um `main`/preload **antigo** (que não
+ * conhece o comando).
+ */
+const RENDERER_MENU_COMMANDS: readonly MenuBarItem[] = [
+  { id: "file.new", label: "Novo arquivo", category: "File", accelerator: "Ctrl+N" },
+  { id: "find.next", label: "Próxima ocorrência", category: "Find", accelerator: "F3" },
+  { id: "find.prev", label: "Ocorrência anterior", category: "Find", accelerator: "Shift+F3" },
+  { id: "debug.stepOver", label: "Passar por cima", category: "Debug", accelerator: "F10" },
+  { id: "debug.stepInto", label: "Entrar", category: "Debug", accelerator: "F11" },
+  { id: "debug.stepOut", label: "Sair", category: "Debug", accelerator: "Shift+F11" },
+];
+
+/**
+ * Junta a lista do core com a do renderer (o core **vence** em caso de ids repetidos — a
+ * lista do core é a que manda no rótulo e no acelerador).
+ */
+export function mergeMenuItems(
+  core: readonly MenuBarItem[],
+  extra: readonly MenuBarItem[],
+): readonly MenuBarItem[] {
+  const known = new Set(core.map((item) => item.id));
+  return [...core, ...extra.filter((item) => !known.has(item.id))];
 }
 
 /**
@@ -5158,17 +5384,22 @@ export async function bootRenderer(): Promise<boolean> {
     const rect = surface.getBoundingClientRect();
     const x = event.clientX - rect.left;
     const y = event.clientY - rect.top;
-    // A linha sob o mouse: com soft wrap, o Y do canvas é uma **row** ⇒ a linha é a que
-    // a contém (o renderer faz a conversão).
-    const line = renderer.lineAtCanvasY(y);
+    // ⚠️ **Hit-test** (soft wrap): o Y do canvas é uma **row** e a coluna é medida **dentro
+    // do segmento** da row — senão o hover numa row quebrada pegava a coluna errada.
+    const hit = hitTestVisualRow(
+      renderer.rowAtCanvasY(y),
+      renderer.visualRowLocator(),
+      session.source,
+      x,
+      { gutterWidth: gutterWidthOf(renderer), charWidth: TEXT_STYLE.sizePx * 0.6 },
+    );
+    const line = hit.line;
     if (line < 0 || line >= session.source.lineCount()) {
       cancelDebugHover();
       return;
     }
+    const col = hit.column;
     const text = session.source.line(line);
-    const approxCharW = TEXT_STYLE.sizePx * 0.6;
-    // Mesma origem do desenho do texto (gutter + padding) — senão a expressão sai ao lado.
-    const col = columnFromPointerX(x, text.length, gutterWidthOf(renderer), approxCharW);
     const expression = extractExpressionAt(text, col);
     if (expression === null) {
       // Sem expressão sob o mouse: o timer pendente **precisa** morrer (o tooltip
@@ -5659,8 +5890,39 @@ export async function bootRenderer(): Promise<boolean> {
     });
   }
 
+  /**
+   * **Novo arquivo**: o `main` mostra o diálogo "salvar como" e cria o arquivo; o renderer
+   * **abre** o documento novo numa aba (o mesmo fluxo do item "criar" do ⌘P).
+   *
+   * ⚠️ **Cancelar não é erro**: o `main` devolve `null` e nada acontece (sem toast, sem erro).
+   * ⚠️ **Preload antigo** (sem `newFile`): degradação **explícita** — a mesma mensagem do
+   * ⌘P ("criar arquivo indisponível"), nunca um crash.
+   */
+  const runNewFile = (): void => {
+    if (bridge === undefined || typeof bridge.newFile !== "function") {
+      setDocStatus("criar arquivo indisponível");
+      return;
+    }
+    const newFile = bridge.newFile;
+    void newFile
+      .call(bridge)
+      .then((path) => {
+        if (path === null || path.length === 0) return;
+        void controller?.open(path);
+      })
+      .catch((error: unknown) => {
+        console.error("Scribe: falha ao criar o arquivo", error);
+        setDocStatus(
+          `erro ao criar o arquivo: ${error instanceof Error ? error.message : String(error)}`,
+        );
+      });
+  };
+
   const handleMenuAction = (action: string): void => {
     switch (action) {
+      case "file.new":
+        runNewFile();
+        break;
       case "file.open":
         if (controller !== undefined) void controller.openDialog();
         break;
@@ -5715,15 +5977,6 @@ export async function bootRenderer(): Promise<boolean> {
         }).catch(() => {});
         break;
       }
-      case "find.open":
-        if (findBar !== undefined && !findBar.model.isOpen) {
-          findBar.model.open();
-          // O atalho do **menu nativo** chega aqui (o accelerator do menu precede o
-          // renderer) ⇒ a busca abria **sem foco** e digitar não ia para o campo.
-          const findInput = document.getElementById("find-input");
-          if (findInput instanceof HTMLInputElement) findInput.focus();
-        }
-        break;
       case "find.next":
         findBar?.model.next();
         break;
@@ -5797,10 +6050,15 @@ export async function bootRenderer(): Promise<boolean> {
   };
 
   /**
-   * Executa um comando **pela UI** (a paleta e o *Quick Open* compartilham o caminho).
+   * Executa um comando **pela UI** (a paleta, o *Quick Open* e a **barra de menu** compartilham
+   * o caminho).
    *
-   * - Some comandos são **do renderer** (a find bar, o tema, a depuração): eles rodam aqui;
-   * - os demais são **do core** (`file.*`, `edit.undo/redo`): vão por IPC.
+   * - Alguns comandos são **do renderer** (a find bar, o tema, a depuração, o "novo arquivo"):
+   *   eles rodam aqui;
+   * - `file.open`/`file.save` também passam pelo renderer (o `Ctrl+S` do canvas **faz o flush
+   *   do lote pendente** antes de salvar — o comando cru do core não faz ⇒ o menu e o `Ctrl+S`
+   *   têm que passar pelo **mesmo** caminho);
+   * - os demais são **do core** (`edit.undo/redo`): vão por IPC.
    */
   const executeCommandById = (commandId: string): void => {
     if (commandId === "find.open") {
@@ -5811,17 +6069,31 @@ export async function bootRenderer(): Promise<boolean> {
         const findInput = document.getElementById("find-input");
         if (findInput instanceof HTMLInputElement) findInput.focus();
       }
+    } else if (commandId === "file.new") {
+      // ⚠️ **Interceptado antes do IPC**: o "novo arquivo" precisa do diálogo "salvar como"
+      // (é o `main` que o tem) e devolve o **caminho** — o `command.execute` do core não
+      // devolve nada (e o core não tem diálogo).
+      handleMenuAction("file.new");
     } else if (
-      ["view.toggleTheme", "edit.cut", "edit.copy", "edit.paste", "edit.selectAll"].includes(
-        commandId,
-      )
+      [
+        "file.open",
+        "file.save",
+        "view.toggleTheme",
+        "edit.cut",
+        "edit.copy",
+        "edit.paste",
+        "edit.selectAll",
+        // A navegação da busca (F3/Shift+F3) é **do renderer** — o core não tem find bar.
+        "find.next",
+        "find.prev",
+      ].includes(commandId)
     ) {
       handleMenuAction(commandId);
     } else if (commandId.startsWith("debug.")) {
       // Depuração: o core não tem UI — as ações rodam no renderer.
       handleMenuAction(commandId);
     } else {
-      // Comandos de core: file.*, edit.undo/redo — executa via IPC
+      // Comandos de core: edit.undo/redo — executa via IPC
       void commandPaletteApi?.executeCommand(commandId).catch((error: unknown) => {
         console.error("Scribe: falha ao executar comando", commandId, error);
       });
@@ -5842,11 +6114,86 @@ export async function bootRenderer(): Promise<boolean> {
         })
       : undefined;
 
-  // Escuta ações de menu nativo enviadas pelo processo principal
-  if (bridge !== undefined && typeof bridge.onMenuAction === "function") {
-    bridge.onMenuAction((action: string) => {
-      handleMenuAction(action);
-    });
+  // ── A barra de menu (do DOM) ───────────────────────────────────────────────────────────────
+  //
+  // ⚠️ **O menu nativo foi removido** (o `main` faz `setMenu(null)`): o menu GTK não troca de
+  // menu no hover do mouse (o Electron não importa `gtk_menu_popup_at_widget`) ⇒ o menu é do
+  // **DOM** (a casca é VS Code-like).
+  //
+  // ⚠️ Por isso o `scribe:menu:action` **não existe mais**: o listener de `onMenuAction` foi
+  // removido (o `main` nunca emite). Os **atalhos** que só existiam no menu nativo (F5, F9,
+  // F3, Ctrl+N, …) agora são tratados **aqui** (abaixo) — antes eles eram código morto (o
+  // menu nativo consumia o atalho **antes** do renderer).
+
+  /**
+   * Os **atalhos** que o menu nativo tinha e o canvas **não** cobre.
+   *
+   * ⚠️ Devolve `false` para os atalhos que o **canvas** já trata (o `Ctrl+S`, o `Ctrl+O`, …):
+   * tratá-los aqui abriria o diálogo de "abrir" **duas** vezes.
+   */
+  const handleMenuAccelerator = (commandId: string): boolean => {
+    switch (menuAcceleratorAction(commandId)) {
+      case "new-file":
+        runNewFile();
+        return true;
+      case "find-next":
+        findBar?.model.next();
+        return true;
+      case "find-prev":
+        findBar?.model.previous();
+        return true;
+      case "debug-start":
+        handleDebugAction("start");
+        return true;
+      case "debug-stop":
+        handleDebugAction("stop");
+        return true;
+      case "debug-toggle-breakpoint":
+        toggleBreakpointAtCaret();
+        return true;
+      case "debug-toggle-panel":
+        toggleDebugPanel();
+        return true;
+      case "debug-step-over":
+        handleDebugAction("stepOver");
+        return true;
+      case "debug-step-into":
+        handleDebugAction("stepInto");
+        return true;
+      case "debug-step-out":
+        handleDebugAction("stepOut");
+        return true;
+      default:
+        // O canvas já cobre (Ctrl+O, Ctrl+S, Ctrl+Z, Ctrl+F, Ctrl+Shift+T, …).
+        return false;
+    }
+  };
+
+  const menuBar: MenuBarHandle = attachMenuBar({
+    container: document.getElementById("menu-bar"),
+    items: RENDERER_MENU_COMMANDS,
+    // O item do menu **é** um comando: o mesmo caminho da paleta e do ⌘P.
+    onSelect: (commandId) => executeCommandById(commandId),
+    onAccelerator: (commandId) => handleMenuAccelerator(commandId),
+    // ⚠️ O teclado tem que **voltar ao editor**: depois de usar o menu, o foco ficaria no
+    // título do menu e a digitação não iria para o documento.
+    onClose: (reason) => {
+      if (reason === "select" || reason === "escape") focusEditorSurface();
+    },
+  });
+
+  // A lista de comandos do core chega **assíncrona** (o `command.list` é um IPC): a barra
+  // nasce com os itens que **só existem no renderer** e é completada quando a lista chega.
+  if (bridge !== undefined) {
+    void bridge
+      .listCommands()
+      .then((result) => {
+        menuBar.setItems(mergeMenuItems(result.commands, RENDERER_MENU_COMMANDS));
+      })
+      .catch((error: unknown) => {
+        // Degradação explícita: a barra fica só com os itens do renderer.
+        console.warn("Scribe: falha ao listar os comandos para a barra de menu", error);
+      });
   }
 
   // ── LSP UI widgets ───────────────────────────────────────────────────────────────────────────
@@ -7188,15 +7535,19 @@ function attachInputListeners(
       }
     }
     const y = event.clientY - rect.top;
-    // A linha sob o mouse (com soft wrap, o Y do canvas é uma **row** — o renderer
-    // converte para a linha lógica).
-    const line = renderer.lineAtCanvasY(y);
+    // ⚠️ **Hit-test** (soft wrap): o Y do canvas é uma **row** e a coluna é medida **dentro
+    // do segmento** da row — sem isto, o clique numa row quebrada caía na coluna errada
+    // (a 1ª row da linha lógica).
+    const hit = hitTestVisualRow(
+      renderer.rowAtCanvasY(y),
+      renderer.visualRowLocator(),
+      session.source,
+      x,
+      { gutterWidth: gutterWidthOf(renderer), charWidth: TEXT_STYLE.sizePx * 0.6 },
+    );
+    const line = hit.line;
     if (line < 0 || line >= session.source.lineCount()) return;
-    const text = session.source.line(line);
-    const approxCharW = TEXT_STYLE.sizePx * 0.6;
-    // Mesma origem do desenho do texto (gutter + padding).
-    const col = columnFromPointerX(x, text.length, gutterWidthOf(renderer), approxCharW);
-    const offset = session.source.offsetOf(line, col);
+    const offset = session.source.offsetOf(line, hit.column);
     // Snippets (P4#18): clique fora da expansão encerra a sessão ativa (dentro do range —
     // inclusive entre paradas — ela continua viva).
     const activeSnippet = session.snippetSession;
@@ -7240,14 +7591,18 @@ function attachInputListeners(
     const rect = surface.getBoundingClientRect();
     const x = event.clientX - rect.left;
     const y = event.clientY - rect.top;
-    const line = renderer.lineAtCanvasY(y);
-    if (line < 0) { mouseDragAnchor = undefined; return; }
-    const clampedLine = Math.min(line, session.source.lineCount() - 1);
-    const text = session.source.line(clampedLine);
-    const approxCharW = TEXT_STYLE.sizePx * 0.6;
-    // Mesma origem do desenho do texto (gutter + padding).
-    const col = columnFromPointerX(x, text.length, gutterWidthOf(renderer), approxCharW);
-    const offset = session.source.offsetOf(clampedLine, col);
+    // ⚠️ **Hit-test** (soft wrap): a row visual + a coluna **dentro do segmento** (o
+    // arrasto tinha o mesmo bug do clique: a coluna caía na row errada).
+    const hit = hitTestVisualRow(
+      renderer.rowAtCanvasY(y),
+      renderer.visualRowLocator(),
+      session.source,
+      x,
+      { gutterWidth: gutterWidthOf(renderer), charWidth: TEXT_STYLE.sizePx * 0.6 },
+    );
+    if (hit.line < 0) { mouseDragAnchor = undefined; return; }
+    const clampedLine = Math.min(hit.line, session.source.lineCount() - 1);
+    const offset = session.source.offsetOf(clampedLine, hit.column);
     session.selection = { anchor: mouseDragAnchor, active: offset };
     // Drag colapsa para seleção única
     session.selections = [session.selection] as SelectionSet;
@@ -7312,12 +7667,17 @@ function attachInputListeners(
       const rect = surface.getBoundingClientRect();
       const x = event.clientX - rect.left;
       const y = event.clientY - rect.top;
-      const line = renderer.lineAtCanvasY(y);
+      // ⚠️ **Hit-test** (soft wrap): a coluna é medida **dentro do segmento** da row.
+      const hit = hitTestVisualRow(
+        renderer.rowAtCanvasY(y),
+        renderer.visualRowLocator(),
+        session.source,
+        x,
+        { gutterWidth: gutterWidthOf(renderer), charWidth: TEXT_STYLE.sizePx * 0.6 },
+      );
+      const line = hit.line;
       if (line < 0 || line >= session.source.lineCount()) return;
-      const text = session.source.line(line);
-      const approxCharW = TEXT_STYLE.sizePx * 0.6;
-      // Mesma origem do desenho do texto (gutter + padding).
-      const col = columnFromPointerX(x, text.length, gutterWidthOf(renderer), approxCharW);
+      const col = hit.column;
       void (async () => {
         try {
           const result = await bridge.hover!(session.handle, line, col);

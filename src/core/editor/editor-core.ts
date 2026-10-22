@@ -2008,6 +2008,7 @@ export function createEditorCore(options: EditorCoreOptions = {}): EditorCore {
     listCommands(): readonly Command[] {
       return [
         { id: "file.open",      label: "Abrir arquivo",      category: "File", accelerator: "Ctrl+O" },
+        { id: "file.new",       label: "Novo arquivo",       category: "File", accelerator: "Ctrl+N" },
         { id: "file.save",      label: "Salvar",              category: "File", accelerator: "Ctrl+S" },
         { id: "edit.undo",      label: "Desfazer",            category: "Edit", accelerator: "Ctrl+Z" },
         { id: "edit.redo",      label: "Refazer",             category: "Edit", accelerator: "Ctrl+Shift+Z" },
@@ -2034,6 +2035,10 @@ export function createEditorCore(options: EditorCoreOptions = {}): EditorCore {
         case "file.open":
           // Aberto no dispatchIpc com deps.dialog; aqui sem dialog não tem o que fazer.
           throw new EditorArgumentError("no-dialog", "file.open requer diálogo injetado");
+        case "file.new":
+          // O "novo arquivo" precisa do diálogo "salvar como" (o `main` o tem): o renderer
+          // intercepta o comando **antes** do IPC (o `dispatchIpc` trata o `file.new`).
+          throw new EditorArgumentError("no-dialog", "file.new requer diálogo injetado");
         case "file.save": {
           if (state.activeHandle === undefined) return;
           await this.saveDocument(state.activeHandle);

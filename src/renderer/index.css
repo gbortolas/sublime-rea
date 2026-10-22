@@ -40,6 +40,7 @@
   --s-space-4: 16px;
   --s-activitybar-w: 48px;
   --s-sidebar-w: 240px;
+  --s-menubar-h: 24px;
   --s-tabbar-h: 35px;
   --s-breadcrumbs-h: 24px;
   --s-statusbar-h: 24px;
@@ -234,10 +235,111 @@ textarea {
 #app {
   display: grid;
   /* `minmax(0, 1fr)` no lugar de `1fr`: impede que o min-content do filho (canvas, breadcrumbs)
-     infle a trilha e empurre a status bar para fora da janela. */
-  grid-template-rows: minmax(0, 1fr) var(--s-statusbar-h);
+     infle a trilha e empurre a status bar para fora da janela.
+     A **1ª linha** é a barra de menu (o menu do DOM) — a altura dela é a da casca. */
+  grid-template-rows: auto minmax(0, 1fr) var(--s-statusbar-h);
   width: 100vw;
   height: 100vh;
+}
+
+/* ══ Barra de menu (do DOM) ═══════════════════════════════════════════ */
+
+/*
+ * O menu é do **DOM** — o menu nativo do GTK não troca de menu quando o mouse passa por cima
+ * de outro título (o Electron não importa `gtk_menu_popup_at_widget`) e a "fonte
+ * frankenstein" do menu nativo ia contra a casca de uma tipografia só.
+ *
+ * ⚠️ **Só tokens `--s-*`** (a auditoria da casca trava a cor literal).
+ */
+#menu-bar {
+  /* `relative` ⇒ o popup (o menu aberto) se posiciona **sob o título** que o abriu. */
+  position: relative;
+  display: flex;
+  align-items: center;
+  gap: var(--s-space-1);
+  height: var(--s-menubar-h);
+  padding: 0 var(--s-space-1);
+  background: var(--s-tabbar);
+  border-bottom: 1px solid var(--s-border);
+  color: var(--s-fg);
+  font-size: var(--s-fs-md);
+  user-select: none;
+}
+
+.menu-title {
+  display: inline-flex;
+  align-items: center;
+  height: calc(var(--s-menubar-h) - 6px);
+  padding: 0 var(--s-space-2);
+  border: none;
+  border-radius: var(--s-radius-sm);
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  cursor: pointer;
+  transition: background var(--s-dur) var(--s-ease);
+}
+
+.menu-title:hover {
+  background: var(--s-hover);
+}
+
+/* O título do menu **aberto** — o estado de seleção do design system. */
+.menu-title-open,
+.menu-title[aria-expanded="true"] {
+  background: var(--s-selected);
+  color: var(--s-fg);
+}
+
+/* O anel de foco (o design system tem um token só para ele). */
+.menu-title:focus-visible,
+.menu-entry:focus-visible {
+  outline: 2px solid var(--s-ring);
+  outline-offset: -2px;
+}
+
+.menu-popup {
+  position: absolute;
+  top: 100%;
+  left: 0;
+  z-index: var(--z-popup);
+  display: flex;
+  flex-direction: column;
+  min-width: 220px;
+  padding: var(--s-space-1) 0;
+  background: var(--s-surface-raised);
+  border: 1px solid var(--s-border-strong);
+  border-radius: var(--s-radius);
+  box-shadow: var(--s-shadow);
+}
+
+.menu-entry {
+  display: flex;
+  align-items: center;
+  gap: var(--s-space-3);
+  padding: var(--s-space-1) var(--s-space-3);
+  border: none;
+  background: transparent;
+  color: var(--s-fg);
+  font: inherit;
+  text-align: left;
+  white-space: nowrap;
+  cursor: pointer;
+}
+
+.menu-entry:hover {
+  background: var(--s-hover);
+}
+
+.menu-entry-label {
+  flex: 1 1 auto;
+}
+
+/* O atalho, **à direita** do rótulo (dimmed). */
+.menu-entry-accelerator {
+  color: var(--s-muted);
+  font-size: var(--s-fs-sm);
+  font-variant-numeric: tabular-nums;
 }
 
 #workbench {

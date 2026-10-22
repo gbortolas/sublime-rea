@@ -860,6 +860,32 @@ Problemas identificados ao testar o AppImage pela primeira vez:
 - [x] **🐛 Enter não inseria quebra de linha** ✅ — `Ctrl+A` e `Ctrl+End` também corrigidos.
 - Gates: `typecheck`/`lint` exit 0 · **1585 testes / 108 arquivos** · E2E por CDP **9/9**.
 
+## 🧭 Menu no DOM + hit-test do soft wrap + baseline + novo arquivo (2026-10-21, noite) — **0.7.2**
+
+> Rodada curta, de **casca e texto**: o menu nativo (que não trocava no hover) saiu, o clique no
+> soft wrap passou a acertar a coluna e a baseline dos glifos deixou de cortar as ascendentes.
+> Detalhes: `docs/HANDOFF.md` §🧭 0.7.2.
+
+- [x] **🧭 Menu bar no DOM** ✅ — `src/renderer/menu-bar.ts` (NOVO): a barra e o popup são do DOM
+      (o Electron não importa `gtk_menu_popup_at_widget` ⇒ o hover **não** trocava o menu nativo;
+      não era consertável). Hover troca, `Esc`/clique fora fecham, teclado (`↑`/`↓`, `←`/`→`,
+      `Enter`), `aria-expanded`/`aria-haspopup`, atalho à direita, foco volta ao editor. O
+      `main` faz `setMenu(null)`; `scribe:menu:action` ficou **morto** (preload mantém por
+      compatibilidade). Atalhos que só o menu nativo tratava (F5/F9/F10/F11/F3/Ctrl+N/…) agora
+      são do renderer — os do canvas **não** são interceptados.
+- [x] **🎯 Hit-test do soft wrap** ✅ — `src/renderer/hit-test.ts` (NOVO, puro):
+      `column = seg.start + columnFromPointerX(x, seg.text.length, …)` com clamp pela **row**;
+      fiado no caret (clique/arrasto), hover do LSP e hover do DAP.
+- [x] **🔤 Baseline dos glifos** ✅ — a caixa da fonte vem de `measureText`
+      (`fontBoundingBox*` → `actualBoundingBox*` → `0.8/0.2`), cacheada por string de fonte; a
+      baseline é `halfLeading + ascent` (`computeBaselineRow`, puro) e o bitmap cobre a caixa.
+      `bearingY` documentado como **baseline relativa ao topo do bitmap**.
+- [x] **📄 Novo arquivo (Ctrl+N)** ✅ — `file.new` no core/menu/paleta/IPC/preload; o `main` abre
+      "salvar como" e cria o arquivo (o diálogo **é** a autorização; `mkdir` do pai; erros
+      tipados `dialog-unavailable`/`file-new-failed`); cancelar ⇒ `null`.
+- Gates: `typecheck`/`lint` exit 0 · **1671 testes / 116 arquivos** (baseline 1627/112) ·
+  📦 `Scribe-0.7.2.AppImage`.
+
 ## 📌 Fila aberta (2026-10-21, fim de tarde) — para a próxima sessão
 
 > Tudo aqui é **funcional e conhecido** (declarado/verificado), não bug escondido. Ordenado por

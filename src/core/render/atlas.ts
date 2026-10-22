@@ -33,6 +33,11 @@ export interface GlyphBitmap {
   readonly width: number;
   readonly height: number;
   readonly bearingX: number;
+  /**
+   * **Baseline** do glifo relativa ao **topo do bitmap** (px): a linha do bitmap em que a tinta
+   * assenta. Não é a altura do bitmap (era essa a confusão antiga) — quem posiciona o glifo usa
+   * o `y` da banda e o bitmap já carrega a sua própria folga superior.
+   */
   readonly bearingY: number;
   readonly advance: number;
   /** RGBA8, `width * height * 4` bytes, row-major, alpha reto (tinta branca). */
@@ -68,6 +73,7 @@ export interface PlacedGlyph {
   readonly region: AtlasRegion;
   readonly advance: number;
   readonly bearingX: number;
+  /** **Baseline** do glifo relativa ao topo do bitmap (ver `GlyphBitmap.bearingY`). */
   readonly bearingY: number;
 }
 
@@ -134,6 +140,8 @@ export function createDefaultRasterizer(): GlyphRasterizer {
         width: w,
         height: h,
         bearingX: 0,
+        // O glifo sintético é uma caixa que ocupa o bitmap inteiro e **não tem descendente** ⇒ a
+        // baseline é a borda inferior do bitmap (logo abaixo da última linha de tinta).
         bearingY: h,
         advance: style.sizePx * 0.6,
         pixels,

@@ -216,6 +216,14 @@ export interface IpcMethods {
   "document.open"(path: string): DocumentHandle;
   "document.openDialog"(): string | null;
   /**
+   * Cria um arquivo **novo** (vazio): mostra o diálogo "salvar como" no `main` e devolve o
+   * caminho criado (`null` = o usuário cancelou).
+   *
+   * ⚠️ O `main` cria o arquivo **onde o usuário escolheu** (o diálogo é a autorização) ⇒
+   * aqui **não** vale o confinamento das raízes da workspace (que é do `workspace.createFile`).
+   */
+  "file.new"(): string | null;
+  /**
    * Fecha o documento no **core** (o `EditorCore.closeDocument`).
    *
    * O `didClose` do LSP é enviado por aqui — sem isso o servidor LSP **acumula** os
@@ -309,6 +317,13 @@ export interface IpcMethods {
    */
   "search.files"(query: string, options?: SearchFilesOptions): GrepResult;
   "command.list"(): CommandListResult;
+  /**
+   * Executa um comando pelo id.
+   *
+   * ⚠️ `file.new` é a **exceção**: o `main` devolve o **caminho do arquivo criado** (o tipo
+   * declarado é `void` — o valor é um *superset* que só o `file.new` produz). O caminho
+   * canônico continua sendo o método dedicado `file.new`.
+   */
   "command.execute"(commandId: string): void;
   "lsp.completions"(handle: DocumentHandle, line: number, col: number): LspCompletionItem[];
   "lsp.hover"(handle: DocumentHandle, line: number, col: number): LspHoverResult | null;
@@ -410,6 +425,7 @@ export type IpcResult<M extends IpcMethodName> = ResultOf<IpcMethods[M]>;
 export const IPC_METHODS = [
   "document.open",
   "document.openDialog",
+  "file.new",
   "document.close",
   "document.text",
   "document.revision",

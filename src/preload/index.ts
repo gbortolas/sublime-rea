@@ -72,6 +72,15 @@ export interface ScribePreloadApi {
   open(path: string, signalId?: number): Promise<DocumentHandle>;
   openDialog(): Promise<string | null>;
   /**
+   * Cria um arquivo **novo** (vazio) — o diálogo "salvar como" do `main`.
+   *
+   * Devolve o **caminho criado** (`null` = o usuário cancelou o diálogo).
+   *
+   * ⚠️ O `main` cria o arquivo **onde o usuário escolheu** (o diálogo é a autorização) ⇒
+   * aqui **não** vale o confinamento das raízes da workspace (que é do `createFile`).
+   */
+  newFile(): Promise<string | null>;
+  /**
    * Fecha o documento no core (o `didClose` do LSP sai por aqui).
    *
    * Documento sujo ⇒ o core **salva** antes de fechar (a semântica é do core).
@@ -193,7 +202,13 @@ export interface ScribePreloadApi {
   listCommands(): Promise<CommandListResult>;
   /** Executa um comando pelo id. */
   executeCommand(commandId: string): Promise<void>;
-  /** Escuta ações de menu enviadas pelo processo principal (menu nativo). */
+  /**
+   * Escuta ações de menu enviadas pelo processo principal (canal `scribe:menu:action`).
+   *
+   * ⚠️ O **menu nativo foi removido** (o menu é do DOM) ⇒ o `main` não emite mais neste
+   * canal. A assinatura **fica** (compatibilidade: um preload velho não quebra) — o callback
+   * só roda se algo emitir no canal.
+   */
   onMenuAction(callback: (action: string) => void): () => void;
   /** Pedido de completação LSP (main → servidor → resposta). */
   completions(handle: DocumentHandle, line: number, col: number): Promise<LspCompletionItem[]>;
@@ -360,6 +375,7 @@ const api: ScribePreloadApi = {
     return call<DocumentHandle>("document.open", [path], signalId);
   },
   openDialog: (): Promise<string | null> => call<string | null>("document.openDialog", []),
+  newFile: (): Promise<string | null> => call<string | null>("file.new", []),
   closeDocument: (handle: DocumentHandle): Promise<void> =>
     call<void>("document.close", [handle]),
   workspaceFiles: (roots?: readonly string[]): Promise<WorkspaceFilesResult> =>

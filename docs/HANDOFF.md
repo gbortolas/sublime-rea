@@ -1,8 +1,8 @@
 # HANDOFF — sublime-rea
 
 > **Documento de handoff entre sessões** (leia antes de retomar). Atualizado em **2026-10-21**.
-> Status: **🐛 varredura ✅ · ✨ 3+5+5 features ✅ · 🎨 design system ✅ · ✨ 3 features de última geração ✅ · 🐛 LSP de verdade ✅ · 🔍 grep no worker ✅**<br>
-> Versão: **0.7.1** (AppImage gerado e verificado) · **1627 testes / 112 arquivos**<br>
+> Status: **🐛 varredura ✅ · ✨ 3+5+5 features ✅ · 🎨 design system ✅ · ✨ 3 features de última geração ✅ · 🐛 LSP de verdade ✅ · 🔍 grep no worker ✅ · 🧭 menu no DOM ✅ · 🎯 hit-test do soft wrap ✅ · 🔤 baseline ✅ · 📄 novo arquivo ✅**<br>
+> Versão: **0.7.2** (AppImage gerado e verificado) · **1671 testes / 116 arquivos**<br>
 > Próximo: **fila aberta no BACKLOG** (multi-root de verdade · split editor · test explorer ·
 > snippets LSP)
 
@@ -57,7 +57,12 @@ criação de arquivo) + 🐛 o `pyright` travava (o cliente LSP ignorava request
 `grep` na lane `grep` do `TaskPool`; leitura + scan no worker; teto duro que mata o worker
 preso; orçamento soft de 20 s; cancelamento que para a varredura no meio; detector de regex
 catastrófico com regra aninhada; confinamento das raízes da busca) + 3 bugs de E2E + 9 achados
-de revisão corrigidos (1627 testes / 112 arquivos)**
+de revisão corrigidos (1627 testes / 112 arquivos)**<br>
+**✨ 0.7.2 — 🧭 menu bar no DOM (o hover que não trocava: o Electron não importa
+`gtk_menu_popup_at_widget`; o menu nativo saiu e a barra virou DOM, com atalhos que só o menu
+nativo tratava) + 🎯 hit-test do soft wrap (o clique na 2ª row caía na coluna da 1ª) + 🔤 baseline
+dos glifos (a tinta colava no topo e cortava ascendentes) + 📄 novo arquivo (`Ctrl+N` com diálogo
+"salvar como") (1671 testes / 116 arquivos)**
 
 **✅ Passo operacional resolvido (2026-10-16).** O `setup.py` foi rodado e o MCP `rea` foi relançado
 **já com `REA_GHIDRA_STARTUP_TIMEOUT_MS=900000`** (confirmado em `/proc/*/environ`) — **não** é mais
@@ -1347,6 +1352,89 @@ o salvar ou o find bar esperassem por ele, o editor "engasgaria". Com `preemptib
 
 ---
 
+## 🧭 0.7.2 — menu no DOM + hit-test do soft wrap + baseline + novo arquivo (2026-10-21, noite)
+
+Rodada de **4 correções/features** com foco na casca e no texto. Partições de arquivo disjuntas:
+o **menu** ficou em `menu-bar.ts` + `main.ts` (renderer), o **hit-test** em `hit-test.ts`, a
+**baseline** em `main.ts`/`atlas.ts` e o **novo arquivo** no contrato + `main`/`preload`.
+
+### 🧭 O menu nativo saiu — a barra é do DOM
+
+- **O bug do usuário**: com um menu aberto, o *hover* em outro título **não trocava** o menu.
+- **A causa é medida (A/B)**: o Electron só importa `gtk_menu_popup` (caminho legado) e **não**
+  `gtk_menu_popup_at_widget`/`gtk_menu_attach_to_widget` — as APIs que o `GtkMenuBar` usa para o
+  *hover*. Um app GTK3 puro faz os dois gestos; o Electron, não ⇒ **não é consertável no menu
+  nativo**.
+- **A correção**: `src/renderer/menu-bar.ts` (NOVO, 669 linhas) — a **decisão** é pura
+  (`groupByCategory`, `openMenu`/`closeMenu`/`toggleMenu`/`switchMenu`, `parseAccelerator`/
+  `matchesAccelerator`/`findItemByAccelerator`) e a **pintura** (`attachMenuBar`) é testada
+  contra o **DOM falso** do repo (`test/helpers/fake-dom.ts`).
+- **Comportamento**: File/Edit/Find/View/Debug (a ordem do core; categoria desconhecida vai para
+  o fim, "Outros" por último); clique abre/fecha; **hover troca** (sem menu aberto, hover **não**
+  abre); `Esc`/clique fora fecham; `aria-expanded`/`aria-haspopup`; atalho à direita do rótulo;
+  teclado (`↓`/`↑` nos itens, `→`/`←` entre títulos, `Enter`/espaço abrem); o `onClose` devolve o
+  **foco ao editor** (sem isso a digitação iria para o título).
+- **Atalhos que só o menu nativo tratava** agora são do renderer (`menuAcceleratorAction`):
+  `Ctrl+N`, `F5`/`Shift+F5`/`F9`/`F10`/`F11`/`Shift+F11`/`F3`/`Shift+F3`/`Ctrl+Shift+D`. Os que o
+  **canvas já cobre** (`Ctrl+S`/`Ctrl+O`/`Ctrl+Z`/…) **não** são interceptados (senão o diálogo
+  de abrir abriria duas vezes).
+- **O canal `scribe:menu:action` ficou morto**: o `main` faz `setMenu(null)` e o listener do
+  renderer saiu; o `onMenuAction` do preload **fica** (um preload velho não quebra). O caminho
+  único de execução é o `executeCommandById` (paleta, Quick Open e menu compartilham).
+- **Menu = tokens `--s-*`**: a barra e o popup usam só os tokens da casca (o teste
+  `renderer-shell-tokens` trava cor literal).
+
+### 🎯 Hit-test do soft wrap
+
+- O bug: numa linha lógica quebrada, o `x` era medido desde o **início da linha lógica** ⇒ o
+  clique na 2ª row apontava para a 1ª (`col = 4` em vez de `23`).
+- `src/renderer/hit-test.ts` (NOVO, 212 linhas, **puro**) — o inverso do render:
+  `column = seg.start + columnFromPointerX(x, seg.text.length, gutterWidth, charWidth)`, com
+  clamp pela **largura do segmento** (o wrap não recua a indentação; clique à direita da row =
+  fim **da row**, não da linha lógica).
+- Fiado nos **4** pontos que calculam coluna pelo ponteiro: caret (clique/arrasto), hover do LSP
+  e hover do DAP (`test/renderer-hit-test-wiring.test.ts` garante a fiação e que o
+  `columnFromPointerX` direto saiu do renderer).
+
+### 🔤 Baseline dos glifos (o `bearingY` era a altura do bitmap)
+
+- O rasterizador usava `textBaseline = "top"` ⇒ a tinta colava no topo da faixa e as ascendentes
+  eram **cortadas**. Agora a caixa de conteúdo da fonte vem de `measureText`
+  (`fontBoundingBoxAscent/Descent` → `actualBoundingBox*` → `0.8/0.2 × sizePx`), **cacheada por
+  string de fonte**; a baseline cai em `halfLeading + ascent` (`computeBaselineRow`, puro) e o
+  bitmap cobre a caixa inteira. `bearingY` documentado (e usado) como **baseline relativa ao topo
+  do bitmap** em `atlas.ts`.
+
+### 📄 Novo arquivo (`Ctrl+N`)
+
+- `file.new` no **core** (`listCommands`), no **menu File**, no **IPC** (`ipc-contract` + array
+  `IPC_METHODS`) e no **preload** (`newFile()`), com o item também na **paleta**.
+- O `main` mostra o diálogo **"salvar como"** (`showSaveDialog` no `FileDialogPort`, **opcional**
+  de propósito) e cria o arquivo vazio no caminho escolhido. O diálogo **é a autorização** (com
+  confirmação de sobrescrita) ⇒ o confinamento das raízes da workspace **não** se aplica (é o do
+  `workspace.createFile`); `mkdir` recursivo do pai antes do `writeFile`.
+- Erros **tipados** (nunca crash): `dialog-unavailable` (sem diálogo injetado) e
+  `file-new-failed` (disco/permissão). Cancelar ⇒ `null`.
+- O renderer **intercepta** o `file.new` **antes** do IPC (o mesmo caminho da paleta): com o
+  **flush do lote** antes, o novo arquivo não perde digitação pendente. Preload antigo (sem
+  `newFile`) ⇒ aviso explícito, sem crash.
+
+### Verificação
+
+- Gates: `typecheck`/`lint` exit 0 · **1671 testes / 116 arquivos** (baseline 1627/112).
+- 4 arquivos de teste novos: `renderer-menu-bar.test.ts` (588 linhas), `renderer-hit-test.test.ts`,
+  `renderer-hit-test-wiring.test.ts`, `renderer-text-baseline.test.ts`.
+- 📦 AppImage `release/Scribe-0.7.2.AppImage` (boot com `env` limpo — ver "Estado do repositório").
+
+### Limitações declaradas
+
+- A barra **não** tem submenus nem ícones (o menu do core é plano por categoria).
+- O `file.new` **sobrescreve** o arquivo escolhido se o usuário confirmar no diálogo do sistema
+  (não há checagem `wx` extra: o diálogo é a autorização).
+- O `Ctrl+N` é do **renderer** (o core sozinho não tem diálogo ⇒ lança `no-dialog` de propósito).
+
+---
+
 ## 🗂️ Estado do repositório
 
 - ✅ **Working tree LIMPO na abertura desta sessão** (2026-10-20) — a pendência de 2026-10-17
@@ -1373,6 +1461,17 @@ o salvar ou o find bar esperassem por ele, o editor "engasgaria". Com `preemptib
   ⚠️ O `AppImage` tem **lock de instância única** (`app.requestSingleInstanceLock()`): se outro
   Scribe estiver aberto, o novo **sai em silêncio** (exit 0, sem log) — para testar em paralelo,
   use `--user-data-dir=<dir> diferente`.
+- ✅ **Working tree limpo ao fim desta sessão** (2026-10-21, noite, **0.7.2**) — **1 commit**:
+  `feat: menu no DOM + hit-test do soft wrap + baseline + novo arquivo (0.7.2)` (ver
+  `git log --oneline -3`).
+- ✅ **📦 AppImage 0.7.2** — `release/Scribe-0.7.2.AppImage`, gerado depois dos gates (typecheck +
+  lint + 1671 testes) e **testado com `env` limpo** (`env -i PATH=/usr/bin:/bin HOME=$HOME
+  xvfb-run -a ./release/Scribe-0.7.2.AppImage --no-sandbox`): sobe, os 2 servidores LSP iniciam e
+  o plugin host fica pronto. O **menu do DOM** foi verificado por **CDP** no build real
+  (`/tmp/opencode/cdp-menu.mjs` + `cdp-menu2.mjs`): títulos `File/Edit/Find/View/Debug`, clique
+  abre, **hover troca** (`aria-expanded` acompanha), popup lista "Abrir arquivo/Novo
+  arquivo/Salvar" com atalhos, `Esc` fecha; grid `24px | 772px | 24px` (a barra não empurra a
+  status bar).
 - ✅ **Harness de verificação do grep** (reutilizável): `/tmp/opencode/cdp-grep3.mjs` (a 1ª
   rodada completa do E2E do grep) e `/tmp/opencode/cdp-grep5*.mjs` (a 2ª rodada, por fase).
 - ✅ **Servidores LSP instalados** — `typescript-language-server` + `typescript@5` + `pyright`

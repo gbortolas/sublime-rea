@@ -4,6 +4,75 @@ Todas as mudanças notáveis neste projeto.
 
 ---
 
+## [0.7.2] — 2026-10-21 (noite)
+
+### 🧭 Menu bar no DOM — o menu nativo saiu (o *hover* que não trocava)
+
+- **O bug**: com um menu aberto, passar o mouse por cima de **outro** título não trocava o menu.
+  A causa é **medida** (A/B): o Electron só importa `gtk_menu_popup` (o caminho legado) e **não**
+  `gtk_menu_popup_at_widget`/`gtk_menu_attach_to_widget` — as APIs que o `GtkMenuBar` usa para o
+  *hover*. Um app GTK3 puro faz os dois gestos; o Electron, não ⇒ **não era consertável no menu
+  nativo**.
+- **A correção**: barra de menu **no DOM** (`src/renderer/menu-bar.ts`, novo) — a casca já é
+  VS Code-like. De quebra, o menu herda a **tipografia única** da casca (antes o menu nativo era
+  uma "fonte frankenstein").
+- **Comportamento**: títulos na ordem do core (File, Edit, Find, View, Debug); clique abre/fecha;
+  **hover troca** o menu aberto; `Esc`/clique fora fecham; `aria-expanded`/`aria-haspopup`;
+  atalho exibido **à direita** do rótulo (dimmed); navegação por teclado (`↑`/`↓` nos itens,
+  `←`/`→` entre títulos, `Enter`/espaço abrem); foco devolvido ao editor ao fechar.
+- **Atalhos que só o menu nativo tratava** agora são do renderer: `Ctrl+N`, `F5`/`Shift+F5`,
+  `F9`, `F10`, `F11`/`Shift+F11`, `F3`/`Shift+F3`, `Ctrl+Shift+D`. Os que o canvas já cobre
+  (`Ctrl+S`, `Ctrl+O`, `Ctrl+Z`, …) **não** são interceptados pela barra (evita diálogo duplo).
+- **O canal `scribe:menu:action` morreu**: o `main` faz `setMenu(null)` e não emite mais. O
+  `onMenuAction` do preload **fica** (compatibilidade: um preload velho não quebra), mas o
+  renderer não se inscreve mais — o caminho único é `executeCommandById` (paleta, Quick Open e
+  menu).
+
+### 🎯 Hit-test do soft wrap — o clique na 2ª row caía na coluna errada
+
+- Com uma linha lógica quebrada em **rows visuais**, o `y` virava row visual (e daí a linha
+  lógica — certo), mas o `x` era medido **desde o início da linha lógica** ⇒ o clique na 2ª row
+  apontava para a 1ª (`col = 4` quando o certo era `23`).
+- `src/renderer/hit-test.ts` (novo) é a fonte da verdade do inverso do render: cada segmento é
+  desenhado em `x = paddingLeft` (o wrap **não** recua a indentação) ⇒
+  `column = seg.start + columnFromPointerX(x, seg.text.length, gutterWidth, charWidth)`, com o
+  **clamp pela largura do segmento** (clique à direita da row = fim da row, não da linha lógica).
+- O módulo é **puro** (sem DOM/canvas) e está fiado nos **4** pontos que calculam coluna pelo
+  ponteiro: caret (clique/arrasto), hover do LSP e hover do DAP. O `columnFromPointerX` direto
+  saiu do renderer.
+
+### 🔤 Baseline dos glifos — a tinta colava no topo e cortava as ascendentes
+
+- O rasterizador usava `textBaseline = "top"` e a altura do bitmap como se fosse a baseline.
+  Resultado: a tinta ficava colada no topo da faixa e as ascendentes eram **cortadas**; o
+  `bearingY` do atlas era, na verdade, a **altura do bitmap**.
+- Agora a caixa de conteúdo da fonte é lida de `measureText` (`fontBoundingBoxAscent/Descent`,
+  com degraus de degradação para `actualBoundingBox*` e para `0.8/0.2 × sizePx`), **cacheada por
+  string de fonte**, e a baseline cai em `halfLeading + ascent` dentro do bitmap
+  (`computeBaselineRow`, puro e testado). A altura do bitmap cobre a caixa inteira; a baseline
+  nunca sobe acima da ascendente (a tinta não é cortada).
+- `GlyphBitmap.bearingY`/`PlacedGlyph.bearingY` passam a documentar o que sempre deveriam ser: a
+  **baseline relativa ao topo do bitmap** (não a altura).
+
+### 📄 Novo arquivo (Ctrl+N)
+
+- **Comando `file.new`** no core (anunciado na paleta) + **item no menu File** + `Ctrl+N`.
+- **IPC `file.new`** e `bridge.newFile()`: o `main` abre o diálogo **"salvar como"** e cria o
+  arquivo (vazio) no caminho escolhido — o diálogo **é a autorização** (o usuário confirma a
+  sobrescrita), por isso o confinamento das raízes da workspace **não** se aplica aqui.
+- Cancelar ⇒ `null` (não é erro). Sem diálogo injetado ⇒ `IpcProtocolError("dialog-unavailable")`;
+  falha de disco ⇒ `"file-new-failed"` (erro tipado, nunca crash). O `main` faz `mkdir`
+  recursivo do diretório pai antes de escrever.
+- **Degradação explícita** num preload antigo (sem `newFile`): aviso, sem crash.
+
+### Verificação
+
+- Gates: `typecheck` / `lint` exit 0 · **1671 testes / 116 arquivos** (baseline 1627/112; +44
+  em 4 arquivos novos: menu bar, hit-test, fiação do hit-test e baseline).
+- AppImage `Scribe-0.7.2.AppImage`.
+
+---
+
 ## [0.7.1] — 2026-10-21 (fim de tarde)
 
 ### 🔍 Grep — a busca em todos os arquivos saiu do processo principal

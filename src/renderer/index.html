@@ -16,6 +16,7 @@
       nada aqui estiliza texto de documento.
 
       Layout (grid):
+        #app        = [menu-bar | workbench | status-bar]
         #workbench  = [activity-bar | sidebar | editor-area]
         #editor-area= [tab-bar / breadcrumbs / editor-stack]
         #status-bar = rodapé de largura total
@@ -24,6 +25,18 @@
       DOM não é afetado pela CSP (não é fetch) — segue `default-src 'none'`.
     -->
     <div id="app" role="application" aria-label="Scribe">
+      <!--
+        Barra de menu (do **DOM**).
+
+        ⚠️ **Por que no DOM**: o menu **nativo** do Electron (GTK) não troca de menu quando o
+        mouse passa por cima de outro título — o Electron só importa `gtk_menu_popup` (o
+        caminho legado) e **não** `gtk_menu_popup_at_widget`/`gtk_menu_attach_to_widget` (as
+        APIs que o `GtkMenuBar` usa no *hover*) ⇒ não é consertável no menu nativo. O renderer
+        monta os títulos e o popup (`src/renderer/menu-bar.ts`).
+
+        É a **primeira linha** do grid do `#app` (menu | workbench | status bar).
+      -->
+      <nav id="menu-bar" role="menubar" aria-label="Menu principal"></nav>
       <div id="workbench">
         <!-- Faixa de atividades: só ações que existem de fato. -->
         <nav id="activity-bar" aria-label="Barra de atividades">

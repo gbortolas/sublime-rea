@@ -18,7 +18,7 @@ import { lstat, mkdir, readdir, readFile, realpath, stat, writeFile } from "node
 import { homedir } from "node:os";
 import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
-import type { BrowserWindow as ElectronBrowserWindow } from "electron";
+import type { BrowserWindow as ElectronBrowserWindow, SaveDialogOptions as ElectronSaveDialogOptions } from "electron";
 
 import { createNodeFileSystem } from "../core/buffer";
 import { createEditorCore as composeEditorCore } from "../core/editor";
@@ -69,6 +69,10 @@ export type { EditorCore, EditorCoreOptions } from "../core/editor";
 /**
  * Canais legados do host de extensões (a preload duplica as strings — ela não importa este
  * módulo). Mantidos para a *liveness* `ping`/`ready` que a ponte tipada do preload consome.
+ *
+ * ⚠️ `menuAction` ficou **morto**: o menu nativo foi removido (o menu é do DOM) ⇒ o `main`
+ * não emite mais neste canal. A constante fica (o preload ainda declara o canal — um preload
+ * velho não quebra) e nada mais depende dela.
  */
 export const IPC_CHANNELS = {
   ping: "scribe:host:ping",
@@ -138,6 +142,14 @@ export function createIpcSignalRegistry(): IpcSignalRegistry {
 /** Port mínimo de diálogo de arquivo do main (produção = `dialog.showOpenDialog` do Electron). */
 export interface FileDialogPort {
   showOpenDialog(): Promise<string | null>;
+  /**
+   * Diálogo "salvar como" — devolve o caminho escolhido (`null` = cancelado).
+   *
+   * ⚠️ **Opcional de propósito**: um `deps.dialog` injetado por um teste (ou por um host mais
+   * antigo) pode não ter o método ⇒ o `main` degrada com
+   * `IpcProtocolError("dialog-unavailable", …)` (nunca um crash).
+   */
+  showSaveDialog?(options?: { readonly defaultPath?: string }): Promise<string | null>;
 }
 
 /** Dependências injetadas no despacho de IPC (tudo opcional — os testes passam o que precisam). */
@@ -1241,6 +1253,45 @@ async function runGitOrFail(args: readonly string[], root: string): Promise<void
   }
 }
 
+/**
+ * Cria um arquivo **novo** (vazio) no caminho escolhido no diálogo "salvar como".
+ *
+ * ⚠️ **O diálogo é a autorização**: o usuário escolheu o caminho (e confirmou a sobrescrita
+ * quando o arquivo já existia) ⇒ o `main` escreve com `flag: "w"` (sobrescreve o escolhido).
+ * Por isso o confinamento das raízes da workspace (que é do `workspace.createFile`) **não**
+ * se aplica aqui — e o `flag: "wx"` (que falha se o arquivo existe) também não.
+ *
+ * O cancelamento do usuário ⇒ `null` (não é erro). Falha de disco/permissão ⇒
+ * `IpcProtocolError("file-new-failed", …)` (erro tipado, nunca um crash).
+ */
+async function createNewFile(
+  dialog: FileDialogPort,
+  options?: { readonly defaultPath?: string },
+): Promise<string | null> {
+  if (typeof dialog.showSaveDialog !== "function") {
+    throw new IpcProtocolError(
+      "dialog-unavailable",
+      "nenhum diálogo de 'salvar como' foi injetado",
+    );
+  }
+  const chosen = await dialog.showSaveDialog(options);
+  if (chosen === null) return null;
+  const absolute = resolve(chosen);
+  try {
+    // O diretório pai pode não existir (o usuário escolheu um caminho novo) ⇒ `mkdir`
+    // recursivo antes de escrever.
+    await mkdir(dirname(absolute), { recursive: true });
+    // `flag: "w"`: cria **ou** sobrescreve (o diálogo já deu o consentimento).
+    await writeFile(absolute, "", { encoding: "utf8", flag: "w" });
+  } catch (error) {
+    throw new IpcProtocolError(
+      "file-new-failed",
+      `não foi possível criar "${absolute}": ${messageOf(error)}`,
+    );
+  }
+  return absolute;
+}
+
 async function dispatchIpc(
   core: EditorCore,
   request: IpcRequest,
@@ -1264,6 +1315,17 @@ async function dispatchIpc(
         );
       }
       return deps.dialog.showOpenDialog();
+    }
+    case "file.new": {
+      // ⚠️ O `file.new` **precisa** do diálogo "salvar como" (é ele que escolhe o caminho
+      // e autoriza a escrita) ⇒ sem ele, o pedido falha com erro tipado (nunca um crash).
+      if (deps.dialog === undefined) {
+        throw new IpcProtocolError(
+          "dialog-unavailable",
+          "file.new: nenhum diálogo foi injetado",
+        );
+      }
+      return createNewFile(deps.dialog);
     }
     case "document.text":
       return core.documentText(requireHandle(request.args[0], "document.text"));
@@ -1491,6 +1553,18 @@ async function dispatchIpc(
           trackOpenDocument(core, handle, resolve(path));
         }
         return;
+      }
+      // file.new também precisa do diálogo ("salvar como"): o main cria o arquivo e devolve
+      // o caminho (o renderer intercepta o comando **antes** do IPC — o valor aqui é um
+      // *superset* do `void` declarado no contrato).
+      if (commandId === "file.new") {
+        if (deps.dialog === undefined) {
+          throw new IpcProtocolError(
+            "dialog-unavailable",
+            "command.execute: file.new requer diálogo de 'salvar como'",
+          );
+        }
+        return createNewFile(deps.dialog);
       }
       return core.executeCommand(commandId);
     }
@@ -2197,13 +2271,7 @@ export function packageRoots(appPath: string, userData: string): Partial<Record<
  */
 export async function startMainProcess(): Promise<void> {
   const electron = await import("electron");
-  const { app, BrowserWindow, dialog, ipcMain, Menu } = electron;
-
-  function sendMenuAction(window: ElectronBrowserWindow | null, action: string): void {
-    if (window !== null && !window.isDestroyed()) {
-      window.webContents.send(IPC_CHANNELS.menuAction, action);
-    }
-  }
+  const { app, BrowserWindow, dialog, ipcMain } = electron;
 
   if (!app.requestSingleInstanceLock()) {
     app.quit();
@@ -2236,6 +2304,30 @@ export async function startMainProcess(): Promise<void> {
           : await dialog.showOpenDialog(mainWindow, { properties: ["openFile"] });
       const chosen = result.filePaths[0];
       return result.canceled || chosen === undefined ? null : chosen;
+    },
+    async showSaveDialog(options?: { readonly defaultPath?: string }): Promise<string | null> {
+      const defaultPath = options?.defaultPath;
+      const saveOptions: ElectronSaveDialogOptions = {
+        ...(defaultPath === undefined ? {} : { defaultPath }),
+        filters: [
+          { name: "Arquivos de texto", extensions: ["txt", "md", "markdown"] },
+          {
+            name: "Código",
+            extensions: [
+              "ts", "tsx", "js", "jsx", "mjs", "cjs", "json", "py", "rs", "go",
+              "c", "h", "cpp", "hpp", "java", "cs", "rb", "php", "css", "html",
+              "sh", "yml", "yaml", "toml", "xml", "sql",
+            ],
+          },
+          { name: "Todos os arquivos", extensions: ["*"] },
+        ],
+      };
+      const result =
+        mainWindow === null || mainWindow.isDestroyed()
+          ? await dialog.showSaveDialog(saveOptions)
+          : await dialog.showSaveDialog(mainWindow, saveOptions);
+      const chosen = result.filePath;
+      return result.canceled || chosen === undefined || chosen.length === 0 ? null : chosen;
     },
   };
 
@@ -2279,8 +2371,12 @@ export async function startMainProcess(): Promise<void> {
       event.preventDefault();
       console.warn(`Scribe: navegação bloqueada: ${url}`);
     });
-    // Menu in-window (rápido no Linux, sem D-Bus lag)
-    window.setMenu(createAppMenu(window));
+    // **Sem menu nativo**: o menu é do **DOM** (a casca é VS Code-like) — o menu nativo do
+    // GTK não troca de menu no hover do mouse (e não é consertável: o Electron não importa
+    // `gtk_menu_popup_at_widget`). `setMenu(null)` remove a barra nativa ⇒ o renderer
+    // assume os aceleradores e os itens (o `scribe:menu:action` fica **morto** — o preload
+    // ainda expõe `onMenuAction`, inofensivo: se o main nunca emite, o callback nunca roda).
+    window.setMenu(null);
     // Diagnóstico: se o renderer morrer (crash/OOM), a janela fecha e o app inteiro sai
     // (`window-all-closed`). Logar o motivo é o que permite diagnosticar esse tipo de morte.
     window.webContents.on("render-process-gone", (_event, details) => {
@@ -2343,84 +2439,6 @@ export async function startMainProcess(): Promise<void> {
   });
 
   app.on("will-quit", shutdown);
-
-  /** Constrói o menu nativo para uma janela específica (in-window, sem D-Bus). */
-  const createAppMenu = (win: ElectronBrowserWindow): Electron.Menu => {
-    const template: Electron.MenuItemConstructorOptions[] = [
-      {
-        label: "File",
-        submenu: [
-          { label: "Open", accelerator: "CmdOrCtrl+O", click: () => sendMenuAction(win, "file.open") },
-          { label: "Save", accelerator: "CmdOrCtrl+S", click: () => sendMenuAction(win, "file.save") },
-          { type: "separator" },
-          { label: "Quit", accelerator: "CmdOrCtrl+Q", click: () => app.quit() },
-        ],
-      },
-      {
-        label: "Edit",
-        submenu: [
-          { label: "Undo", accelerator: "CmdOrCtrl+Z", click: () => sendMenuAction(win, "edit.undo") },
-          { label: "Redo", accelerator: "CmdOrCtrl+Shift+Z", click: () => sendMenuAction(win, "edit.redo") },
-          { type: "separator" },
-          { label: "Cut", accelerator: "CmdOrCtrl+X", click: () => sendMenuAction(win, "edit.cut") },
-          { label: "Copy", accelerator: "CmdOrCtrl+C", click: () => sendMenuAction(win, "edit.copy") },
-          { label: "Paste", accelerator: "CmdOrCtrl+V", click: () => sendMenuAction(win, "edit.paste") },
-          { label: "Select All", accelerator: "CmdOrCtrl+A", click: () => sendMenuAction(win, "edit.selectAll") },
-        ],
-      },
-      {
-        label: "Find",
-        submenu: [
-          { label: "Find", accelerator: "CmdOrCtrl+F", click: () => sendMenuAction(win, "find.open") },
-          { label: "Find Next", accelerator: "F3", click: () => sendMenuAction(win, "find.next") },
-          { label: "Find Previous", accelerator: "Shift+F3", click: () => sendMenuAction(win, "find.prev") },
-        ],
-      },
-      {
-        label: "View",
-        submenu: [
-          { label: "Toggle Theme", accelerator: "CmdOrCtrl+Shift+T", click: () => sendMenuAction(win, "view.toggleTheme") },
-          { type: "separator" },
-          // Itens padrão do Electron: reload, devtools, zoom e tela cheia. Sem eles o
-          // `Ctrl+W` não fechava a janela e não havia forma de recarregar a casca.
-          { role: "reload" },
-          { role: "toggleDevTools" },
-          { type: "separator" },
-          { role: "resetZoom" },
-          { role: "zoomIn" },
-          { role: "zoomOut" },
-          { type: "separator" },
-          { role: "togglefullscreen" },
-        ],
-      },
-      {
-        label: "Debug",
-        submenu: [
-          { label: "Start Debugging", accelerator: "F5", click: () => sendMenuAction(win, "debug.start") },
-          { label: "Stop Debugging", accelerator: "Shift+F5", click: () => sendMenuAction(win, "debug.stop") },
-          { type: "separator" },
-          { label: "Toggle Breakpoint", accelerator: "F9", click: () => sendMenuAction(win, "debug.toggleBreakpoint") },
-          { label: "Debug Panel", accelerator: "CmdOrCtrl+Shift+D", click: () => sendMenuAction(win, "debug.togglePanel") },
-          { type: "separator" },
-          { label: "Step Over", accelerator: "F10", click: () => sendMenuAction(win, "debug.stepOver") },
-          { label: "Step Into", accelerator: "F11", click: () => sendMenuAction(win, "debug.stepInto") },
-          { label: "Step Out", accelerator: "Shift+F11", click: () => sendMenuAction(win, "debug.stepOut") },
-        ],
-      },
-      {
-        // Menu de janela: sem ele o `Ctrl+W` **não** fechava a janela (o atalho padrão do
-        // Electron vive no papel `close`).
-        label: "Window",
-        submenu: [
-          { role: "minimize" },
-          { role: "zoom" },
-          { type: "separator" },
-          { role: "close" },
-        ],
-      },
-    ];
-    return Menu.buildFromTemplate(template);
-  };
 
   await app.whenReady();
 
